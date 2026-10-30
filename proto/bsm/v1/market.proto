@@ -1,0 +1,41 @@
+// bsm.v1 market records: the two normalised record types every source maps to
+// (bsm_microstructure.py BookSnapshot / Trade), plus a oneof envelope for mixed streams.
+//
+// Prices are in the instrument's own units; Kalshi prices are probabilities in [0, 1]
+// (dollars per $1 contract). Timestamps are UTC epoch seconds as doubles, matching the store.
+syntax = "proto3";
+
+package bsm.v1;
+
+// One price level of a book side.
+message Level {
+  double price = 1;
+  double qty = 2;  // 0 when the source has no size (e.g. Kalshi candles)
+}
+
+// Order-book snapshot; bids and asks are best first.
+message BookSnapshot {
+  double ts = 1;
+  string market = 2;
+  repeated Level bids = 3;
+  repeated Level asks = 4;
+  string source = 5;  // plug-in name: synthetic, kalshi_book, kalshi_markets, kalshi_candles, vendor_drop
+}
+
+// Trade print.
+message Trade {
+  double ts = 1;
+  string market = 2;
+  double price = 3;
+  double qty = 4;
+  sint32 side = 5;  // +1 buyer-initiated, -1 seller-initiated, 0 unknown
+  string source = 6;
+}
+
+// Envelope for a stream that mixes snapshots and trades.
+message MarketRecord {
+  oneof record {
+    BookSnapshot book = 1;
+    Trade trade = 2;
+  }
+}

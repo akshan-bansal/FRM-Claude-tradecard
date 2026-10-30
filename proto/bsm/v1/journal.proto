@@ -1,0 +1,221 @@
+// bsm.v1 data-maturation journal (bsm_maturation.py).
+//
+// A forecast is written when it is made; its matured record is written once the label is
+// knowable and carries matured_date, the day the label became known (use it to embargo).
+// Field names deliberately equal the JSON keys in journal/*.jsonl, including S0, v0, T and p0,
+// so the existing JSON lines parse into these messages unchanged. Dates are ISO yyyy-mm-dd
+// strings; instants are ISO-8601 UTC strings (made_at, matured_at) or epoch seconds (ts).
+syntax = "proto3";
+
+package bsm.v1;
+
+// ---------------------------------------------------------------- var stream
+// Marked-to-model contract terms frozen into each VaR forecast.
+message ContractParams {
+  double rate = 1;
+  double dividend = 2;
+  double skew = 3;        // beta in sigma_K = v - beta ln(F/K)
+  double vol_floor = 4;
+  repeated double level_map = 5;  // ATM vol v = level_map[0] + level_map[1] * VIX / 100
+}
+
+// VaR of a rolling S&P digital for one horizon, strike and model.
+message VarForecast {
+  string id = 1;          // var|<asof>|h<horizon>|m<moneyness>|<model>
+  string stream = 2;      // "var"
+  string made_at = 3;
+  string asof = 4;        // last data date the forecast used
+  int32 horizon = 5;      // trading days
+  double moneyness = 6;
+  string model = 7;       // normal | gpd | skewt | fhs | spectral
+  double strike = 8;
+  double S0 = 9;
+  double v0 = 10;
+  double tenor = 11;      // years
+  double p0 = 12;         // contract price at asof
+  double position = 13;
+  ContractParams contract = 14;
+  repeated double levels = 15;
+  repeated double var = 16;        // loss quantile at each level
+  repeated double quantiles = 17;  // loss quantiles on the module's 103-point grid (QGRID)
+  // spectral model only: series-trust gate outcome
+  optional string action = 18;     // taylor4 | reprice
+  optional bool ratio_gate = 19;
+  optional bool crossing = 20;
+  optional double radius = 21;     // tail-consistent stress radius
+}
+
+message VarMatured {
+  string id = 1;
+  string matured_date = 2;
+  string matured_at = 3;
+  string asof = 4;
+  int32 horizon = 5;
+  double moneyness = 6;
+  string model = 7;
+  double realized_loss = 8;
+  repeated bool breach = 9;      // per level
+  repeated double pinball = 10;  // per level
+  double pit = 11;
+}
+
+// ---------------------------------------------------------------- kalshi stream
+// One open Kalshi contract at snapshot time: market quote and the model's p_Q.
+message KalshiForecast {
+  string id = 1;              // kalshi|<ticker>|<epoch>
+  string stream = 2;          // "kalshi"
+  string made_at = 3;
+  double ts = 4;
+  string series = 5;          // KXINXU | KXINX
+  string event = 6;
+  string ticker = 7;
+  string strike_type = 8;     // greater | greater_or_equal | less | less_or_equal | between
+  optional double floor = 9;
+  optional double cap = 10;
+  string close_time = 11;
+  string expiry = 12;         // settlement day (New York)
+  optional double bid = 13;   // yes bid, probability units
+  optional double ask = 14;
+  double bid_size = 15;
+  double ask_size = 16;
+  string state_date = 17;     // last close before expiry used as model state
+  double S0 = 18;
+  double v0 = 19;
+  double T = 20;              // trading years from state_date to expiry
+  double p_model = 21;
+}
+
+message KalshiMatured {
+  string id = 1;
+  string matured_date = 2;
+  string matured_at = 3;
+  string ticker = 4;
+  int32 outcome = 5;          // 1 = settled yes
+  optional string settlement = 6;  // Kalshi expiration_value, verbatim
+}
+
+// Backfilled settled contract (data/kalshi/<series>_settled.csv): already matured.
+message KalshiSettled {
+  string series = 1;
+  string event = 2;
+  string ticker = 3;
+  string strike_type = 4;
+  optional double floor = 5;
+  optional double cap = 6;
+  string close_time = 7;
+  string expiry = 8;
+  optional double quote_ts = 9;   // end of the hourly candle at or before 09:00 New York
+  optional double bid = 10;
+  optional double ask = 11;
+  int32 result = 12;
+  optional string settlement = 13;
+  string state_date = 14;
+  double S0 = 15;
+  double v0 = 16;
+}
+
+// ---------------------------------------------------------------- cross stream
+message CrossBook {
+  double S0 = 1;              // digital strike (ATM at asof)
+  double y0 = 2;              // bond coupon (par at asof)
+  repeated double units = 3;  // S&P digital, EUR, JPY, UST 10y face
+}
+
+message CrossForecast {
+  string id = 1;
+  string stream = 2;          // "cross"
+  string made_at = 3;
+  string asof = 4;
+  int32 horizon = 5;
+  string model = 6;           // gaussian | gpd | fhs
+  repeated double state = 7;  // SPX, VIX, UST2Y, UST10Y, EURUSD, USDJPY in decimal units
+  CrossBook book = 8;
+  repeated double levels = 9;
+  repeated double var = 10;
+  repeated double quantiles = 11;
+}
+
+message CrossMatured {
+  string id = 1;
+  string matured_date = 2;
+  string matured_at = 3;
+  string asof = 4;
+  int32 horizon = 5;
+  string model = 6;
+  double realized_loss = 7;
+  repeated bool breach = 8;
+  double pit = 9;
+}
+
+// ---------------------------------------------------------------- provenance
+message FetchLog {
+  string fetched_at = 1;
+  string series = 2;
+  int64 rows = 3;
+  string first = 4;
+  string last = 5;
+  string sha256 = 6;
+  int32 revised = 7;
+  int32 dropped = 8;
+}
+
+// journal/config.json: frozen before the first forward forecast (pre-registration).
+message MaturationConfig {
+  message Var {
+    repeated int32 horizons = 1;
+    int32 tenor_days = 2;
+    repeated double moneyness = 3;
+    double position = 4;
+    repeated double levels = 5;
+    int32 n_sims = 6;
+    double tail_frac = 7;
+    optional double tail_k = 8;   // absent = Hill estimate
+    double xi_max = 9;
+    repeated double gammas = 10;
+    double rho_floor = 11;
+    double skew = 12;
+    double rate = 13;
+    double dividend = 14;
+    double vol_floor = 15;
+    repeated double level_map = 16;
+    repeated string models = 17;
+  }
+  message Kalshi {
+    repeated string series = 1;
+    string event_suffix = 2;
+    double skew = 3;
+    double rate = 4;
+    double dividend = 5;
+    int32 snapshot_hour_ny = 6;
+  }
+  message Cross {
+    repeated int32 horizons = 1;
+    int32 window = 2;
+    double tail_k = 3;
+    int32 n_sims = 4;
+  }
+  message Frozen {
+    string at = 1;
+    repeated string history = 2;
+    string source = 3;
+    string code_sha256_16 = 4;
+  }
+  Var var = 1;
+  Kalshi kalshi = 2;
+  Cross cross = 3;
+  Frozen frozen = 4;
+}
+
+// Envelope for shipping any journal record over one channel.
+message JournalEntry {
+  oneof entry {
+    VarForecast var_forecast = 1;
+    VarMatured var_matured = 2;
+    KalshiForecast kalshi_forecast = 3;
+    KalshiMatured kalshi_matured = 4;
+    CrossForecast cross_forecast = 5;
+    CrossMatured cross_matured = 6;
+    FetchLog fetch_log = 7;
+    KalshiSettled kalshi_settled = 8;
+  }
+}

@@ -47,6 +47,29 @@ All journal files are append-only: nothing is rewritten.
 | `journal/fetch_log.jsonl` | One row per FRED fetch, with the file's SHA-256. |
 | `store/` | Raw Kalshi ladders, order books and candles, as gzip JSON lines. |
 
+## Protobuf schemas (`bsm.v1`)
+
+`proto/bsm/v1/` defines every record as a message:
+- **`market.proto`:** `BookSnapshot`, `Trade` and a `MarketRecord` envelope.
+- **`journal.proto`:**
+  - `VarForecast` and `VarMatured`
+  - `KalshiForecast` and `KalshiMatured`
+  - `CrossForecast` and `CrossMatured`
+  - `KalshiSettled`, `FetchLog` and `MaturationConfig`
+  - a `JournalEntry` envelope.
+
+Journal field names equal the JSON keys, so existing lines parse unchanged. Generated Python is
+checked in under `bsm_pb/`. It needs the runtime `protobuf==5.29.3`, which matches protoc 29.3.
+
+```
+python bsm_proto.py validate        # strict parse + exact round trip of everything on disk
+python bsm_proto.py export          # varint length-delimited .pb per stream in exports/
+python bsm_proto.py compile         # regenerate bsm_pb/ after editing a .proto
+```
+
+Parsing is strict, so a field written by the code but missing from the schema fails validation.
+The daily `run` validates at the end of every cycle; the result is in `journal/run.log`.
+
 ## When the evidence matures
 
 `status` prints, for each VaR model, the date at which 250 non-overlapping windows will have

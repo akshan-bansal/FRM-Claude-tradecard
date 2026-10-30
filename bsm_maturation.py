@@ -748,6 +748,13 @@ def run_cycle(data_dir, jdir, store_root, days=40, log=print):
     cross_snapshot(data_dir, jdir, cfg, log)
     kalshi_snapshot(data_dir, jdir, store_root, cfg, log)
     status(data_dir, jdir, cfg, log)
+    try:  # schema drift check against proto/bsm/v1 (needs the protobuf runtime)
+        import bsm_proto
+    except ImportError as exc:
+        log(f'  proto validation skipped: {exc}')
+    else:
+        log('PROTO VALIDATION (bsm.v1)')
+        bsm_proto.validate(jdir, data_dir, store_root, log)
 
 
 # ---------------------------------------------------------------------------
