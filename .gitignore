@@ -1,0 +1,11 @@
+# Re-fetchable market data (FRED, Kalshi backfill) and raw tick store
+data/
+store/
+
+# Append-only forecast journal grows daily; the frozen pre-registered config is tracked
+journal/*
+!journal/config.json
+
+__pycache__/
+*.pyc
+*.tmp

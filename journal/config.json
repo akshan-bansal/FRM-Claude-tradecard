@@ -1,0 +1,73 @@
+{
+  "var": {
+    "horizons": [
+      1,
+      5
+    ],
+    "tenor_days": 21,
+    "moneyness": [
+      0.97,
+      1.0,
+      1.03
+    ],
+    "position": 1.0,
+    "levels": [
+      0.9,
+      0.95,
+      0.99
+    ],
+    "n_sims": 4000,
+    "tail_frac": 0.1,
+    "tail_k": 10.0,
+    "xi_max": 0.45,
+    "gammas": [
+      1.0,
+      0.75,
+      0.5
+    ],
+    "rho_floor": 0.2,
+    "skew": -0.3,
+    "rate": 0.04,
+    "dividend": 0.015,
+    "vol_floor": 0.02,
+    "level_map": [
+      0.0,
+      1.0
+    ],
+    "models": [
+      "normal",
+      "gpd",
+      "skewt",
+      "fhs",
+      "spectral"
+    ]
+  },
+  "kalshi": {
+    "series": [
+      "KXINXU",
+      "KXINX"
+    ],
+    "event_suffix": "H1600",
+    "skew": -0.3,
+    "rate": 0.04,
+    "dividend": 0.015,
+    "snapshot_hour_ny": 9
+  },
+  "cross": {
+    "horizons": [
+      5
+    ],
+    "window": 504,
+    "tail_k": 4.0,
+    "n_sims": 5000
+  },
+  "frozen": {
+    "at": "2026-10-30T15:44:12+00:00",
+    "history": [
+      "2016-10-31",
+      "2026-10-29"
+    ],
+    "source": "tail index and tempering powers from the backtest tuning split",
+    "code_sha256_16": "dec4a60bcbe3e638"
+  }
+}
