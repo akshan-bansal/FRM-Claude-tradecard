@@ -38,15 +38,18 @@ import argparse
 import csv
 import gzip
 import hashlib
+import http.client
 import json
 import math
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
+from scipy import optimize
 
 import bsm_cross_asset as bx
 import bsm_event as be
@@ -150,10 +153,19 @@ def load_config(jdir, required=True):
 # Backfill: FRED daily series (with revision vintages) and settled Kalshi contracts
 # ---------------------------------------------------------------------------
 
-def http_text(url, timeout=60):
-    req = urllib.request.Request(url, headers={'User-Agent': 'bsm-maturation/1.0'})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode('utf-8')
+def http_text(url, timeout=60, retries=3):
+    """GET with retries on transient transport failures (TLS errors, resets, truncated reads)."""
+    for attempt in range(retries):
+        req = urllib.request.Request(url, headers={'User-Agent': 'bsm-maturation/1.0'})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode('utf-8')
+        except (OSError, http.client.HTTPException) as exc:
+            retryable = not isinstance(exc, urllib.error.HTTPError) or exc.code in (429, 500, 502, 503)
+            if retryable and attempt + 1 < retries:
+                time.sleep(2.0 * (attempt + 1))
+                continue
+            raise
 
 
 def refresh_fred(data_dir, jdir, fetch=http_text, log=print):
@@ -569,19 +581,55 @@ def var_scorecard(jdir, log=print):
                 f'{kp:7.3f}   {cc:7.3f}   {bk:6.3f}   {eta}')
 
 
+def gjr_vol_asof(dates, S, state_date, cache):
+    """Annualised one-day-ahead GJR-GARCH vol using S&P closes through state_date only."""
+    if state_date not in cache:
+        i = int(np.searchsorted(dates, np.datetime64(state_date), side='right'))
+        _, s2, _ = be.fit_gjr(np.diff(np.log(S[:i])))
+        cache[state_date] = math.sqrt(be.TRADING_DAYS * s2[-1])
+    return cache[state_date]
+
+
+def fit_ladder(legs, skew=-0.3, rate=0.04, dividend=0.015):
+    """Fit level S and vol v of the BSM digital curve to one quote-time ladder (weights 1/spread).
+
+    Uses only the quotes themselves, so it is point in time; returns (S, v, fitted probabilities).
+    The fitted curve is a coherent distribution across strikes, free of one-sided and stale mids."""
+    S0, v0, T = legs[0]['S0'], legs[0]['v0'], legs[0]['T']
+    mid = np.array([(r['bid'] + r['ask']) / 2 for r in legs])
+    spr = np.array([max(r['ask'] - r['bid'], 0.01) for r in legs])
+
+    def probs(S, v):
+        return np.array([kalshi_prob(r['strike_type'], r['floor'], r['cap'], S, v, T, skew, rate, dividend)
+                         for r in legs])
+
+    fit = optimize.least_squares(lambda th: (probs(S0 * np.exp(th[0]), v0 * np.exp(th[1])) - mid) / spr, [0.0, 0.0])
+    S, v = S0 * math.exp(fit.x[0]), v0 * math.exp(fit.x[1])
+    return S, v, probs(S, v)
+
+
 def _kalshi_rows(data_dir, jdir, cfg):
-    """Matured Kalshi contracts: backfilled settled history plus matured forward snapshots."""
+    """Matured Kalshi contracts: backfilled settled history plus matured forward snapshots.
+
+    Besides the journaled p (VIX vol, frozen config), each row carries p_gjr: the same prior-close
+    model with a one-day GJR-GARCH vol fitted on closes through the state date (point in time)."""
     k = cfg['kalshi']
+    dates, S, _ = be.load_spx_vix(data_dir)
+    vcache = {}
     rows = []
     for series in k['series']:
         for r in _read_csv(os.path.join(data_dir, 'kalshi', f'{series}_settled.csv')):
             T = trading_days(r['state_date'], r['expiry']) / be.TRADING_DAYS
+            S0, v0 = float(r['S0']), float(r['v0'])
+            vg = gjr_vol_asof(dates, S, r['state_date'], vcache)
             rows.append({'source': 'backfill', 'series': series, 'event': r['event'], 'ticker': r['ticker'],
                          'expiry': r['expiry'], 'quote_date': r['expiry'], 'bid': _f(r['bid']), 'ask': _f(r['ask']),
                          'y': int(r['result']), 'strike_type': r['strike_type'], 'floor': _f(r['floor']),
-                         'cap': _f(r['cap']),
-                         'p': kalshi_prob(r['strike_type'], _f(r['floor']), _f(r['cap']), float(r['S0']),
-                                          float(r['v0']), T, k['skew'], k['rate'], k['dividend'])})
+                         'cap': _f(r['cap']), 'S0': S0, 'v0': v0, 'T': T,
+                         'p': kalshi_prob(r['strike_type'], _f(r['floor']), _f(r['cap']), S0, v0, T,
+                                          k['skew'], k['rate'], k['dividend']),
+                         'p_gjr': kalshi_prob(r['strike_type'], _f(r['floor']), _f(r['cap']), S0, vg, T,
+                                              k['skew'], k['rate'], k['dividend'])})
     mat = {r['id']: r for r in read_jsonl(jfile(jdir, 'matured_kalshi'))}
     first_daily = {}
     for r in read_jsonl(jfile(jdir, 'forecasts_kalshi')):
@@ -594,11 +642,15 @@ def _kalshi_rows(data_dir, jdir, cfg):
         # later quotes still count for model calibration but not for market-vs-model scoring.
         local = datetime.fromtimestamp(r['ts'] + 3600 * ny_offset_hours(r['ts']), timezone.utc)
         pre_open = local.hour + local.minute / 60 < 9.5 and str(local.date()) == r['expiry']
+        vg = gjr_vol_asof(dates, S, r['state_date'], vcache)
         rows.append({'source': 'forward', 'series': r['series'], 'event': r['event'], 'ticker': r['ticker'],
                      'expiry': r['expiry'], 'quote_date': str(ny_date(r['ts'])),
                      'bid': _f(r['bid']) if pre_open else float('nan'),
                      'ask': _f(r['ask']) if pre_open else float('nan'), 'y': mat[r['id']]['outcome'],
-                     'strike_type': r['strike_type'], 'floor': _f(r['floor']), 'cap': _f(r['cap']), 'p': r['p_model']})
+                     'strike_type': r['strike_type'], 'floor': _f(r['floor']), 'cap': _f(r['cap']), 'p': r['p_model'],
+                     'S0': r['S0'], 'v0': r['v0'], 'T': r['T'],
+                     'p_gjr': kalshi_prob(r['strike_type'], _f(r['floor']), _f(r['cap']), r['S0'], vg, r['T'],
+                                          k['skew'], k['rate'], k['dividend'])})
     return rows
 
 
@@ -626,12 +678,60 @@ def kalshi_scorecard(data_dir, jdir, cfg, log=print):
         ask = np.array([r['ask'] for r in rs], float)
         two = np.isfinite(bid) & np.isfinite(ask) & (ask > bid) & (bid > 0) & (ask < 1)
         mid = np.clip((bid + ask) / 2, 1e-6, 1 - 1e-6)
-        log('    forecast                 n     Brier    log loss   AUC')
-        for name, q, m in (('model p_Q', p, np.ones_like(two)), ('model p_Q recalibrated', p_lp, np.ones_like(two)),
-                           ('model p_Q (two-sided)', p, two), ('market mid (two-sided)', mid, two)):
+        p_gjr = np.clip(np.array([r['p_gjr'] for r in rs], float), 1e-6, 1 - 1e-6)
+        # ladder-fitted curve: one (S, v) per settlement day and quote day, from that day's quotes only
+        quoted = np.isfinite(bid) & np.isfinite(ask)
+        p_fit = np.full(len(rs), np.nan)
+        vol_ratio = []
+        groups = {}
+        for i in np.where(quoted)[0]:
+            groups.setdefault((rs[i]['event'], rs[i]['quote_date']), []).append(i)
+        for idx in groups.values():
+            if len(idx) >= 4:
+                _, v_fit, pf = fit_ladder([rs[i] for i in idx], cfg['kalshi']['skew'], cfg['kalshi']['rate'],
+                                          cfg['kalshi']['dividend'])
+                p_fit[idx] = pf
+                vol_ratio.append(v_fit / rs[idx[0]]['v0'])
+        fitted = np.isfinite(p_fit)
+        p_fit = np.clip(np.where(fitted, p_fit, 0.5), 1e-4, 1 - 1e-4)
+        # Term-structure correction learned walk-forward: scale VIX by the median ladder-implied
+        # 1-day vol / VIX ratio of settlement days strictly before this one (needs 5 earlier days).
+        day_ratio = {}
+        for key, idx in groups.items():
+            if len(idx) >= 4 and np.isfinite(p_fit[idx[0]]):
+                day_ratio.setdefault(rs[idx[0]]['expiry'], []).append(
+                    fit_ladder([rs[i] for i in idx], cfg['kalshi']['skew'], cfg['kalshi']['rate'],
+                               cfg['kalshi']['dividend'])[1] / rs[idx[0]]['v0'])
+        p_ts = np.full(len(rs), np.nan)
+        for i, r in enumerate(rs):
+            past = [x for dday, xs in day_ratio.items() if dday < r['expiry'] for x in xs]
+            if len(past) >= 5:
+                p_ts[i] = kalshi_prob(r['strike_type'], r['floor'], r['cap'], r['S0'], r['v0'] * float(np.median(past)),
+                                      r['T'], cfg['kalshi']['skew'], cfg['kalshi']['rate'], cfg['kalshi']['dividend'])
+        has_ts = np.isfinite(p_ts)
+        p_ts = np.clip(np.where(has_ts, p_ts, 0.5), 1e-6, 1 - 1e-6)
+        mid_q = np.clip((bid + ask) / 2, 1e-4, 1 - 1e-4)
+        allm = np.ones(len(rs), bool)
+        log('    forecast                       n     Brier    log loss   AUC')
+        for name, q, m in (('model p_Q (VIX vol, frozen)', p, allm), ('model p_Q (GJR 1-day vol)', p_gjr, allm),
+                           ('model p_Q (VIX, same days)', p, has_ts),
+                           ('model p_Q (learned vol scale)', p_ts, has_ts),
+                           ('model p_Q recalibrated', p_lp, allm), ('model p_Q (two-sided)', p, two),
+                           ('market mid (two-sided)', mid, two), ('market mid (quoted ladders)', mid_q, fitted),
+                           ('ladder-fit curve (quoted)', p_fit, fitted)):
             if m.sum() >= 5:
-                log(f'    {name:24s} {int(m.sum()):5d}   {be.brier(q[m], y[m]):.4f}   {be.log_loss(q[m], y[m]):.4f}   '
+                log(f'    {name:28s} {int(m.sum()):5d}   {be.brier(q[m], y[m]):.4f}   {be.log_loss(q[m], y[m]):.4f}   '
                     f'{be.auc(q[m], y[m]):.3f}')
+        evarr = np.array([r['event'] for r in rs])
+        if fitted.sum() >= 20:
+            for label, a, b in (('Brier', (p_fit - y) ** 2, (mid_q - y) ** 2),
+                                ('log loss', -(y * np.log(p_fit) + (1 - y) * np.log(1 - p_fit)),
+                                 -(y * np.log(mid_q) + (1 - y) * np.log(1 - mid_q)))):
+                mean, (lo, hi) = be.cluster_bootstrap((a - b)[fitted], evarr[fitted])
+                log(f'    ladder-fit minus market mid, {label}: {mean:+.4f} [{lo:+.4f}, {hi:+.4f}] '
+                    f'(cluster bootstrap by settlement day; negative = curve better)')
+            log(f'    ladder-implied 1-day vol / VIX: median {np.median(vol_ratio):.2f} '
+                f'(range {np.min(vol_ratio):.2f} to {np.max(vol_ratio):.2f}) over {len(vol_ratio)} ladders')
         if two.sum() >= 20:
             pnl, side = be.edge_trades(p_lp[two], bid[two], ask[two], y[two], 0.02, 0.01)
             traded = side != 0
@@ -736,25 +836,42 @@ def freeze(data_dir, jdir, tune=True, force=False, log=print):
 
 
 def run_cycle(data_dir, jdir, store_root, days=40, log=print):
+    """One daily cycle. Stages are independent: a failing source (say, Kalshi unreachable) is
+    logged and skipped so the others still run; returns the number of failed stages."""
+    import traceback
     log(f'[{now_iso()}] data maturation cycle')
-    refresh_fred(data_dir, jdir, log=log)
+    failed = []
+
+    def stage(name, fn, *args):
+        try:
+            return fn(*args)
+        except Exception as exc:  # keep the cycle alive; the failure is reported and counted
+            failed.append(name)
+            log(f'  !! {name} failed: {type(exc).__name__}: {exc}')
+            log('     ' + traceback.format_exc().strip().splitlines()[-1])
+            return None
+
+    stage('FRED refresh', refresh_fred, data_dir, jdir, http_text, log)
     cfg = load_config(jdir, required=False) or freeze(data_dir, jdir, tune=True, log=log)
     for series in cfg['kalshi']['series']:
-        backfill_kalshi(data_dir, series, days=days, log=log)
-    var_mature(data_dir, jdir, log)
-    cross_mature(data_dir, jdir, log)
-    kalshi_mature(jdir, log)
-    var_snapshot(data_dir, jdir, cfg, log)
-    cross_snapshot(data_dir, jdir, cfg, log)
-    kalshi_snapshot(data_dir, jdir, store_root, cfg, log)
-    status(data_dir, jdir, cfg, log)
+        stage(f'Kalshi backfill {series}', backfill_kalshi, data_dir, series, days, 0.015, 25, 'H1600', log)
+    stage('var mature', var_mature, data_dir, jdir, log)
+    stage('cross mature', cross_mature, data_dir, jdir, log)
+    stage('kalshi mature', kalshi_mature, jdir, log)
+    stage('var snapshot', var_snapshot, data_dir, jdir, cfg, log)
+    stage('cross snapshot', cross_snapshot, data_dir, jdir, cfg, log)
+    stage('kalshi snapshot', kalshi_snapshot, data_dir, jdir, store_root, cfg, log)
+    stage('status', status, data_dir, jdir, cfg, log)
     try:  # schema drift check against proto/bsm/v1 (needs the protobuf runtime)
         import bsm_proto
     except ImportError as exc:
         log(f'  proto validation skipped: {exc}')
     else:
         log('PROTO VALIDATION (bsm.v1)')
-        bsm_proto.validate(jdir, data_dir, store_root, log)
+        if stage('proto validation', bsm_proto.validate, jdir, data_dir, store_root, log) is False:
+            failed.append('proto validation (invalid records)')
+    log(f'cycle finished: {"all stages ok" if not failed else "FAILED stages: " + ", ".join(failed)}')
+    return len(failed)
 
 
 # ---------------------------------------------------------------------------
@@ -880,7 +997,7 @@ def main(argv=None):
     elif args.cmd == 'status':
         status(args.data, args.journal, load_config(args.journal))
     elif args.cmd == 'run':
-        run_cycle(args.data, args.journal, args.store, args.days)
+        return 1 if run_cycle(args.data, args.journal, args.store, args.days) else 0
     else:
         ap.print_help()
     return 0

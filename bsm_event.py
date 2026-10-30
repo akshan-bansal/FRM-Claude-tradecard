@@ -42,6 +42,7 @@ import os
 import sys
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from decimal import Decimal, localcontext
 from functools import lru_cache
 from itertools import combinations_with_replacement, product
 from math import factorial
@@ -1852,16 +1853,91 @@ def _demo_latent():
     return model, np.array([0.3, 1.0]), Sigma, h
 
 
-def _fd_derivative(f, mono, h):
-    """Central-difference partial derivative in whitened coordinates (second-order stencils)."""
-    stencils = {0: {0: 1.0}, 1: {-1: -0.5, 1: 0.5}, 2: {-1: 1.0, 0: -2.0, 1: 1.0},
-                3: {-2: -0.5, -1: 1.0, 1: -1.0, 2: 0.5}, 4: {-2: 1.0, -1: -4.0, 0: 6.0, 1: -4.0, 2: 1.0}}
-    pts, wts = [], []
-    for a, wa in stencils[mono[0]].items():
-        for b, wb in stencils[mono[1]].items():
-            pts.append((a * h, b * h))
-            wts.append(wa * wb)
-    return float(np.dot(wts, f(np.array(pts)))) / h ** sum(mono)
+# --- high-precision references for the self-test (decimal arithmetic, no extra dependencies).
+# Double-precision checks bottom out at rounding (finite differences of 4th derivatives near 1e-8,
+# quadrature sums near 1e-16); evaluating the reference side in 60-digit decimals removes that
+# floor, so what remains measures the double-precision implementation itself.
+
+_HP_PREC = 60
+_HP_PI = Decimal('3.141592653589793238462643383279502884197169399375105820974944592307816')
+
+
+def _hp(x):
+    return x if isinstance(x, Decimal) else Decimal(float(x))  # exact value of the double
+
+
+def _hp_npdf(x):
+    return (-(x * x) / 2).exp() / (2 * _HP_PI).sqrt()
+
+
+def _hp_ncdf(x):
+    """Phi(x) = 1/2 + phi(x) sum x^(2n+1) / (1*3*...*(2n+1)): every term shares a sign, no cancellation."""
+    term = total = x
+    n = 0
+    tiny = Decimal(10) ** -(_HP_PREC + 5)
+    while abs(term) > tiny:
+        n += 1
+        term = term * x * x / (2 * n + 1)
+        total += term
+    return Decimal('0.5') + _hp_npdf(x) * total
+
+
+def _hp_digital(model, S, v, T):
+    r, q, b, K, T = (_hp(z) for z in (model.rate, model.dividend, model.skew, model.strike, T))
+    F = S * ((r - q) * T).exp()
+    lnFK = (F / K).ln()
+    sig = v - b * lnFK
+    sq = T.sqrt()
+    d2 = (lnFK - sig * sig * T / 2) / (sig * sq)
+    return (-(r * T)).exp() * (_hp_ncdf(d2) - _hp_npdf(d2) * sq * b)
+
+
+def _hp_fd_weights(k, acc):
+    """Exact rational central-difference weights for the k-th derivative, accuracy order acc."""
+    from fractions import Fraction
+    m = (k + 1) // 2 - 1 + (acc + 1) // 2
+    offs = list(range(-m, m + 1))
+    n = len(offs)
+    A = [[Fraction(o) ** i for o in offs] + [Fraction(factorial(k) if i == k else 0)] for i in range(n)]
+    for c in range(n):
+        p = next(r for r in range(c, n) if A[r][c] != 0)
+        A[c], A[p] = A[p], A[c]
+        A[c] = [x / A[c][c] for x in A[c]]
+        for r in range(n):
+            if r != c and A[r][c] != 0:
+                A[r] = [x - A[r][c] * y for x, y in zip(A[r], A[c])]
+    return offs, [row[-1] for row in A]
+
+
+def _hp_fd(f, mono, h, acc=4):
+    """Mixed partial derivative by tensor-product stencils, all in decimal arithmetic."""
+    o1, w1 = _hp_fd_weights(mono[0], acc) if mono[0] else ([0], [1])
+    o2, w2 = _hp_fd_weights(mono[1], acc) if mono[1] else ([0], [1])
+    total = Decimal(0)
+    for a, wa in zip(o1, w1):
+        for b, wb in zip(o2, w2):
+            w = wa * wb
+            if w:
+                total += Decimal(w.numerator if hasattr(w, 'numerator') else w) / \
+                    Decimal(w.denominator if hasattr(w, 'denominator') else 1) * f(a * h, b * h)
+    return total / h ** sum(mono)
+
+
+def _hp_hermegauss(n):
+    """Gauss-Hermite nodes and weights for the standard normal, refined to decimal precision."""
+    out = []
+    for x0 in hermegauss(n)[0]:
+        x = _hp(x0)
+        for _ in range(5):
+            h0, h1 = Decimal(1), x
+            for k in range(1, n):
+                h0, h1 = h1, x * h1 - k * h0
+            x -= h1 / (n * h0)  # He_n' = n He_(n-1)
+        h0, h1 = Decimal(1), x
+        for k in range(1, n):
+            h0, h1 = h1, x * h1 - k * h0
+        out.append((x, Decimal(factorial(n)) / (n * n * h0 * h0)))
+    return out
 
 
 def selftest():
@@ -1883,25 +1959,39 @@ def selftest():
     L = cov_factor(Sigma)
     J = pnl_jet(model, x0, L, 0.0)
     f = lambda z: exact_pnl(model, x0, L, z, 0.0)
-    rel = {}
-    for mono in _tables(2, DEG)[0][1:]:
-        d_h, d_h2 = _fd_derivative(f, mono, 0.04), _fd_derivative(f, mono, 0.02)
-        fd = (4 * d_h2 - d_h) / 3
-        jv = J.derivative(mono)
-        if abs(jv) > 1e-9:
-            rel.setdefault(sum(mono), []).append(abs(fd - jv) / abs(jv))
+    with localcontext() as ctx:
+        ctx.prec = _HP_PREC
+        Lh = [[_hp(L[i, j]) for j in range(2)] for i in range(2)]
+        S0, v0, T0 = _hp(x0[0]), _hp(x0[1]), _hp(model.expiry)
+        p0 = _hp_digital(model, S0, v0, T0)
+        fh = lambda a, b: _hp_digital(model, S0 + Lh[0][0] * a + Lh[0][1] * b,
+                                      v0 + Lh[1][0] * a + Lh[1][1] * b, T0) - p0
+        rel = {}
+        for mono in _tables(2, DEG)[0][1:]:
+            ref = _hp_fd(fh, mono, Decimal('1e-6'), acc=4)
+            jv = J.derivative(mono)
+            if abs(jv) > 1e-9:
+                rel.setdefault(sum(mono), []).append(float(abs(_hp(jv) - ref) / abs(ref)))
     detail = ', '.join(f'order {k}: {max(v):.1e}' for k, v in sorted(rel.items()))
-    check('jet vs finite difference', max(max(v) for v in rel.values()) < 1e-4, detail)
+    check('jet vs finite difference (60-digit reference)', max(max(v) for v in rel.values()) < 1e-10,
+          detail + ' (paper: 2e-6 to 2e-8)')
 
+    # Residual of the degree-d expansion behaves like c e^(d+1) (1 + kappa e) before rounding sets in;
+    # fitting the next-order factor removes the pre-asymptotic bias a straight log-log line has.
     u = np.array([0.6, 0.8])
-    eps = np.geomspace(0.05, 0.4, 8)
+    eps = np.geomspace(0.02, 0.5, 14)
     slopes = {}
     for deg in (4, 6):
         Jd = pnl_jet(model, x0, L, 0.0, deg=deg)
-        res = [abs(f(e * u[None])[0] - Jd(e * u[None])[0]) for e in eps]
-        slopes[deg] = np.polyfit(np.log(eps), np.log(res), 1)[0]
-    check('Taylor convergence order', abs(slopes[4] - 5) < 0.25 and abs(slopes[6] - 7) < 0.35,
-          f'degree-4 residual exponent {slopes[4]:.2f} (5 expected), degree-6 {slopes[6]:.2f} (7 expected)')
+        res = np.array([abs(f(e * u[None])[0] - Jd(e * u[None])[0]) for e in eps])
+        keep = res > 1e-13  # well above the ~1e-16 rounding floor of the repricing
+        le, lr = np.log(eps[keep]), np.log(res[keep])
+        fit = optimize.least_squares(lambda th: th[0] + th[1] * le + np.log(np.abs(1 + th[2] * np.exp(le))) - lr,
+                                     [0.0, deg + 1.0, 0.0])
+        slopes[deg] = fit.x[1]
+    check('Taylor convergence order', abs(slopes[4] - 5) < 0.05 and abs(slopes[6] - 7) < 0.03,
+          f'degree-4 residual exponent {slopes[4]:.3f} (5 expected), degree-6 {slopes[6]:.3f} (7 expected) '
+          f'(paper: 5.05, 7.03)')
 
     K, hK = 4600.0, 0.5
     dig = BSMDigital(strike=K, expiry=21 / TRADING_DAYS)
@@ -1914,8 +2004,15 @@ def selftest():
     xq, wq = hermegauss(60)
     wq = wq / SQRT2PI
     xs, s, dt = 0.4, 1.0, 1.0
-    drift = float(np.sum(wq * lat.price(xs + s * math.sqrt(dt) * xq, s, 30.0 - dt))) - float(lat.price(xs, s))
-    check('latent price is a martingale', abs(drift) < 1e-14, f'mean price change {drift:.1e}')
+    # double precision: differences from today's price, compensated sum (weights don't sum to 1 exactly)
+    drift = math.fsum(wq * (lat.price(xs + s * math.sqrt(dt) * xq, s, 30.0 - dt) - float(lat.price(xs, s))))
+    with localcontext() as ctx:  # 60 digits: trapezoid rule, exponentially convergent for this integrand
+        ctx.prec = _HP_PREC
+        h, X, sd, tau = Decimal('0.2'), _hp(xs), _hp(s), Decimal(30)
+        mean = sum(h * _hp_npdf(h * i) * _hp_ncdf((X + sd * h * i) / (sd * (tau - 1).sqrt())) for i in range(-80, 81))
+        hp_drift = abs(mean - _hp_ncdf(X / (sd * tau.sqrt())))
+    check('latent price is a martingale', abs(drift) < 1e-16 and hp_drift < Decimal('1e-40'),
+          f'mean price change {drift:.1e} in double precision, {float(hp_drift):.1e} at 60 digits (paper: ~1e-17)')
 
     rng = np.random.default_rng(1)
     for s_true, want in ((1.0, 1.0), (2.0, 4.0)):
@@ -1934,8 +2031,17 @@ def selftest():
     closed = 0.25 * (np.trace(M) ** 2 + 2 * np.trace(M @ M))
     e1 = abs(closed - quad[1]) / quad[1]
     e2 = np.max(np.abs(energy_by_order(J) - quad) / quad)
-    check('second-order energy closed form', e1 < 1e-12 and e2 < 1e-12,
-          f'relative error vs Gauss-Hermite {e1:.1e} (Gram energies all orders {e2:.1e})')
+    with localcontext() as ctx:  # the same comparison with 60-digit Gauss-Hermite nodes and weights
+        ctx.prec = _HP_PREC
+        gh = _hp_hermegauss(12)
+        c2 = [(e, _hp(J.c[k])) for k, e in enumerate(_tables(2, DEG)[0]) if sum(e) == 2]
+        q2 = sum(wa * wb * sum(c * za ** e[0] * zb ** e[1] for e, c in c2) ** 2 for za, wa in gh for zb, wb in gh)
+        Mh = [[_hp(M[i, j]) for j in range(2)] for i in range(2)]
+        tr, tr2 = Mh[0][0] + Mh[1][1], sum(Mh[i][j] * Mh[j][i] for i in range(2) for j in range(2))
+        e1_hp = abs((tr * tr + 2 * tr2) / 4 - q2) / q2
+    check('second-order energy closed form', e1 < 1e-15 and e2 < 1e-12 and e1_hp < Decimal('1e-40'),
+          f'relative error vs Gauss-Hermite {e1:.1e} in double precision, {float(e1_hp):.1e} at 60 digits '
+          f'(paper: 3e-16); Gram energies all orders {e2:.1e}')
 
     errs = [abs(temper_rho(r, g, 0.0) - math.tanh(g * math.atanh(r)))
             for r in np.linspace(-0.9, 0.9, 7) for g in (0.5, 0.8, 1.3)]

@@ -45,6 +45,7 @@ import argparse
 import csv
 import glob
 import gzip
+import http.client
 import json
 import math
 import os
@@ -259,7 +260,9 @@ def _get_json(url, timeout=20, retries=3):
                 time.sleep(2.0 * (attempt + 1))
                 continue
             raise
-        except (urllib.error.URLError, TimeoutError):
+        except (OSError, http.client.HTTPException, ValueError):
+            # transient transport failures, including TLS errors and truncated bodies mid-read
+            # (URLError, ssl.SSLError, ConnectionError and TimeoutError are all OSErrors)
             if attempt + 1 < retries:
                 time.sleep(2.0 * (attempt + 1))
                 continue
@@ -521,12 +524,20 @@ def signature_plot(ts, x, dts=(10, 30, 60, 300, 900, 1800)):
 
 
 def kurtosis_slope(rows):
-    """Log-log slope of excess kurtosis on dt (about -1 when jumps dominate)."""
-    pts = [(r['dt'], r['kurtosis'] - 3) for r in rows if r['kurtosis'] > 3.05]
-    if len(pts) < 3:
+    """Exponent p in excess kurtosis = c dt^p (about -1 when jumps dominate).
+
+    Fitted in levels, each point weighted by its sampling precision (normal-theory variance of
+    sample excess kurtosis, 24/n). A log-log line through the raw points lets the noisy long-dt
+    estimates (few increments, excess near zero) dominate and biases the slope away from -1.
+    """
+    d = np.array([r['dt'] for r in rows], float)
+    k = np.array([r['kurtosis'] - 3 for r in rows], float)
+    n = np.array([r['n'] for r in rows], float)
+    if len(d) < 3 or k.max() <= 0:
         return float('nan')
-    d, k = np.array(pts).T
-    return float(np.polyfit(np.log(d), np.log(k), 1)[0])
+    i = int(np.argmax(k))
+    fit = optimize.least_squares(lambda th: (th[0] * d ** th[1] - k) * np.sqrt(n / 24.0), [k[i] * d[i], -1.0])
+    return float(fit.x[1])
 
 
 def kramers_moyal(ts, x, dt=10, bins=10, min_count=50):
@@ -547,11 +558,30 @@ def kramers_moyal(ts, x, dt=10, bins=10, min_count=50):
     return np.array(rows)
 
 
+def tsrv_optimal_k(x):
+    """Plug-in subsample count K* = (12 w^4 n^2 / IQ)^(1/3) (Zhang, Mykland and Ait-Sahalia, 2005).
+
+    Noise variance w^2 = RV_all / (2n) (noise dominates the finest scale); integrated quarticity
+    IQ ~ IV^2 from a preliminary TSRV at K = n^(2/3). The generic K = n^(2/3) ignores the
+    noise-to-signal ratio and, at realistic noise, is far too large: unbiased but very noisy.
+    """
+    x = np.asarray(x, float)
+    r = np.diff(x)
+    n = len(r)
+    w2 = float(np.sum(r * r)) / (2 * n)
+    iv0 = tsrv(x, max(2, int(round(n ** (2 / 3)))))[0]
+    if iv0 <= 0:
+        return max(2, int(round(n ** (2 / 3))))
+    return int(min(max(2, round((12 * w2 * w2 * n * n / (iv0 * iv0)) ** (1 / 3))), n // 2))
+
+
 def tsrv(x, K=None):
-    """Two-scale realised variance of one day's 1-second path, with small-sample adjustment."""
+    """Two-scale realised variance of one day's 1-second path, with small-sample adjustment.
+
+    K defaults to the data-driven optimum (tsrv_optimal_k)."""
     x = np.asarray(x, float)
     n = len(x) - 1
-    K = K or max(2, int(round(n ** (2 / 3))))
+    K = K or tsrv_optimal_k(x)
     rv_all = float(np.sum(np.diff(x) ** 2))
     rv_k = float(np.sum((x[K:] - x[:-K]) ** 2) / K)
     nbar = (n - K + 1) / K
@@ -801,8 +831,9 @@ def selftest(tmpdir=None):
     jump = simulate('jump', days=20, sigma=sig, seed=2, book=False)
     rows = signature_plot(jump['ts'], jump['efficient'], (10, 30, 60, 300, 900, 1800))
     slope = kurtosis_slope(rows)
-    check('signature plot, jumps', rows[0]['kurtosis'] > 15 and -1.4 < slope < -0.7,
-          'kurtosis ' + ', '.join(f'{r["kurtosis"]:.1f}@{r["dt"]}s' for r in rows) + f'; slope {slope:.2f}')
+    check('signature plot, jumps', rows[0]['kurtosis'] > 15 and abs(slope + 1) < 0.09,
+          'kurtosis ' + ', '.join(f'{r["kurtosis"]:.1f}@{r["dt"]}s' for r in rows)
+          + f'; slope {slope:.3f} (-1 expected; paper: -1.09)')
 
     km = kramers_moyal(diff['ts'], diff['efficient'], dt=10)
     d1, d2 = np.median(km[:, 1]), np.median(km[:, 2])
@@ -811,10 +842,15 @@ def selftest(tmpdir=None):
 
     noisy = simulate('diffusion', days=5, sigma=sig, noise=math.sqrt(32) * sig, seed=3, book=False)
     day = np.floor(noisy['ts'] / DAY)
-    est, raw = zip(*(tsrv(noisy['mid'][day == d]) for d in np.unique(day)))
+    paths = [noisy['mid'][day == d] for d in np.unique(day)]
+    est, raw = zip(*(tsrv(p) for p in paths))
+    old = [tsrv(p, int(round((len(p) - 1) ** (2 / 3))))[0] for p in paths]
     iv = sig ** 2 * 23399
-    check('TSRV under microstructure noise', abs(np.mean(est) / iv - 1) < 0.2 and np.mean(raw) / iv > 30,
-          f'TSRV {np.mean(est):.3e} vs true {iv:.3e}; raw RV off by factor {np.mean(raw) / iv:.0f}')
+    err = abs(np.mean(est) / iv - 1)
+    check('TSRV under microstructure noise', err < 0.05 and np.mean(raw) / iv > 30,
+          f'TSRV {np.mean(est):.3e} vs true {iv:.3e} ({100 * err:.1f}% off; K* ~ {tsrv_optimal_k(paths[0])}, '
+          f'vs {100 * abs(np.mean(old) / iv - 1):.1f}% at K = n^(2/3); paper: ~11%); '
+          f'raw RV off by factor {np.mean(raw) / iv:.0f}')
 
     bf, tf = frames_from_sim(simulate('diffusion', days=3, sigma=sig, tick=0.01, seed=4))
     o = order_flow_imbalance(bf)

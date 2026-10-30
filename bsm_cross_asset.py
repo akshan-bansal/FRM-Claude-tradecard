@@ -33,8 +33,8 @@ import sys
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy import stats
-from scipy.special import ndtr
+from scipy import optimize, stats
+from scipy.special import gammaln, ndtr
 
 import bsm_event as be
 
@@ -108,15 +108,38 @@ def estimators(Zh, gamma, lam_min=0.05):
             'mp': be.mp_filter(C, len(Zh))[0]}
 
 
-def score_shock(C, s, conf=0.99):
+def mvt_logpdf_q(q, N, nu, logdet=0.0):
+    """Log density of a multivariate Student-t with covariance C (scale C (nu-2)/nu) at Mahalanobis q."""
+    return (gammaln((nu + N) / 2) - gammaln(nu / 2) - N / 2 * np.log((nu - 2) * np.pi) - logdet / 2
+            - (nu + N) / 2 * np.log1p(q / (nu - 2)))
+
+
+def fit_mvt_nu(qs, N):
+    """Degrees of freedom by maximum likelihood from Mahalanobis distances."""
+    qs = np.asarray(qs, float)
+    res = optimize.minimize_scalar(lambda nu: -np.sum(mvt_logpdf_q(qs, N, nu)), bounds=(2.05, 200.0),
+                                   method='bounded')
+    return float(res.x)
+
+
+def score_shock(C, s, conf=0.99, nu=None):
+    """Scores of one realised shock vector under correlation C (unit-variance factors).
+
+    nll is Gaussian; t_nll uses a multivariate Student-t with the same covariance and nu degrees
+    of freedom (heavy-tailed shocks make the Gaussian NLL a ranking device, not a calibrated
+    probability). exceed / exceed_t test the 99% ellipsoid under each law."""
     N = len(s)
     sign, logdet = np.linalg.slogdet(C)
     q = float(s @ np.linalg.solve(C, s))
     ones = np.ones(N)
     w = np.linalg.solve(C, ones)
     w = w / w.sum()
-    return {'nll': 0.5 * (logdet + q + N * be.LOG2PI), 'mv_var': float((w @ s) ** 2),
-            'mv_pred': float(w @ C @ w), 'exceed': q > stats.chi2.ppf(conf, N)}
+    out = {'nll': 0.5 * (logdet + q + N * be.LOG2PI), 'mv_var': float((w @ s) ** 2), 'q': q,
+           'mv_pred': float(w @ C @ w), 'exceed': q > stats.chi2.ppf(conf, N)}
+    if nu is not None:
+        out['t_nll'] = float(-mvt_logpdf_q(q, N, nu, logdet))
+        out['exceed_t'] = q * nu / ((nu - 2) * N) > stats.f.ppf(conf, N, nu)
+    return out
 
 
 @dataclass
@@ -164,16 +187,19 @@ def correlation_test(fm, window=504, start=756, h=5, gammas=(0.5, 0.75, 1.0, 1.2
     tune = range(n_tune)
     g = gammas[int(np.argmin([nll_spec(g, tune) for g in gammas]))] if n_tune else 1.0
     g_risk = gammas[int(np.argmin([risk_spec(g, tune) for g in gammas]))] if n_tune else 1.0
+    N = fm.R.shape[1]
+    nu = fit_mvt_nu([score_shock(np.corrcoef(fm.Z[ts[i] - window:ts[i]].T), shocks[i])['q'] for i in tune], N) \
+        if n_tune else 8.0
     rows = {k: [] for k in ('sample', 'spectral', 'spectral-risk', 'mp')}
     for i in range(n_tune, len(ts)):
         Zh = fm.Z[ts[i] - window:ts[i]]
         ests = estimators(Zh, g, lam_min)
         ests['spectral-risk'] = be.spectral_correlation(ests['sample'], g_risk, lam_min)
         for name, C in ests.items():
-            rows[name].append(score_shock(C, shocks[i]))
+            rows[name].append(score_shock(C, shocks[i], nu=nu))
     log(f'Correlation test: {len(ts) - n_tune} evaluation windows of {h} days from day {ts[n_tune]} '
-        f'(tuning windows {n_tune}); trailing window {window}, N={fm.R.shape[1]}; spectral gamma tuned on '
-        f'NLL {g}, on min-variance risk {g_risk}')
+        f'(tuning windows {n_tune}); trailing window {window}, N={N}; spectral gamma tuned on '
+        f'NLL {g}, on min-variance risk {g_risk}; Student-t dof {nu:.1f} fitted on tuning windows')
     base_nll = np.array([r['nll'] for r in rows['sample']])
     base_mv = np.array([r['mv_var'] for r in rows['sample']])
 
@@ -195,6 +221,20 @@ def correlation_test(fm, window=504, start=756, h=5, gammas=(0.5, 0.75, 1.0, 1.2
         p, txt = pw(nll - base_nll)
         log(f'  {name:13s} {nll.mean():9.4f}   {p["mean"]:+.4f} [{p["ci"][0]:+.4f}, {p["ci"][1]:+.4f}]   {txt}'
             f'            {100 * np.mean([r["exceed"] for r in rs]):.2f}%')
+    base_t = np.array([r['t_nll'] for r in rows['sample']])
+    gauss_vs_t = np.mean([r['nll'] - r['t_nll'] for r in rows['sample']])
+    log(f'Fit (multivariate Student-t NLL, dof {nu:.1f}; lower is better; beats the Gaussian law by '
+        f'{gauss_vs_t:+.4f} per window under the sample estimator)')
+    log('  estimator      mean NLL   dNLL vs sample [95% CI]       power  windows-for-80%   99% exceed (t law)')
+    for name, rs in rows.items():
+        tn = np.array([r['t_nll'] for r in rs])
+        ext = 100 * np.mean([r['exceed_t'] for r in rs])
+        if name == 'sample':
+            log(f'  {name:13s} {tn.mean():9.4f}   {"(reference)":30s}                       {ext:.2f}%')
+            continue
+        p, txt = pw(tn - base_t)
+        log(f'  {name:13s} {tn.mean():9.4f}   {p["mean"]:+.4f} [{p["ci"][0]:+.4f}, {p["ci"][1]:+.4f}]   {txt}'
+            f'            {ext:.2f}%')
     log('Risk (realised variance of the out-of-sample minimum-variance portfolio built from each estimate)')
     log('  estimator      realised var  risk change vs sample [95% CI]   power  windows-for-80%   realised/predicted')
     for name, rs in rows.items():
@@ -285,19 +325,45 @@ def risk_balance(book, state0, Sigma_h, h, target=1000.0):
 
 
 def book_backtest(states, fm, window=504, start=756, h=5, n_sims=5000, balance=False, tail_k=4.0,
-                  seed=5, levels=(0.95, 0.99), log=print):
+                  seed=5, levels=(0.95, 0.99), calibrate=True, calib_min=20, calib_window=104, corr_fn=None,
+                  log=print):
+    """Five-day VaR backtest of the cross-asset book.
+
+    calibrate: scale each factor's closed-form horizon variance by its realised-to-forecast ratio,
+    the mean squared standardised horizon shock over completed earlier windows (trailing
+    calib_window, at least calib_min). This corrects both GJR variance that runs low out of
+    sample (FX, rates) and the overstatement of horizon variance for mean-reverting factors
+    (S&P, VIX), using only shocks already realised at each forecast date.
+    """
     ts = list(range(start, len(fm.R) - h + 1, h))
-    models = ('gaussian', 'gpd', 'fhs')
+    # student-t: multivariate t with covariance C; gpd-t: per-factor GPD tails joined by a t copula.
+    # Both get tail dependence a Gaussian copula lacks; nu is fitted on past shock vectors only.
+    models = ('gaussian', 'gpd', 'fhs', 'student-t', 'gpd-t')
     var = {m: np.zeros((len(ts), len(levels))) for m in models}
     chosen = np.zeros((len(ts), len(levels)))
     realized = np.zeros(len(ts))
     es_share = []
     pick = []
+    past_shocks = []
+    scales = []
+    nus = []
     for w, t in enumerate(ts):
         st0 = states[t]  # state at the start of return t
         Zh = fm.Z[t - window:t]
-        C = np.corrcoef(Zh.T)
-        _, hv = fm.horizon_shock(t, h)
+        C = np.corrcoef(Zh.T) if corr_fn is None else corr_fn(Zh)
+        shock, hv = fm.horizon_shock(t, h)
+        if calibrate and len(past_shocks) >= calib_min:
+            k = np.mean(np.square(past_shocks[-calib_window:]), axis=0)
+            hv = hv * k
+            scales.append(k)
+        if len(past_shocks) >= calib_min:
+            Cinv = np.linalg.inv(C)
+            qs = [float(s @ Cinv @ s) for s in past_shocks[-calib_window:]]
+            nu = fit_mvt_nu(qs, len(FACTORS))
+        else:
+            nu = 8.0
+        nus.append(nu)
+        past_shocks.append(shock)  # realised by t + h, i.e. before the next window's forecast
         mu = np.array([wf.params[wf.block_of[t]].mu for wf in fm.wfs])
         book = CrossAssetBook(S0=st0[0], y0=st0[3])
         if balance:
@@ -311,6 +377,11 @@ def book_backtest(states, fm, window=504, start=756, h=5, n_sims=5000, balance=F
         draws['gpd'] = np.column_stack([laws[j].ppf(u[:, j]) for j in range(len(FACTORS))])
         idx = rng.integers(0, len(Zh), size=(n_sims, h))
         draws['fhs'] = Zh[idx].sum(axis=1) / math.sqrt(h)
+        mix = np.sqrt(rng.chisquare(nu, size=(n_sims, 1)) / nu)
+        tdraw = g / mix                                    # multivariate t, scale C
+        draws['student-t'] = tdraw * math.sqrt((nu - 2) / nu)  # covariance C
+        ut = np.clip(stats.t.cdf(tdraw, nu), 1e-12, 1 - 1e-12)
+        draws['gpd-t'] = np.column_stack([laws[j].ppf(ut[:, j]) for j in range(len(FACTORS))])
         v0 = book.value(st0, 0.0)
         r_real = fm.R[t:t + h].sum(0)
         realized[w] = v0 - book.value(apply_returns(st0, r_real), h)
@@ -332,20 +403,38 @@ def book_backtest(states, fm, window=504, start=756, h=5, n_sims=5000, balance=F
         pick.append(best)
         chosen[w] = var[best][w]
     log(f'\nCross-asset book, {h}-day VaR, {len(ts)} non-overlapping windows from day {start}'
-        f'{" (risk-balanced legs)" if balance else ""}')
-    log('model        level  breach%  nominal  Kupiec p  Chr. cc p   mean pinball')
+        f'{" (risk-balanced legs)" if balance else ""}'
+        + (f'; horizon variance calibrated walk-forward (mean scale '
+           + ', '.join(f'{f} {s:.2f}' for f, s in zip(FACTORS, np.mean(scales, axis=0))) + ')' if scales else '')
+        + f'; t dof median {np.median(nus):.1f}')
+    def pid_scaled(V, lv):
+        """The paper's PID loop on the log VaR scale (default gains, not tuned here): each window's
+        VaR is scaled by a factor set from earlier breaches only, so clustered stress is caught."""
+        pid = be.PIDVaRScale(alpha=lv)
+        out = np.empty_like(V)
+        for i in range(len(V)):
+            out[i] = V[i] * pid.factor
+            pid.update(realized[i] > out[i])
+        return out
+
+    log('model        level  breach%  nominal  Kupiec p  Chr. cc p   mean pinball   | with PID: breach%  Kupiec p  cc p  pinball')
+    pid_var = {}
     for name, V in list(var.items()) + [('walk-forward', chosen)]:
+        pid_var[name] = np.column_stack([pid_scaled(V[:, li], lv) for li, lv in enumerate(levels)])
         for li, lv in enumerate(levels):
             hits = realized > V[:, li]
+            hp = realized > pid_var[name][:, li]
             log(f'{name:12s} {lv:5.2f}  {100 * hits.mean():6.2f}   {100 * (1 - lv):6.2f}   '
                 f'{be.kupiec(hits, 1 - lv)[1]:7.3f}   {be.christoffersen(hits, 1 - lv)["p_cc"]:7.3f}   '
-                f'{be.pinball(realized, V[:, li], lv).mean():.4g}')
+                f'{be.pinball(realized, V[:, li], lv).mean():9.4g}      |   {100 * hp.mean():6.2f}   '
+                f'{be.kupiec(hp, 1 - lv)[1]:7.3f}  {be.christoffersen(hp, 1 - lv)["p_cc"]:5.3f}  '
+                f'{be.pinball(realized, pid_var[name][:, li], lv).mean():.4g}')
     picks = {m: pick.count(m) for m in models}
     log('walk-forward picks: ' + ', '.join(f'{m} {c}' for m, c in picks.items()))
     share = np.mean(es_share, axis=0)
     log('99% expected-shortfall attribution (gpd): ' + ', '.join(
         f'{leg} {100 * s:.1f}%' for leg, s in zip(CrossAssetBook.legs, share)))
-    return {'var': var, 'chosen': chosen, 'realized': realized, 'es_share': share}
+    return {'var': var, 'chosen': chosen, 'realized': realized, 'es_share': share, 'pid_var': pid_var}
 
 
 def book_spectrum(states, fm, t, h=5, window=504, log=print):

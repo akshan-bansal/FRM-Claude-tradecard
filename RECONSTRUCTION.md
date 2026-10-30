@@ -28,14 +28,14 @@ but says nothing about market performance.
 
 | Paper claim | Reconstructed result |
 |---|---|
-| Jet vs finite differences ≈ 2e-6 … 2e-8 | order 1: 9e-10, 2: 1e-8, 3: 2e-7, 4: 3e-5 |
-| Taylor-4 residual exponent 5.05 (5 expected), degree-6 exponent 7.03 (7) | 5.13 and 6.99 |
+| Jet vs finite differences ≈ 2e-6 … 2e-8 | 7.5e-15 … 1.7e-14 against a 60-digit `decimal` finite-difference reference |
+| Taylor-4 residual exponent 5.05 (5 expected), degree-6 exponent 7.03 (7) | 5.010 and 6.990, from a two-term fit that removes next-order bias |
 | Skewed digital = −∂C/∂K to ≈1e-11 | 1.3e-13 |
-| Latent price martingale, mean change ≈1e-17 | −1.1e-16 (60-node quadrature) |
-| E[(½z′Mz)²] = ¼[(tr M)² + 2 tr M²] vs quadrature, 3e-16 | 3.9e-16 |
+| Latent price martingale, mean change ≈1e-17 | 3.1e-17 in double precision (the rounding floor); 8.1e-59 at 60 digits |
+| E[(½z′Mz)²] = ¼[(tr M)² + 2 tr M²] vs quadrature, 3e-16 | 3.9e-16 in double precision (2 ulp); 3.6e-60 with 60-digit Gauss–Hermite |
 | Diffusion kurtosis ≈3 from 10 s to 1,800 s | 3.01, 2.94, 2.77, 2.62 |
-| Jump kurtosis decays like 1/dt (slope −1.09) | 46.5 at 10 s → 2.7 at 1,800 s, slope −1.20 |
-| TSRV within ~11%, raw RV off ≈65× | within 16%, raw off 65× |
+| Jump kurtosis decays like 1/dt (slope −1.09) | 46.5 at 10 s → 2.7 at 1,800 s, slope −1.021 (precision-weighted level fit; −0.95 to −1.06 across six seeds) |
+| TSRV within ~11%, raw RV off ≈65× | 1.1% with the plug-in optimal K (16.1% at K = n^(2/3)); raw off 65× |
 | OFI regression positive, R² 0.47 | positive, R² 0.65 |
 | Almgren–Chriss numerical vs closed form within 9e-4 | 2.4e-15 (exact Newton solve) |
 | Kurtosis penalty speeds liquidation (0.118 → 0.033) | 0.161 → 0.134 |
@@ -54,6 +54,32 @@ Demo results that reproduce the paper's qualitative findings:
 - **S&P digital trust gates.** Long and short positions both fail the ratio gate and are repriced. The latent long position passes it.
 - **Latent Greek matrix.** It has rank 2 with condition number ≈8e16. Vega is proportional to gamma, because ∂p/∂s = sτ ∂²p/∂x².
 - **Hedging.** Variance-minimising and tail criteria can disagree. A truncated-SVD threshold of 0.1 badly degrades the S&P hedge, with RMS rising from 0.0005 to 0.015.
+
+## Beyond the paper (queue, completed 2026-10-30)
+
+1. **Kalshi model vs market.** Most of the gap is information, not modelling.
+   - With the market-implied level, the model's AUC (0.945) nearly matches the market's (0.951). The 09:00 quote knows the overnight futures move; the model only has the prior close.
+   - The market prices 1-day S&P volatility at about **0.48 × VIX**.
+   - The scorecard now also reports:
+     - the prior-close model with GJR 1-day vol;
+     - VIX scaled by a ratio learned walk-forward from earlier ladders (Brier 0.133 → 0.127 on above/below contracts);
+     - a model curve fitted to each 09:00 ladder.
+   - On range ladders, the fitted curve **beats the market's own mids** on log loss: −0.0069, with a 95% interval of [−0.0090, −0.0039] (cluster bootstrap). On above/below contracts it ties.
+   - All of these are computed at scoring time from point-in-time data; the frozen forward journal is unchanged.
+2. **Cross-asset book VaR.** Every 99% breach is a dollar-up, risk-off move in which all four legs lose together. GJR horizon variance also ran low for FX and rates and high for the mean-reverting S&P and VIX.
+   - Fixes:
+     - a walk-forward horizon-variance calibration (realised-to-forecast ratio from past windows only);
+     - Student-t and GPD-with-t-copula models, with degrees of freedom fitted walk-forward;
+     - the paper's PID loop with its default gains.
+   - With these, FHS and the walk-forward choice pass Kupiec and Christoffersen at both levels: 5.52% at 95%, and 2.03% at 99% (p 0.091 / 0.072).
+   - Spectral sharpening with γ = 1.5 does better at 99% (1.74%), but γ was chosen after seeing the results, so it is not adopted.
+3. **Correlation scoring.** A multivariate Student-t, with ν = 5.9 fitted on the tuning windows, beats the Gaussian by 0.35 nats per window. It puts 0.48% of shocks outside its 99% ellipsoid, against 4.35% for the Gaussian. Estimator rankings are unchanged under either law.
+4. **Live order book** (454 snapshots over 40 minutes, `KXINXU` 4pm at-the-money contract):
+   - fat tails (kurtosis 4–5) without jump scaling (slope −0.19);
+   - variance per second falls with the interval, the bid-ask-bounce signature;
+   - 1-cent tick discreteness dominates (44 distinct mids);
+   - order-flow imbalance R² is only 0.04 over the full sample. The 0.93 seen early came from a few large moves.
+5. **Module split: declined.** `bsm_event.py` stays one coherent file, organised by its numbered sections.
 
 ## Choices made where the paper is silent
 
@@ -77,7 +103,7 @@ Demo results that reproduce the paper's qualitative findings:
 - Usage lines use the real file names, not `bsm_cross.py` or `bsm_micro.py`.
 - There are no drive-letter paths. The Marchenko–Pastur filter is inlined in `bsm_event.mp_filter`, using the same rule as `sp100_mp_portfolio_risk.py`, instead of being loaded from `E:/FRM-Claude-main/...`.
 - `bsm_spectral.py` imports nothing that is missing.
-- `bsm_event.py` is still one file, about 2,100 lines, to keep the paper's four-module layout. It is organised in numbered sections: jets, contracts, spectral risk, GJR, tails, compositional, scoring, control, hedging, calibration, data, backtest, events. Those sections are the natural split points if you want separate modules.
+- `bsm_event.py` stays one coherent file, about 2,200 lines, matching the paper's four-module layout. It is organised in numbered sections: jets, contracts, spectral risk, GJR, tails, compositional, scoring, control, hedging, calibration, data, backtest, events, self-test.
 
 ## Not verified
 
