@@ -1,0 +1,99 @@
+# News collector sources (scripts/news_collect.py). Step 1 of the sentiment plan: journal only.
+#
+# Free sources now; a paid feed (Benzinga / Polygon) can be added later as one more entry under
+# `feeds` once its licence terms on storage are settled. Machine-local overrides, including the SEC
+# contact (`sec_user_agent`), go in config/news_sources.local.yaml, which is gitignored. SEC feeds
+# are skipped until that contact is set, and the contact is sent to sec.gov only.
+#
+# Probed 2026-10-12: every enabled feed below answered and parsed. GlobeNewswire (403), PR Newswire
+# (404), Newsfile (not XML) and CBC (403) did not, and are left out.
+
+journal: state/news.jsonl
+graph_journal: state/intel_graph.jsonl   # set to "" to journal without graph edges
+health: state/news_health.json
+user_agent: "Mozilla/5.0 (compatible; FRM-Claude-news/0.1)"
+
+host_spacing_s:
+  api.gdeltproject.org: 6      # GDELT asks for one request per 5 s
+  www.sec.gov: 1
+  feeds.finance.yahoo.com: 2
+
+feeds:
+  # EDGAR current filings, all companies; mapped to symbols by company name. Titles are templates
+  # ("8-K - NVIDIA CORP (0001045810) (Filer)"), so title de-duplication is off for them.
+  - {name: edgar_8k, every_min: 10, title_dedupe: false,
+     url: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&start=0&count=100&output=atom"}
+  - {name: edgar_6k, every_min: 15, title_dedupe: false,
+     url: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=6-K&company=&dateb=&owner=include&start=0&count=100&output=atom"}
+  # GDELT DOC 2.0 API: OFF 2026-10-12. It answered 429 to every request from this machine; GDELT is now
+  # read from its raw 15-minute GKG files instead (scripts/gdelt_gkg_backfill.py --follow), unthrottled.
+  - {name: gdelt, every_min: 30, enabled: false,
+     url: "https://api.gdeltproject.org/api/v2/doc/doc?query=(bitcoin%20OR%20ethereum%20OR%20solana%20OR%20XRP%20OR%20monero%20OR%20zcash)%20sourcelang:english&mode=ArtList&format=rss&maxrecords=75&timespan=1h"}
+  - {name: gdelt, every_min: 30, enabled: false,
+     url: "https://api.gdeltproject.org/api/v2/doc/doc?query=(Nvidia%20OR%20Broadcom%20OR%20%22Applied%20Materials%22%20OR%20Micron%20OR%20Intel%20OR%20Qualcomm%20OR%20%22Texas%20Instruments%22%20OR%20Sony%20OR%20Enbridge%20OR%20%22Sun%20Life%22)%20sourcelang:english&mode=ArtList&format=rss&maxrecords=75&timespan=1h"}
+  # Crypto press and venue
+  - {name: coindesk, every_min: 15, url: "https://www.coindesk.com/arc/outboundfeeds/rss/"}
+  - {name: cointelegraph, every_min: 15, url: "https://cointelegraph.com/rss"}
+  - {name: decrypt, every_min: 15, url: "https://decrypt.co/feed"}
+  - {name: kraken_blog, every_min: 60, url: "https://blog.kraken.com/feed"}
+  # Central banks
+  - {name: fed_press, every_min: 30, url: "https://www.federalreserve.gov/feeds/press_all.xml"}
+  - {name: boc_press, every_min: 30, url: "https://www.bankofcanada.ca/content_type/press-releases/feed/"}
+
+# One feed per symbol that has the id_key field below. Every item is tagged with that symbol in
+# `feed_symbols` (a vendor tag), separately from symbols the title actually names. {region} is the
+# symbol's `region`, else the template default: Yahoo returns nothing for TSX tickers without CA.
+# Quote any symbol or ticker YAML could read as a boolean (ON, OFF, YES, NO); the loader refuses them.
+per_symbol_feeds:
+  - {name: yahoo, id_key: yahoo, every_min: 30, region: US,
+     url: "https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region={region}&lang=en-US"}
+
+# The basket universe (config/basket_seed.json). `aliases` are matched as whole words in titles;
+# all-caps aliases of 5 characters or fewer are case-sensitive. Ambiguous short tickers are left
+# out on purpose: ADA (disability act), RSI (the indicator), MU, ON, SI, GC.
+symbols:
+  # --- kraken
+  BTC/USD:  {aliases: [Bitcoin, BTC], yahoo: BTC-USD}
+  ETH/USD:  {aliases: [Ethereum, Ether, ETH], yahoo: ETH-USD}
+  SOL/USD:  {aliases: [Solana], yahoo: SOL-USD}
+  XRP/USD:  {aliases: [XRP, Ripple], yahoo: XRP-USD}
+  XLM/USD:  {aliases: [XLM, "Stellar Lumens", "Stellar network", "Stellar Development Foundation"], yahoo: XLM-USD}  # bare "Stellar" matched a video game
+  LINK/USD: {aliases: [Chainlink], yahoo: LINK-USD}
+  ADA/USD:  {aliases: [Cardano], yahoo: ADA-USD}
+  POL/USD:  {aliases: [Polygon]}
+  UNI/USD:  {aliases: [Uniswap]}
+  AAVE/USD: {aliases: [Aave, AAVE], yahoo: AAVE-USD}
+  ZEC/USD:  {aliases: [Zcash, ZEC], yahoo: ZEC-USD}
+  XMR/USD:  {aliases: [Monero, XMR], yahoo: XMR-USD}
+  # --- qt
+  XIC.TO:    {aliases: [XIC], yahoo: XIC.TO, region: CA}
+  ZEB.TO:    {aliases: [ZEB, "BMO Equal Weight Banks"], yahoo: ZEB.TO, region: CA}
+  CGL.TO:    {aliases: [CGL, "iShares Gold Bullion"], yahoo: CGL.TO, region: CA}
+  VALE:      {aliases: [Vale], yahoo: VALE}
+  DBC:       {aliases: [DBC, "Invesco DB Commodity"], yahoo: DBC}
+  SRU.UN.TO: {aliases: [SmartCentres], yahoo: SRU-UN.TO, region: CA}
+  CRT.UN.TO: {aliases: ["CT REIT", "CT Real Estate Investment Trust"], yahoo: CRT-UN.TO, region: CA}
+  ENB.TO:    {aliases: [Enbridge], yahoo: ENB.TO, region: CA}
+  XIU.TO:    {aliases: [XIU], yahoo: XIU.TO, region: CA}
+  VDY.TO:    {aliases: [VDY], yahoo: VDY.TO, region: CA}
+  SLF.TO:    {aliases: ["Sun Life"], yahoo: SLF.TO, region: CA}
+  RSI.TO:    {aliases: ["Rogers Sugar"], yahoo: RSI.TO, region: CA}
+  SONY:      {aliases: [Sony], yahoo: SONY}
+  EWJ:       {aliases: [EWJ, "iShares MSCI Japan"], yahoo: EWJ}
+  FLJP:      {aliases: [FLJP], yahoo: FLJP}
+  JPXN:      {aliases: [JPXN], yahoo: JPXN}
+  NVDA:      {aliases: [Nvidia, NVDA], yahoo: NVDA}
+  AVGO:      {aliases: [Broadcom, AVGO], yahoo: AVGO}
+  AMAT:      {aliases: ["Applied Materials", AMAT], yahoo: AMAT}
+  MU:        {aliases: [Micron], yahoo: MU}
+  INTC:      {aliases: [Intel, INTC], yahoo: INTC}
+  QCOM:      {aliases: [Qualcomm, QCOM], yahoo: QCOM}
+  TXN:       {aliases: ["Texas Instruments", TXN], yahoo: TXN}
+  ADI:       {aliases: ["Analog Devices"], yahoo: ADI}
+  NXPI:      {aliases: [NXP, NXPI], yahoo: NXPI}
+  "ON":      {aliases: [onsemi, "ON Semiconductor"], yahoo: "ON"}   # quoted: YAML reads bare ON as true
+  SMH:       {aliases: [SMH], yahoo: SMH}
+  SOXX:      {aliases: [SOXX], yahoo: SOXX}
+  # --- ib (futures roots; the micro contracts share the underlying, so they get no feed of their own)
+  GC:        {aliases: ["gold futures", "gold prices", "Comex gold"], yahoo: GC=F}
+  SI:        {aliases: ["silver futures", "silver prices"], yahoo: SI=F}

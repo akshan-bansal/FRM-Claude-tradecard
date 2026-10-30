@@ -1,0 +1,84 @@
+# Secrets
+.env
+.env.local
+state/tokens.json*
+*.pem
+*.key
+
+# Local trading config (Claude-managed; not secret but per-machine)
+config/trading.yaml
+# Machine-local overrides (e.g. the SEC contact in news_sources.local.yaml)
+config/*.local.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.uv/
+*.egg-info/
+build/
+dist/
+
+# Test/coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Data & logs (never commit market data or trade history)
+data/cache/
+data/*.parquet
+data/*.csv
+logs/
+reports/*.md
+state/positions.json
+state/equity.csv
+state/orders.jsonl
+state/fills.jsonl
+state/rejected.jsonl
+state/paper_fills.jsonl
+state/paper_orders.jsonl
+state/paper_equity.csv
+state/intel_overlay.jsonl
+state/intel_graph.jsonl
+state/autonomous.pid
+state/HALTED
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Notebooks
+.ipynb_checkpoints/
+data/fundamentals/*.csv
+
+# TradeCard firmware — ESP-IDF build outputs; the wheel only ships src/ Python.
+firmware/tradecard/build/
+firmware/tradecard/managed_components/
+firmware/tradecard/sdkconfig
+firmware/tradecard/sdkconfig.old
+firmware/tradecard/dependencies.lock
+
+# TradeCard runtime state
+state/card_sim/
+state/intel_writeups/
+state/approval.db
+state/approval.db-wal
+state/approval.db-shm
+
+# News / lens journals (runtime ground truth, never committed)
+state/news*.jsonl
+state/news_health.json
+state/gdelt_gkg/
+state/lens_*.jsonl
+state/STOP_*
+.git.dead-worktree-pointer
