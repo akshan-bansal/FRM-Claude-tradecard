@@ -15,6 +15,11 @@ lists (the article refers to it somewhere, often in passing). GDELT's document t
 field; nothing here scores sentiment.
 
 A rolling window (``prune_to_span``) keeps the newest N bytes' worth of source files (user 2026-10-12: 75 GB).
+
+Themes (2026-10-30, for the graph adapter's bridge): each kept row carries its raw V1 theme codes, and with
+a ``ThemeMap`` each progress row carries per-domain article counts over EVERY article in the file, not only
+the kept ones, plus the map id: a global, point-in-time domain-intensity series on GDELT's own clock. Rows
+and files fetched before this carry neither, and readers treat them as unknown.
 """
 from __future__ import annotations
 
@@ -29,11 +34,14 @@ from html import unescape
 from pathlib import Path
 
 from trading_live_claude.news.collector import MAX_TITLE, _title_key, map_symbols
+from trading_live_claude.news.gkg_themes import ThemeMap
 
 BASE_URL = "https://data.gdeltproject.org/gdeltv2/{stamp}.gkg.csv.zip"
 LAST_UPDATE_URL = "https://data.gdeltproject.org/gdeltv2/lastupdate.txt"
 STEP = timedelta(minutes=15)
 N_COLUMNS = 27
+THEMES_COL = 7  # V1Themes: semicolon-separated theme codes
+MAX_THEMES = 80
 _TITLE = re.compile(r"<PAGE_TITLE>(.*?)</PAGE_TITLE>", re.S)
 _OFFSET = re.compile(r",\d+")  # V2.1AllNames carries "name,char_offset;" pairs
 
@@ -51,19 +59,47 @@ def stamp_iso(stamp: str) -> str:
     return datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(tzinfo=UTC).isoformat()
 
 
+@dataclass(frozen=True)
+class GkgFile:
+    total: int  # articles in the file
+    kept: list[dict[str, object]]  # articles naming a basket symbol
+    domain_counts: dict[str, int] | None  # articles per stress domain over ALL articles; None without a map
+
+
+def _themes(field: str) -> list[str]:
+    """Distinct theme codes in order of first appearance, capped."""
+    seen: dict[str, None] = {}
+    for code in field.split(";"):
+        if code:
+            seen.setdefault(code, None)
+    return list(seen)[:MAX_THEMES]
+
+
 def parse_gkg(payload: bytes, *, stamp: str,
               aliases: Mapping[str, tuple[str, ...]]) -> tuple[int, list[dict[str, object]]]:
     """(rows in file, kept rows) from one zipped GKG file. Rows with no symbol in either field are dropped."""
+    f = parse_gkg_file(payload, stamp=stamp, aliases=aliases)
+    return f.total, f.kept
+
+
+def parse_gkg_file(payload: bytes, *, stamp: str, aliases: Mapping[str, tuple[str, ...]],
+                   theme_map: ThemeMap | None = None) -> GkgFile:
+    """One zipped GKG file: kept rows (with their theme codes) and, given a map, per-domain counts."""
     with zipfile.ZipFile(io.BytesIO(payload)) as z:
         text = z.read(z.namelist()[0]).decode("utf-8", "replace")
     arrived = stamp_iso(stamp)
     total = 0
     kept: list[dict[str, object]] = []
+    counts = dict.fromkeys(theme_map.domains, 0) if theme_map is not None else None
     for line in text.splitlines():
         c = line.split("\t")
         if len(c) < N_COLUMNS:
             continue
         total += 1
+        themes = _themes(c[THEMES_COL])
+        if counts is not None and theme_map is not None:
+            for d in theme_map.domains_for(themes):
+                counts[d] += 1
         m = _TITLE.search(c[26])
         title = re.sub(r"\s+", " ", unescape(m.group(1))).strip()[:MAX_TITLE] if m else ""
         symbols = map_symbols(title, aliases) if title else ()
@@ -79,9 +115,9 @@ def parse_gkg(payload: bytes, *, stamp: str,
             "source": "gdelt_gkg", "guid": c[0], "title": title, "link": c[4], "domain": c[3],
             "published_utc": "", "arrived_utc": arrived, "title_key": _title_key(title),
             "symbols": list(symbols), "org_symbols": list(org_symbols),
-            "tone": tone if tone == tone else None, "backfill": True,
+            "tone": tone if tone == tone else None, "themes": themes, "backfill": True,
         })
-    return total, kept
+    return GkgFile(total, kept, counts)
 
 
 def latest_stamp(*, timeout: float = 20.0) -> str | None:
@@ -103,13 +139,32 @@ class Fetched:
     error: str = ""
 
 
-def fetch_file(stamp: str, *, timeout: float = 60.0) -> Fetched:
+RETRIES = 3  # attempts per file for transient failures
+
+
+def fetch_file(stamp: str, *, timeout: float = 60.0, sleep: Callable[[float], None] | None = None) -> Fetched:
+    """One GKG file. Network errors and 5xx are retried with backoff (2 s, then 4 s): the 2026-10-30 e2e saw 7 of
+    13 downloads fail with transient SSL "record layer" errors, and a file left failed stays a hole until the
+    next run. A 404 is final (the file does not exist) and is returned at once."""
+    import time
+
     import httpx
 
-    try:
-        r = httpx.get(BASE_URL.format(stamp=stamp), timeout=timeout, follow_redirects=True)
-    except httpx.HTTPError as exc:
-        return Fetched(0, error=f"{type(exc).__name__}: {exc}"[:200])
+    wait = sleep or time.sleep
+    last = Fetched(0, error="not attempted")
+    for attempt in range(RETRIES):
+        try:
+            r = httpx.get(BASE_URL.format(stamp=stamp), timeout=timeout, follow_redirects=True)
+        except httpx.HTTPError as exc:
+            last = Fetched(0, error=f"{type(exc).__name__}: {exc}"[:200])
+        else:
+            if r.status_code < 500:
+                break
+            last = Fetched(r.status_code, error=f"HTTP {r.status_code}")
+        if attempt < RETRIES - 1:
+            wait(2.0 * 2 ** attempt)
+    else:
+        return last
     return Fetched(r.status_code, r.content if r.status_code == 200 else b"",
                    "" if r.status_code == 200 else f"HTTP {r.status_code}")
 
@@ -125,6 +180,8 @@ class Backfill:
     # The forward follower runs beside the backfill: its own progress and row files, so the two
     # processes never append to the same file and the backfill's byte budget is not spent going forward.
     prefix: str = ""
+    # With a map, every progress row also records per-domain counts over all articles, and the map id.
+    theme_map: ThemeMap | None = None
 
     @property
     def progress_path(self) -> Path:
@@ -153,11 +210,14 @@ class Backfill:
         if res.status != 200:
             return {"stamp": stamp, "status": "error", "bytes": len(res.body), "error": res.error}, []
         try:
-            total, kept = parse_gkg(res.body, stamp=stamp, aliases=self.aliases)
+            f = parse_gkg_file(res.body, stamp=stamp, aliases=self.aliases, theme_map=self.theme_map)
         except (zipfile.BadZipFile, KeyError, IndexError) as exc:
             return {"stamp": stamp, "status": "error", "bytes": len(res.body), "error": f"parse: {exc}"[:200]}, []
-        return {"stamp": stamp, "status": "ok", "bytes": len(res.body), "rows": total, "kept": len(kept),
-                "title_kept": sum(1 for r in kept if r["symbols"])}, kept
+        row: dict[str, object] = {"stamp": stamp, "status": "ok", "bytes": len(res.body), "rows": f.total,
+                                  "kept": len(f.kept), "title_kept": sum(1 for r in f.kept if r["symbols"])}
+        if f.domain_counts is not None and self.theme_map is not None:
+            row |= {"domain_counts": f.domain_counts, "theme_map": self.theme_map.id}
+        return row, f.kept
 
     def settled_everywhere(self) -> set[str]:
         """Stamps settled by the backfill OR the follower, so neither re-fetches what the other has."""

@@ -1,0 +1,59 @@
+id,section,name,unit,lo,hi,stale_after_s,source,definition
+PF.NAV,01 Portfolio,Equity,USD,,,3600,paper_equity.csv,Last journaled equity of the newest paper session
+PF.CASH,01 Portfolio,Cash,USD,,,3600,paper_equity.csv,Cash on the same equity row
+PF.RPNL,01 Portfolio,Realised P&L,USD,,,3600,paper_equity.csv,Realised P&L of the session (partial-sell aware)
+PF.UPNL,01 Portfolio,Unrealised P&L,USD,,,3600,paper_equity.csv,Mark-to-market P&L of open positions
+PF.DD,01 Portfolio,Drawdown from peak,%,0,10,3600,paper_equity.csv,Drawdown from the running peak: the series the kill-switch reads
+PF.EXPO,01 Portfolio,Invested share,%,0,100,3600,paper_equity.csv,Positions value as a share of equity
+PF.FILLS24,01 Portfolio,Fills (24 h),count,,,3600,paper_fills.jsonl,Fills with a fill time in the 24 h before the snapshot
+RG.HALT,02 Risk gates,Kill-switch tripped,flag,0,1,300,state/HALTED,1 when state/HALTED exists; 0 when clear
+RG.REJ24,02 Risk gates,Gate rejections (24 h),count,,,3600,rejected.jsonl,Intents the router rejected in the last 24 h
+RG.REJTOT,02 Risk gates,Gate rejections (journal),count,,,86400,rejected.jsonl,Every row in the rejection journal (spans sessions)
+AP.PENDING,03 Approvals,Pending prompts,count,,,300,approval.db,Unresolved intents whose TTL has not run out
+AP.ACCEPT,03 Approvals,Accepted,count,,,86400,approval.db,Intents the card ACCEPTED
+AP.DECLINE,03 Approvals,Declined,count,,,86400,approval.db,Intents the card DECLINED
+AP.EXPIRE,03 Approvals,Expired,count,,,86400,approval.db,Intents that ran out of TTL unanswered
+AP.RESP,03 Approvals,Median card response,s,0,120,86400,approval.db,Median issue-to-decision time over decided prompts (expired excluded)
+NW.HEAD24,04 News,Headlines (24 h),count,,,1800,news.jsonl,Headlines the live collector journaled in the last 24 h
+NW.MAPPED,04 News,Title-mapped share (24 h),%,0,100,1800,news.jsonl,Share of those headlines that name a basket symbol in the title
+NW.FEEDSOK,04 News,Feeds healthy,count,,,1800,news_health.json,Feeds whose last fetch succeeded
+NW.FEEDSFAIL,04 News,Feeds failing,count,0,10,1800,news_health.json,Feeds in back-off after a failed fetch
+NW.BEAT,04 News,Collector heartbeat age,min,0,60,1800,news_passes.jsonl,Minutes since the collector's last pass
+GK.FILES24,05 GDELT,GKG files (24 h),count,0,96,3600,gdelt_gkg/*progress.jsonl,15-minute GKG files fetched for the last 24 h (96 is complete)
+GK.ART24,05 GDELT,Articles scanned (24 h),count,,,3600,gdelt_gkg/*progress.jsonl,Articles in those files
+GK.KEPT24,05 GDELT,Articles kept (24 h),count,,,3600,gdelt_gkg/*progress.jsonl,Articles naming a basket symbol in title or organisations
+GK.COV,05 GDELT,Crawl coverage (24 h),%,0,100,3600,gdelt_gkg/*progress.jsonl,Share of the last 24 hours with at least one file
+GK.SPAN,05 GDELT,History span,days,,,86400,gdelt_gkg/*progress.jsonl,Days between the oldest and newest file held
+GK.GB,05 GDELT,Backfill transfer,GB,0,75,86400,gdelt_gkg/progress.jsonl,Bytes the backfill has transferred against its 75 GB budget
+DZ.ENERGY,06 Stress domains,Energy (abnormal),z,-4,4,3600,graph adapter,Energy share of all GKG articles vs its prior 28 days
+DZ.CONFLICT,06 Stress domains,Conflict (abnormal),z,-4,4,3600,graph adapter,Conflict share of all GKG articles vs its prior 28 days
+DZ.MILITARY,06 Stress domains,Military (abnormal),z,-4,4,3600,graph adapter,Military share of all GKG articles vs its prior 28 days
+DZ.ECONOMY,06 Stress domains,Economy (abnormal),z,-4,4,3600,graph adapter,Economy share of all GKG articles vs its prior 28 days
+DZ.DISASTER,06 Stress domains,Disaster (abnormal),z,-4,4,3600,graph adapter,Disaster share of all GKG articles vs its prior 28 days
+OV.CRYPTO,07 Intel overlay,Crypto scalar,x,0,1,7200,intel_overlay.jsonl,De-risk multiplier for crypto in the last non-empty snapshot
+OV.EQUITY,07 Intel overlay,Equity scalar,x,0,1,7200,intel_overlay.jsonl,De-risk multiplier for equities
+OV.COMMODITY,07 Intel overlay,Commodity scalar,x,0,1,7200,intel_overlay.jsonl,De-risk multiplier for commodities
+OV.GPR,07 Intel overlay,Strategic risk,index,0,100,7200,intel_overlay.jsonl,WorldMonitor geopolitical index
+OV.FG,07 Intel overlay,Fear and greed,index,0,100,7200,intel_overlay.jsonl,Market fear and greed reading
+OV.DEGRADED,07 Intel overlay,Feed degraded,flag,0,1,7200,intel_overlay.jsonl,1 when the snapshot was built from a partial fetch
+GR.EDGES,08 Graph,Edges held,count,,,86400,intel_graph.jsonl,Edges in the graph journal after washing
+GR.EDGES24,08 Graph,Edges written (24 h),count,,,3600,intel_graph.jsonl,Edges stamped in the last 24 h
+GR.MENT24,08 Graph,News mentions (24 h),count,,,3600,intel_graph.jsonl,event-mentions-symbol edges in the last 24 h
+GR.VENUE,08 Graph,Own-activity share (7 d),%,0,100,3600,graph adapter,Share of edges that are the book's own trades: removed by the adapter
+LS.ROWS,09 Lens store,Feature rows,count,,,86400,lens_features.jsonl,Symbol-day rows in the point-in-time store
+LS.AGE,09 Lens store,Newest row age,days,0,3,86400,lens_features.jsonl,Days between the newest row's date and the snapshot
+LS.LIVE,09 Lens store,Built live,%,0,100,86400,lens_features.jsonl,Rows frozen within 2 h of their cutoff (the rest are rebuilds)
+LS.GX,09 Lens store,Graph-adapter coverage,%,0,100,86400,lens_features.jsonl,Rows with a known gx_stress_exposure
+LS.LABELS,09 Lens store,Risk labels,count,,,86400,lens_labels.jsonl,Matured 5-day drawdown labels
+LV.TESTED,10 Lens verdicts,Verdicts tested,count,,,604800,reports/lens_backtest_*.json,(lens rule) pairs scored on the training dates
+LV.PASSED,10 Lens verdicts,Verdicts passed,count,,,604800,reports/lens_backtest_*.json,Pairs with rho > 0 and raw p < 0.05 (no FDR correction)
+LV.CHANCE,10 Lens verdicts,Expected by chance,count,,,604800,reports/lens_backtest_*.json,Passes expected if no lens had any signal (tested x 0.05)
+LV.RHO,10 Lens verdicts,Fused holdout rho,rho,-1,1,604800,reports/lens_backtest_*.json,Rank correlation of the fused score with realised drawdown on the holdout
+LV.VETOGAP,10 Lens verdicts,Veto drawdown gap,%,,,604800,reports/lens_backtest_*.json,Mean drawdown of vetoed minus kept holdout events
+OA.SPENT,11 OASIS,Spent,USD,0,100,86400,oasis_ledger.jsonl,Settled simulation spend
+OA.RESERVED,11 OASIS,Reserved,USD,0,100,86400,oasis_ledger.jsonl,Caps held by seeds awaiting a result
+OA.LEFT,11 OASIS,Left of $100,USD,0,100,86400,oasis_ledger.jsonl,Credit not yet spent or reserved
+OA.RUNS,11 OASIS,Runs ingested,count,,,86400,oasis_runs.jsonl,Simulation runs ingested
+OA.AGE,11 OASIS,Last run age,h,0,168,86400,oasis_runs.jsonl,Hours since the last run was ingested (stances expire at 168)
+OA.AGENTS,11 OASIS,Last run agents,count,,,86400,oasis_runs.jsonl,Agents in the last ingested run
+OA.SYMS,11 OASIS,Last run symbols,count,,,86400,oasis_runs.jsonl,Symbols the last society held a stance on

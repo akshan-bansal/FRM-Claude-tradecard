@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from trading_live_claude.intel.graph import (
-    DEFAULT_GRAPH_JOURNAL,
+    default_graph_journal,
     edge_persistence,
     load_edges,
 )
@@ -184,11 +184,11 @@ class PersistenceGate:
     """
 
     def __init__(self, *, min_polls: int = 5, refresh_seconds: float = 60.0,
-                 graph_path: str | Path = DEFAULT_GRAPH_JOURNAL,
+                 graph_path: str | Path | None = None,
                  class_overrides: Mapping[str, OverlayClass] | None = None) -> None:
         self.min_polls = int(min_polls)
         self._refresh = float(refresh_seconds)
-        self._graph_path = Path(graph_path)
+        self._graph_path = Path(graph_path) if graph_path is not None else default_graph_journal()
         self._overrides = class_overrides
         # Precomputed per-domain persistence, refreshed on cadence. None → not yet read.
         self._persistence_by_domain: dict[str, int] | None = None

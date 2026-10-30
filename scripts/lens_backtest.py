@@ -93,6 +93,16 @@ def main() -> int:
     out = ROOT / "reports" / f"lens_backtest_{datetime.now(UTC):%Y-%m-%d}.md"
     out.parent.mkdir(exist_ok=True)
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Machine-readable summary for the Evidence Atlas (LV.* meters).
+    out.with_suffix(".json").write_text(json.dumps({
+        "generated_utc": datetime.now(UTC).isoformat(), "alpha": ALPHA, "tested": len(tv),
+        "passed": sum(v.passed for v in tv), "expected_by_chance": round(len(tv) * ALPHA, 3),
+        "voters": [f"{x}/{y}" for x, y in voters],
+        "fused_rho": None if bt is None else bt.rho,
+        "veto_gap": None if bt is None else bt.dd_vetoed - bt.dd_kept,
+        "verdicts": [{"lens": v.lens, "rule": v.rule, "n": v.n, "rho": v.rho, "p": v.p, "passed": v.passed}
+                     for v in tv],
+    }, indent=1), encoding="utf-8")
     print("\n".join(lines))
     print(f"\n-> {out}")
     return 0

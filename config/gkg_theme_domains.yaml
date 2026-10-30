@@ -1,0 +1,37 @@
+# GDELT GKG theme codes -> the five WorldMonitor stress domains, for the graph adapter's theme bridge.
+#
+# FROZEN (2026-10-30). Chosen from the codebook and from code frequencies in a live GKG file, BEFORE any
+# lens result was seen, and never tuned on outcomes. Changing it changes the map id: progress rows and
+# features built under an older id are then treated as unknown, not silently mixed.
+#
+# A code matches a domain if it is listed under `exact` or starts with an entry under `prefix`. One code
+# may match several domains (ECON_OILPRICE is energy and economy). `exclude` wins over everything.
+
+version: 1
+
+exclude:
+  - MANMADE_DISASTER_IMPLIED   # GDELT's implied-disaster flag: ~1 in 5 articles, mostly noise
+  - EPU_ECONOMY_HISTORIC       # historical economic-policy mentions, not current conditions
+  - SECURITY_SERVICES          # generic (police, guards), not a stress signal
+
+domains:
+  energy:
+    exact: [ENV_OIL, ENV_NATURALGAS, ENV_COAL, ENV_NUCLEARPOWER, FUELPRICES, ECON_OILPRICE,
+            ECON_NATGASPRICE, ECON_GASOLINEPRICE, ECON_HEATINGOIL, ECON_DIESELPRICE,
+            ECON_ELECTRICALGENERATION, ECON_ELECTRICALGRID, ECON_ELECTRICALDEMAND]
+    prefix: []
+  conflict:
+    exact: [ARMEDCONFLICT, KILL, TERROR, REBELLION, REBELS, PROTEST, POLITICAL_TURMOIL, CYBER_ATTACK,
+            SANCTIONS, BLOCKADE]
+    prefix: [UNREST_]
+  military:
+    exact: [MILITARY, EPU_CATS_NATIONAL_SECURITY, WMD]
+    prefix: [SLFID_MILITARY_]
+  economy:
+    exact: [EPU_ECONOMY, ECON_INFLATION, ECON_INTEREST_RATES, ECON_CENTRALBANK, ECON_STOCKMARKET,
+            ECON_DEBT, ECON_BANKRUPTCY, ECON_BUDGET_DEFICIT, ECON_CURRENCY_EXCHANGE_RATE,
+            ECON_COST_OF_LIVING, ECON_BITCOIN, ECON_OILPRICE]
+    prefix: [EPU_POLICY_, ECON_WORLDCURRENCIES]
+  disaster:
+    exact: [MANMADE_DISASTER, DISASTER_FIRE]
+    prefix: [NATURAL_DISASTER]

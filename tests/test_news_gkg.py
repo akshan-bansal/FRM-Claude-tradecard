@@ -7,7 +7,16 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from trading_live_claude.news.gkg import Backfill, Fetched, parse_gkg, prune_to_span, stamps, window_start
+import pytest
+
+from trading_live_claude.news.gkg import (
+    Backfill,
+    Fetched,
+    parse_gkg,
+    prune_to_span,
+    stamps,
+    window_start,
+)
 
 ALIASES = {"NVDA": ("Nvidia",), "SONY": ("Sony",)}
 
@@ -91,3 +100,77 @@ def test_spent_bytes_accumulate_across_runs(tmp_path: Path) -> None:
     again.commit(*again.process("20260601001500"))
     assert again.done()[1] == 2 * len(body)
     assert not list(tmp_path.glob("2026-06.jsonl"))  # nothing matched, so no rows file
+
+
+# --------------------------------------------------------------------------- theme bridge (2026-10-30)
+
+THEME_MAP_PATH = Path(__file__).resolve().parent.parent / "config" / "gkg_theme_domains.yaml"
+
+
+def _row_with_themes(rid: str, title: str, themes: str) -> str:
+    c = _row(rid, title).split("\t")
+    c[7] = themes
+    return "\t".join(c)
+
+
+def test_theme_codes_map_by_exact_code_and_prefix_and_exclusions_win() -> None:
+    from trading_live_claude.news.gkg_themes import load_theme_map
+
+    tm = load_theme_map(THEME_MAP_PATH)
+    assert tm.domains_for(["ENV_OIL"]) == {"energy"}
+    assert tm.domains_for(["ECON_OILPRICE"]) == {"energy", "economy"}
+    assert tm.domains_for(["NATURAL_DISASTER_FLOOD", "UNREST_BELLIGERENT"]) == {"disaster", "conflict"}
+    assert tm.domains_for(["MANMADE_DISASTER_IMPLIED", "EPU_ECONOMY_HISTORIC", "TAX_FNCACT"]) == frozenset()
+    assert all(tm.exact[d] or tm.prefix[d] for d in tm.domains)
+
+
+def test_the_map_id_changes_when_the_map_does(tmp_path: Path) -> None:
+    from trading_live_claude.news.gkg_themes import load_theme_map
+
+    a = load_theme_map(THEME_MAP_PATH)
+    assert load_theme_map(THEME_MAP_PATH).id == a.id
+    other = tmp_path / "m.yaml"
+    other.write_text("domains:\n  energy: {exact: [ENV_OIL]}\n", encoding="utf-8")
+    assert load_theme_map(other).id != a.id
+
+
+def test_kept_rows_carry_themes_and_progress_counts_every_article(tmp_path: Path) -> None:
+    from trading_live_claude.news.gkg_themes import load_theme_map
+
+    tm = load_theme_map(THEME_MAP_PATH)
+    body = _zip(_row_with_themes("a", "Nvidia ships", "ENV_OIL;ENV_OIL;TAX_FNCACT"),
+                _row_with_themes("b", "Rain in Ohio", "NATURAL_DISASTER_FLOOD"),  # not kept, still counted
+                _row_with_themes("c", "Markets", "ECON_INFLATION"))
+    bf = Backfill(out_dir=tmp_path, aliases=ALIASES, budget_bytes=10**9, fetch=lambda s: Fetched(200, body),
+                  theme_map=tm)
+    row, kept = bf.process("20260601000000")
+    assert [r["themes"] for r in kept] == [["ENV_OIL", "TAX_FNCACT"]]  # de-duplicated, order kept
+    assert row["domain_counts"] == {"conflict": 0, "disaster": 1, "economy": 1, "energy": 1, "military": 0}
+    assert row["theme_map"] == tm.id and row["rows"] == 3
+
+
+def test_transient_fetch_failures_are_retried_and_a_404_is_not(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    from trading_live_claude.news import gkg
+
+    calls: list[str] = []
+
+    def flaky(url: str, **kw: object) -> httpx.Response:
+        calls.append(url)
+        if len(calls) < 3:
+            raise httpx.ReadError("[SSL] record layer failure")
+        return httpx.Response(200, content=b"zip")
+
+    monkeypatch.setattr(httpx, "get", flaky)
+    waits: list[float] = []
+    assert gkg.fetch_file("20261030120000", sleep=waits.append) == Fetched(200, b"zip", "")
+    assert len(calls) == 3 and waits == [2.0, 4.0]
+
+    calls.clear()
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: calls.append(url) or httpx.Response(404))
+    assert gkg.fetch_file("20261030120000", sleep=waits.append).status == 404 and len(calls) == 1
+
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: (_ for _ in ()).throw(httpx.ConnectError("down")))
+    out = gkg.fetch_file("20261030120000", sleep=lambda s: None)
+    assert out.status == 0 and "ConnectError" in out.error

@@ -38,7 +38,6 @@ from trading_live_claude.brokers.kraken import KrakenBroker
 from trading_live_claude.brokers.paper import PaperBroker
 from trading_live_claude.config import get_settings
 from trading_live_claude.data.cache import CandleCache
-from trading_live_claude.data.kraken_ohlc import kraken_ohlc
 from trading_live_claude.data.market import MarketData
 from trading_live_claude.execution.approval import wire_card_approval
 from trading_live_claude.execution.router import Router
@@ -48,44 +47,9 @@ from trading_live_claude.intel.routing import OverlayProvider
 from trading_live_claude.intel.vs_engine import MarketContext, VSInvestmentEngine
 from trading_live_claude.intel.worldmonitor import WorldMonitorClient
 from trading_live_claude.monitor.live_loop import LiveMonitor, MonitorEvent
-from trading_live_claude.portfolio.allocator import PortfolioAllocator
+from trading_live_claude.portfolio.sleeve_bias import sleeve_conviction_bias
 from trading_live_claude.risk.sizing import PositionSizer
 from trading_live_claude.strategies import STRATEGIES
-
-
-def _compute_allocator_bias(pairs: dict) -> dict[str, float]:
-    """Run the correlation-aware allocator over the sleeve and return per-symbol conviction bias.
-
-    Bias = allocator_weight / equal_weight_baseline. A pair the allocator concentrates on gets
-    bias > 1.0 (boost), a redundant pair in a correlated cluster gets < 1.0 (trim). Equal-weight
-    is the neutral case at exactly 1.0.
-
-    Fetches shallow Kraken daily OHLC (~720 bars/pair) once at startup — the cadence for a
-    correlation matrix refresh is weekly at most, so a start-of-session compute is fine. If any
-    pair's fetch fails, its bias is 1.0 (neutral) rather than dropping it from the sleeve.
-    """
-    import pandas as pd
-    returns: dict[str, pd.Series] = {}
-    scores: dict[str, float] = {}
-    for routed, entry in pairs.items():
-        try:
-            df = kraken_ohlc(entry.pair, interval=1440)
-            returns[routed] = df.set_index("time")["close"].pct_change().dropna()
-            scores[routed] = float(entry.screen_score)
-        except Exception as e:
-            print(f"[allocator] {routed}: fetch failed ({e}); bias defaults to 1.0", flush=True)
-    if not returns:
-        return {r: 1.0 for r in pairs}
-    # Cap per-name at 0.30 so no single pair dominates; sleeve-level is one sleeve so it doesn't
-    # matter. min_score=0 so every positive-scoring pair gets a slot.
-    allocator = PortfolioAllocator(max_weight=0.30, max_sleeve_weight=1.0, min_score=0.0)
-    result = allocator.allocate(returns, scores, regime_scalar=1.0)
-    if not result.weights:
-        return {r: 1.0 for r in pairs}
-    equal_weight = 1.0 / len(returns)
-    bias = {r: (result.weights.get(r, 0.0) / equal_weight) if equal_weight > 0 else 1.0
-            for r in pairs}
-    return bias
 
 
 def main() -> None:
@@ -212,7 +176,7 @@ def main() -> None:
     # score. Runs once at startup; the correlation matrix is stable enough at daily cadence
     # that a start-of-session compute is fine (weekly refresh cadence at most).
     print("[kraken-paper] computing correlation-aware allocator weights...", flush=True)
-    bias_map = _compute_allocator_bias(sleeve)
+    bias_map = sleeve_conviction_bias(sleeve)
     print("[kraken-paper] allocator conviction bias (baseline = 1.0):", flush=True)
     for sym in sorted(bias_map, key=lambda s: -bias_map[s]):
         arrow = "boost" if bias_map[sym] > 1.05 else "trim" if bias_map[sym] < 0.95 else "neutral"

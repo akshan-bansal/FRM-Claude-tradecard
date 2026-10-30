@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from trading_live_claude.analysis.feature_store import Sources, build, load_store, universe
+from trading_live_claude.news.gkg_themes import load_theme_map
 
 ROOT = Path(__file__).resolve().parent.parent
 STATE = ROOT / "state"
@@ -56,7 +57,8 @@ def _overlay_poller():  # type: ignore[no-untyped-def]
 
 def _build(days: list[date], *, force: bool) -> int:
     insts = universe(ROOT / "config" / "basket_seed.json")
-    src = Sources.load(STATE, [i.symbol for i in insts])
+    src = Sources.load(STATE, [i.symbol for i in insts],
+                       theme_map=load_theme_map(ROOT / "config" / "gkg_theme_domains.yaml"))
     rows = build(STORE, src, insts, days, now=datetime.now(UTC), force_rebuild=force)
     modes = collections.Counter(r["mode"] for r in rows)
     print(f"[lens-features] {len(rows)} rows appended ({dict(modes)}) for {days[0]}..{days[-1]}"
@@ -83,7 +85,8 @@ def main() -> int:
         modes = collections.Counter(r["mode"] for r in rows)
         dates = sorted({r["date"] for r in rows})
         print(f"{len(rows)} rows, {len({r['symbol'] for r in rows})} symbols, {dates[0]}..{dates[-1]}, {dict(modes)}")
-        for fam in ("live_title_24h", "gkg_title_24h", "ov_scalar", "graph_events_24h"):
+        for fam in ("live_title_24h", "gkg_title_24h", "ov_scalar", "graph_events_24h",
+                    "gx_att_share", "gx_stress_exposure", "gx_net_exposure"):
             n = sum(1 for r in rows if r["features"].get(fam) is not None)
             print(f"  {fam:18} known on {n:6} rows ({n / len(rows):.0%})")
         return 0

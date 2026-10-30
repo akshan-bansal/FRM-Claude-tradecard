@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 import time
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
@@ -40,6 +41,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 STATE = Path("state")
 REPORTS = Path("reports")
@@ -280,9 +282,9 @@ def section_equity_curves() -> str:
 def section_allocator_bias() -> str:
     """Current Kraken sleeve allocator conviction bias."""
     try:
-        from scripts.paper_kraken import _compute_allocator_bias
         from trading_live_claude.analysis.universe import CRYPTO_SLEEVE
-        bias = _compute_allocator_bias(CRYPTO_SLEEVE)
+        from trading_live_claude.portfolio.sleeve_bias import sleeve_conviction_bias
+        bias = sleeve_conviction_bias(CRYPTO_SLEEVE)
     except Exception as e:
         return _section("Allocator bias (Kraken sleeve)",
                          f"<p class='muted'>Compute failed: {e}</p>")

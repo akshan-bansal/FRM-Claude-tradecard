@@ -82,3 +82,8 @@ state/gdelt_gkg/
 state/lens_*.jsonl
 state/STOP_*
 .git.dead-worktree-pointer
+# OASIS: seeds, results, run records and the spend ledger are runtime state
+state/oasis_seeds/
+state/oasis_inbox/
+state/oasis_runs.jsonl
+state/oasis_ledger.jsonl

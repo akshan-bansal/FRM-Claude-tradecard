@@ -57,6 +57,10 @@ LENSES: dict[str, tuple[str, ...]] = {
     "news_live": ("live_title_24h", "live_tagged_24h", "live_sources_24h"),
     "overlay": ("ov_scalar", "ov_strategic_risk", "ov_accel_max", "ov_global_alerts"),
     "graph": ("graph_events_24h",),
+    # The graph adapter (analysis/graph_adapter.py): symbol-specific OSINT, venue excluded and residualised.
+    "graph_osint": ("gx_att_share", "gx_stress_exposure", "gx_net_exposure", "gx_degree"),
+    # OASIS (sim/): what a simulated society briefed only on OSINT reported. Sparse: one row per run.
+    "society": ("soc_stance", "soc_dispersion"),
 }
 _COUNTS = {"gkg_title_24h", "gkg_tagged_24h", "gkg_sources_24h", "live_title_24h", "live_tagged_24h",
            "live_sources_24h", "graph_events_24h", "ov_global_alerts"}

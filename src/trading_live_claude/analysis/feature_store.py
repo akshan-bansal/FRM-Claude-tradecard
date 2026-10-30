@@ -16,6 +16,9 @@ Clocks are never mixed. Each feature family reads one clock and says so in its n
 * ``gkg_*``   - GDELT's crawl clock (``state/gdelt_gkg/*.jsonl``, file stamp; backfill and follower).
 * ``ov_*``    - the overlay snapshot's ``as_of`` (``state/intel_overlay.jsonl``), per asset class.
 * ``graph_*`` - edge ``as_of`` in the graph journal (WorldMonitor events by domain).
+* ``gx_*``    - the graph adapter (``analysis/graph_adapter.py``) on GDELT's crawl clock, venue removed.
+* ``soc_*``   - the latest OASIS society stance on the symbol, as of when the run was INGESTED here
+                (``state/oasis_runs.jsonl``), never the VM's own finish time; unknown after 7 days.
 
 Every row carries coverage per clock, so a lens can tell "nothing happened" from "nothing was
 recorded". A row is ``mode: live`` when built within ``LIVE_GRACE`` of its cutoff (truly point in time)
@@ -27,7 +30,6 @@ strategies, monitor or the daemon imports it, and it imports none of them (a tes
 from __future__ import annotations
 
 import json
-from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -35,7 +37,13 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from trading_live_claude.analysis.graph_adapter import GraphSources, graph_features
+from trading_live_claude.analysis.pit import TimeIndex
+from trading_live_claude.analysis.pit import coverage_hours as _coverage_hours
+from trading_live_claude.analysis.pit import parse_ts as _ts
+from trading_live_claude.analysis.pit import read_jsonl as _jsonl
 from trading_live_claude.intel.routing import classify_symbol
+from trading_live_claude.news.gkg_themes import ThemeMap
 
 VERSION = 1
 LIVE_GRACE = timedelta(hours=2)
@@ -44,6 +52,7 @@ NOVELTY_LOOKBACK = timedelta(days=7)
 ABNORMAL_BASELINE_DAYS = 28
 MIN_BASELINE_COVERAGE = 0.8  # share of baseline days that must be covered before a ratio is reported
 OVERLAY_MAX_AGE = timedelta(hours=6)
+SOCIETY_MAX_AGE = timedelta(days=7)
 CUTOFF_HOUR_UTC = {"crypto": 0}  # every other class: DEFAULT_CUTOFF_HOUR
 DEFAULT_CUTOFF_HOUR = 20
 
@@ -80,27 +89,6 @@ def cutoff_for(day: date, asset_class: str) -> datetime:
 # --------------------------------------------------------------------------- sources
 
 
-def _ts(raw: object) -> datetime | None:
-    try:
-        t = datetime.fromisoformat(str(raw).replace(" ", "T").replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return t if t.tzinfo else t.replace(tzinfo=UTC)
-
-
-def _jsonl(path: Path) -> Iterator[dict[str, Any]]:
-    if not path.exists():
-        return
-    with path.open(encoding="utf-8") as fh:
-        for line in fh:
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(row, dict):
-                yield row
-
-
 @dataclass(frozen=True)
 class Article:
     at: datetime
@@ -108,28 +96,6 @@ class Article:
     source: str  # feed name (live) or publishing domain (gkg)
     title: bool  # the title names the symbol (vs. only tagged / org-listed)
     tone: float | None = None
-
-
-class TimeIndex:
-    """Sorted times with a payload, for half-open window queries ``[start, end)``.
-
-    The end is open: a record stamped exactly at a cutoff was not known before it.
-    """
-
-    def __init__(self, items: Iterable[tuple[datetime, Any]]) -> None:
-        pairs = sorted(items, key=lambda p: p[0])
-        self.times = [p[0] for p in pairs]
-        self.items = [p[1] for p in pairs]
-
-    def window(self, start: datetime, end: datetime) -> list[Any]:
-        return self.items[bisect_left(self.times, start):bisect_left(self.times, end)]
-
-    def times_in(self, start: datetime, end: datetime) -> list[datetime]:
-        return self.times[bisect_left(self.times, start):bisect_left(self.times, end)]
-
-    def last_before(self, end: datetime) -> tuple[datetime, Any] | None:
-        i = bisect_left(self.times, end)  # strictly before ``end``
-        return (self.times[i - 1], self.items[i - 1]) if i else None
 
 
 def _articles(rows: Iterable[dict[str, Any]], *, tag_field: str, source_field: str,
@@ -166,9 +132,12 @@ class Sources:
     graph_events: TimeIndex  # (domain) per event->domain edge
     graph_since: datetime | None = None  # oldest surviving edge: earlier windows were washed away
     notes: list[str] = field(default_factory=list)
+    graph: GraphSources | None = None  # the graph adapter's inputs; None = no gx_* family
+    society: TimeIndex = field(default_factory=lambda: TimeIndex([]))  # OASIS runs by ingest time
 
     @classmethod
-    def load(cls, state: Path, symbols: Sequence[str]) -> Sources:
+    def load(cls, state: Path, symbols: Sequence[str], *, theme_map: ThemeMap | None = None) -> Sources:
+        """Load every journal. With a ``theme_map`` the graph adapter's ``gx_*`` family is built too."""
         syms = set(symbols)
         # Backfill rows (YYYY-MM.jsonl) and the forward follower's (live-YYYY-MM.jsonl): one clock, two writers.
         gkg_dir = state / "gdelt_gkg"
@@ -207,17 +176,13 @@ class Sources:
             live_passes=TimeIndex(passes), gkg_files=TimeIndex(gkg_ok), overlay=TimeIndex(overlay),
             graph_events=TimeIndex(events), graph_since=oldest,
             notes=[f"overlay rows dropped as empty or unstamped: {dropped}"] if dropped else [],
+            graph=GraphSources.load(state, symbols, theme_map) if theme_map is not None else None,
+            society=TimeIndex((at, r) for r in _jsonl(state / "oasis_runs.jsonl")
+                              if (at := _ts(r.get("ingested_utc"))) is not None),
         )
 
 
 # --------------------------------------------------------------------------- features
-
-
-def _coverage_hours(index: TimeIndex, start: datetime, end: datetime) -> float:
-    """Share of the window's hours with at least one heartbeat / file in them."""
-    hours = max(1, round((end - start) / timedelta(hours=1)))
-    seen = {int((t - start) / timedelta(hours=1)) for t in index.times_in(start, end)}
-    return round(len(seen) / hours, 4)
 
 
 def _news_family(prefix: str, idx: TimeIndex | None, cutoff: datetime, *, coverage: float,
@@ -276,27 +241,51 @@ def _graph_family(src: Sources, cutoff: datetime) -> tuple[dict[str, Any], bool]
     return {"graph_events_24h": sum(by.values()), "graph_events_by_domain_24h": dict(sorted(by.items()))}, True
 
 
+def _society_family(src: Sources, cutoff: datetime, symbol: str) -> tuple[dict[str, Any], float | None]:
+    """The newest run ingested before the cutoff (within 7 days) that holds a view on the symbol."""
+    keys = ("soc_stance", "soc_dispersion", "soc_n")
+    runs = src.society.window(cutoff - SOCIETY_MAX_AGE, cutoff)
+    times = src.society.times_in(cutoff - SOCIETY_MAX_AGE, cutoff)
+    for at, run in zip(reversed(times), reversed(runs), strict=True):
+        v = (run.get("by_symbol") or {}).get(symbol)
+        if v is not None:
+            return ({"soc_stance": v.get("stance"), "soc_dispersion": v.get("dispersion"), "soc_n": v.get("n")},
+                    round((cutoff - at) / timedelta(hours=1), 2))
+    return dict.fromkeys(keys), None
+
+
 def build_row(inst: Instrument, day: date, src: Sources, *, now: datetime,
-              live_days: Mapping[date, float], gkg_days: Mapping[date, float]) -> dict[str, Any] | None:
-    """One snapshot, or None when the cutoff has not passed yet (a future row would be a look-ahead)."""
+              live_days: Mapping[date, float], gkg_days: Mapping[date, float],
+              graph: tuple[Mapping[str, Any], Mapping[str, Any]] | None = None) -> dict[str, Any] | None:
+    """One snapshot, or None when the cutoff has not passed yet (a future row would be a look-ahead).
+
+    ``graph`` is this symbol's (features, coverage) from the graph adapter, computed once per cutoff
+    over the whole cross-section because it is residualised across symbols.
+    """
     cutoff = cutoff_for(day, inst.asset_class)
     if now < cutoff:
         return None
     live_cov = _coverage_hours(src.live_passes, cutoff - DAY, cutoff)
     gkg_cov = _coverage_hours(src.gkg_files, cutoff - DAY, cutoff)
     ov, ov_age = _overlay_family(src, cutoff, inst.asset_class)
-    graph, graph_ok = _graph_family(src, cutoff)
+    graph_fam, graph_ok = _graph_family(src, cutoff)
+    soc, soc_age = _society_family(src, cutoff, inst.symbol)
     features: dict[str, Any] = {
         **_news_family("live", src.live.get(inst.symbol), cutoff, coverage=live_cov, day_coverage=live_days),
         **_news_family("gkg", src.gkg.get(inst.symbol), cutoff, coverage=gkg_cov, day_coverage=gkg_days),
-        **ov, **graph,
+        **ov, **graph_fam, **soc,
     }
+    coverage: dict[str, Any] = {"live": live_cov, "gkg": gkg_cov, "overlay_age_h": ov_age, "graph": graph_ok,
+                                "society_age_h": soc_age}
+    if graph is not None:
+        features.update(graph[0])
+        coverage["gx"] = dict(graph[1])
     return {
         "date": day.isoformat(), "symbol": inst.symbol, "venue": inst.venue, "asset_class": inst.asset_class,
         "cutoff_utc": cutoff.isoformat(), "built_utc": now.isoformat(),
         "mode": "live" if now - cutoff <= LIVE_GRACE else "rebuild", "version": VERSION,
         "features": features,
-        "coverage": {"live": live_cov, "gkg": gkg_cov, "overlay_age_h": ov_age, "graph": graph_ok},
+        "coverage": coverage,
     }
 
 
@@ -333,6 +322,7 @@ def build(store: Path, src: Sources, instruments: Sequence[Instrument], days: Se
             for k in range((max(days) - min(days)).days + ABNORMAL_BASELINE_DAYS + 3)] if days else []
     cov_live: dict[str, dict[date, float]] = {}
     cov_gkg: dict[str, dict[date, float]] = {}
+    gx = _graph_by_row(src, instruments, days, now=now)
     rows: list[dict[str, Any]] = []
     for inst in instruments:
         if inst.asset_class not in cov_live:
@@ -343,7 +333,7 @@ def build(store: Path, src: Sources, instruments: Sequence[Instrument], days: Se
             if prior == "live" or (prior == "rebuild" and not force_rebuild):
                 continue
             row = build_row(inst, d, src, now=now, live_days=cov_live[inst.asset_class],
-                            gkg_days=cov_gkg[inst.asset_class])
+                            gkg_days=cov_gkg[inst.asset_class], graph=gx.get((d.isoformat(), inst.symbol)))
             if row is not None:
                 rows.append(row)
     if rows:
@@ -351,6 +341,25 @@ def build(store: Path, src: Sources, instruments: Sequence[Instrument], days: Se
         with store.open("a", encoding="utf-8") as fh:
             fh.writelines(json.dumps(r) + "\n" for r in rows)
     return rows
+
+
+def _graph_by_row(src: Sources, instruments: Sequence[Instrument], days: Sequence[date], *,
+                  now: datetime) -> dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]]:
+    """The graph adapter's output keyed by (date, symbol). Symbols sharing a cutoff form one
+    cross-section (crypto at 00:00 UTC, the rest at 20:00), which is what the residualisation needs."""
+    if src.graph is None:
+        return {}
+    groups: dict[datetime, list[tuple[str, str]]] = defaultdict(list)
+    for inst in instruments:
+        for d in days:
+            c = cutoff_for(d, inst.asset_class)
+            if now >= c:
+                groups[c].append((d.isoformat(), inst.symbol))
+    out: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
+    for c, keys in groups.items():
+        feats = graph_features(src.graph, c, [s for _, s in keys])
+        out.update({(d, s): feats[s] for d, s in keys})
+    return out
 
 
 def load_store(store: Path, *, version: int = VERSION) -> dict[tuple[str, str], dict[str, Any]]:

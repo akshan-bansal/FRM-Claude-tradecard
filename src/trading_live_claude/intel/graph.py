@@ -45,7 +45,19 @@ from trading_live_claude.logging_setup import get_logger
 
 log = get_logger(__name__)
 
-DEFAULT_GRAPH_JOURNAL = "state/intel_graph.jsonl"
+DEFAULT_GRAPH_JOURNAL = "state/intel_graph.jsonl"  # the path under the default state_dir
+
+
+def default_graph_journal() -> Path:
+    """The graph journal under the configured ``state_dir`` (``STATE_DIR``), resolved at call time.
+
+    A bound default of ``"state/intel_graph.jsonl"`` ignored ``state_dir``, so every test that
+    filled a paper order appended fake ``traded`` edges to the real journal (2026-10-30). Same
+    file as before when ``state_dir`` is the default ``state``.
+    """
+    from trading_live_claude.config.settings import get_settings
+
+    return Path(get_settings().state_dir) / "intel_graph.jsonl"
 
 # Node types. ``event`` was added when per-event decomposition landed — before that, edges only
 # saw the vendor's already-aggregated fields. ``venue`` and ``symbol`` were added when the paper
@@ -53,6 +65,7 @@ DEFAULT_GRAPH_JOURNAL = "state/intel_graph.jsonl"
 # traded X" or "did fills cluster around a stressed_by market bridge" first-class node targets.
 NodeType = Literal[
     "poll", "domain", "region", "source", "market", "event", "venue", "symbol",
+    "society", "agent",  # an OASIS run and one of its simulated agents (sim/ingest.py, 2026-10-30)
     "analysis",
 ]
 
@@ -75,6 +88,8 @@ Predicate = Literal[
     "observed", "elevated_in", "co_occurs", "stressed_by",
     "mentioned_by", "about_domain", "affects_region", "traded", "ranked_by",
     "mentions",
+    # OASIS (2026-10-30): what a simulated society REPORTED. Nothing says the stance was right.
+    "holds_stance", "member_of", "follows", "engaged", "attends", "seeded",
 ]
 
 # Threshold below which "elevated" is not asserted. Matches the interpret.py convention that a
@@ -295,6 +310,14 @@ DEFAULT_POLICIES: dict[Predicate, DecayPolicy] = {
     # A mention is a fact about a moment, not a score that fades; the graph copy simply expires.
     # The point-in-time archive is state/news.jsonl, which nothing washes.
     "mentions":       DecayPolicy(mode="none", ttl_h=90 * 24),
+    # A simulated run describes one moment; its structure is as perishable as the stance it came with.
+    # The durable record of every run is state/oasis_runs.jsonl, which nothing washes.
+    "holds_stance":   DecayPolicy(mode="exp", half_life_h=24.0, ttl_h=7 * 24),
+    "member_of":      DecayPolicy(mode="exp", half_life_h=24.0, ttl_h=7 * 24),
+    "follows":        DecayPolicy(mode="exp", half_life_h=24.0, ttl_h=7 * 24),
+    "engaged":        DecayPolicy(mode="exp", half_life_h=24.0, ttl_h=7 * 24),
+    "attends":        DecayPolicy(mode="exp", half_life_h=24.0, ttl_h=7 * 24),
+    "seeded":         DecayPolicy(mode="exp", half_life_h=24.0, ttl_h=7 * 24),
 }
 
 
@@ -367,7 +390,7 @@ def wash_edges(
 
 
 def wash_journal_file(
-    path: str | Path = DEFAULT_GRAPH_JOURNAL,
+    path: str | Path | None = None,
     *,
     policies: dict[Predicate, DecayPolicy] | None = None,
     now: _datetime | None = None,
@@ -393,7 +416,7 @@ def wash_journal_file(
     pruned by policy (before the cap). Consumers can log/plot this to tune the cap
     empirically or the underlying decay policies.
     """
-    p = Path(path)
+    p = Path(path) if path is not None else default_graph_journal()
     if not p.exists():
         return {"before": 0, "after": 0, "pruned": 0, "pruned_by_predicate": {}}
     before_edges = load_edges(p)
@@ -450,10 +473,10 @@ def wash_journal_file(
     }
 
 
-def append_edges(edges: Iterable[Edge], path: str | Path = DEFAULT_GRAPH_JOURNAL) -> None:
+def append_edges(edges: Iterable[Edge], path: str | Path | None = None) -> None:
     """Append a batch of edges to the graph journal. Never raises."""
     try:
-        p = Path(path)
+        p = Path(path) if path is not None else default_graph_journal()
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as fh:
             for e in edges:
@@ -462,7 +485,7 @@ def append_edges(edges: Iterable[Edge], path: str | Path = DEFAULT_GRAPH_JOURNAL
         log.warning("intel.graph.append_failed", path=str(path))
 
 
-def append_snapshot_edges(snap: IntelSnapshot, path: str | Path = DEFAULT_GRAPH_JOURNAL) -> None:
+def append_snapshot_edges(snap: IntelSnapshot, path: str | Path | None = None) -> None:
     """Convenience: decompose ``snap`` into edges and append them all."""
     append_edges(snapshot_to_edges(snap), path=path)
 
@@ -491,9 +514,9 @@ def fill_edge(*, venue: str, symbol: str, action: str, quantity: float, price: f
     )
 
 
-def load_edges(path: str | Path = DEFAULT_GRAPH_JOURNAL) -> list[Edge]:
+def load_edges(path: str | Path | None = None) -> list[Edge]:
     """Load all edges from the graph journal, oldest-first (append order)."""
-    p = Path(path)
+    p = Path(path) if path is not None else default_graph_journal()
     if not p.exists():
         return []
     out: list[Edge] = []

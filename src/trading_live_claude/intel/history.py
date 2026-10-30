@@ -38,7 +38,19 @@ from trading_live_claude.logging_setup import get_logger
 
 log = get_logger(__name__)
 
-DEFAULT_JOURNAL = "state/intel_overlay.jsonl"
+DEFAULT_JOURNAL = "state/intel_overlay.jsonl"  # the path under the default state_dir
+
+
+def default_overlay_journal() -> Path:
+    """The overlay journal under the configured ``state_dir`` (``STATE_DIR``), resolved at call time.
+
+    A bound default ignored ``state_dir``, so tests that built a journaling ``OverlayProvider``
+    appended empty snapshots to the real journal (2026-10-30). Same file as before when
+    ``state_dir`` is the default ``state``.
+    """
+    from trading_live_claude.config.settings import get_settings
+
+    return Path(get_settings().state_dir) / "intel_overlay.jsonl"
 
 # Scalar snapshot fields worth tracking through time. Dict-valued fields (per-country counts,
 # per-domain acceleration) are flattened separately below.
@@ -51,13 +63,13 @@ SCALAR_FIELDS: tuple[str, ...] = (
 MIN_HISTORY = 8
 
 
-def load_journal(path: str | Path = DEFAULT_JOURNAL, *, complete_only: bool = True) -> pd.DataFrame:
+def load_journal(path: str | Path | None = None, *, complete_only: bool = True) -> pd.DataFrame:
     """Load the overlay journal into a time-indexed frame, one row per recorded read.
 
     Degraded records (partial fetches) are dropped by default: their missing inputs would read as
     genuine drops in risk and corrupt every delta computed across them.
     """
-    p = Path(path)
+    p = Path(path) if path is not None else default_overlay_journal()
     if not p.exists():
         return pd.DataFrame()
     rows: list[dict[str, object]] = []
@@ -143,8 +155,8 @@ def derive(df: pd.DataFrame, *, min_history: int = MIN_HISTORY) -> dict[str, Int
 class IntelHistory:
     """Journal-backed feature view, for enriching the live overlay and interpretation."""
 
-    def __init__(self, path: str | Path = DEFAULT_JOURNAL, *, min_history: int = MIN_HISTORY) -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None, *, min_history: int = MIN_HISTORY) -> None:
+        self.path = Path(path) if path is not None else default_overlay_journal()
         self.min_history = min_history
         self.frame = load_journal(self.path)
         self.features = derive(self.frame, min_history=min_history)
@@ -182,7 +194,7 @@ class IntelHistory:
 
 def append_snapshot(snapshot: IntelSnapshot,
                     decisions: Mapping[Any, OverlayDecision] | None = None,
-                    path: str | Path = DEFAULT_JOURNAL) -> None:
+                    path: str | Path | None = None) -> None:
     """Append one observed snapshot to the journal. Call this from EVERY path that obtains one.
 
     The journal is the only point-in-time record this project will ever have of the OSINT feed — the
@@ -206,7 +218,7 @@ def append_snapshot(snapshot: IntelSnapshot,
                 c: {"scalar": d.scalar, "halt": d.halt_new_entries, "reasons": list(d.reasons)}
                 for c, d in decisions.items()
             }
-        p = Path(path)
+        p = Path(path) if path is not None else default_overlay_journal()
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, default=str) + chr(10))

@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from trading_live_claude.intel.history import DEFAULT_JOURNAL, load_journal
+from trading_live_claude.intel.history import default_overlay_journal, load_journal
 
 # Below this many reads, reliability statistics are not reported as findings.
 MIN_SAMPLE = 10
@@ -177,8 +177,9 @@ def criterion_validity(df: pd.DataFrame) -> dict[str, Statistic]:
     return out
 
 
-def assess(path: str | Path = DEFAULT_JOURNAL) -> FeedQuality:
+def assess(path: str | Path | None = None) -> FeedQuality:
     """Full measurement-quality assessment of the feed from the journal."""
+    path = path if path is not None else default_overlay_journal()
     df = load_journal(path, complete_only=True)
     avail, stale = _availability(path)
     span = 0.0

@@ -22,10 +22,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from trading_live_claude.news.gkg import Backfill, latest_stamp, prune_to_span, stamps, window_start
+from trading_live_claude.news.gkg_themes import load_theme_map
 from trading_live_claude.news.runner import load_config
 
 ROOT = Path(__file__).resolve().parent.parent
 AVG_FILE_BYTES = 6_000_000  # headroom per in-flight file when checking the budget
+THEME_MAP = ROOT / "config" / "gkg_theme_domains.yaml"
 
 
 def follow(a: argparse.Namespace) -> int:
@@ -35,7 +37,8 @@ def follow(a: argparse.Namespace) -> int:
     follower for a while loses nothing. Pruning waits until the backfill has been idle 15 minutes.
     """
     cfg = load_config(ROOT / "config" / "news_sources.yaml")
-    bf = Backfill(out_dir=a.out, aliases=cfg.aliases, budget_bytes=0, prefix="live-")
+    bf = Backfill(out_dir=a.out, aliases=cfg.aliases, budget_bytes=0, prefix="live-",
+                  theme_map=load_theme_map(THEME_MAP))
     stop = ROOT / "state" / "STOP_gkg_follow"
     print(f"[gkg-follow] polling GDELT every 5 min; rolling window {a.span_gb:g} GB; stop: touch {stop}", flush=True)
     backfill_progress = a.out / "progress.jsonl"
@@ -79,7 +82,8 @@ def main() -> int:
     a = ap.parse_args()
 
     cfg = load_config(ROOT / "config" / "news_sources.yaml")
-    bf = Backfill(out_dir=a.out, aliases=cfg.aliases, budget_bytes=int(a.budget_gb * 1e9))
+    bf = Backfill(out_dir=a.out, aliases=cfg.aliases, budget_bytes=int(a.budget_gb * 1e9),
+                  theme_map=load_theme_map(THEME_MAP))
     a.out.mkdir(parents=True, exist_ok=True)
     done, spent = bf.done()
 
