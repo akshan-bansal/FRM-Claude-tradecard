@@ -147,6 +147,21 @@ python -m trading_live_claude.cli signal --paper --require-card ...
 
 Gap-closure objectives live in `NEXT_SESSION.md` section 11.
 
+## Audit trail (docs/compliance/AUDIT_SCOPE.md)
+
+- Every runner writes the hash-chained ledger under `state/ledger/<date>.<stream>.jsonl`, one stream
+  per process (`qt`, `qt-paper`, `qt-live`, `autonomous`, `kraken`, `ib`; `manual`, `control` and
+  `recon` are shared and locked). Live and autonomous are strict: a failed ledger write stops the order.
+- Never edit or delete a ledger row. A correction is a new `CORRECTION` row. Never "repair" a chain.
+- `OrderIntent.intent_id` is the one identity from signal to execution; the approval stores reuse it.
+- New order-path behaviour gets a ledger event, added to `LedgerEvent` in `audit/ledger.py` first.
+- Gate inputs are recorded so `trading audit replay` can re-run them: a new gate must put whatever it
+  reads from outside the intent into `GateDecision.observed`.
+- Semantic (CRA) facts are derived, not stored: `audit/semantics.py` over `EXECUTION_REPORTED`, with
+  `config/audit_vocabulary.yaml`. Never redefine a vocabulary term; add one and bump `vocab`.
+- The spectral VaR gate (`risk/spectral_var.py`, over `BSM_Spectral/`) is opt-in, entries only, and may
+  only trim or reject.
+
 ## Skills available in this repo
 
 `.claude/skills/`:
