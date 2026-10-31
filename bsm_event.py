@@ -22,7 +22,8 @@ Install: python -m pip install numpy scipy
 Run:     python bsm_event.py --selftest
          python bsm_event.py --demo
          python bsm_event.py --backtest --synthetic
-         python bsm_event.py --backtest --data data            (SP500.csv + VIX.csv)
+         python bsm_event.py --backtest --data data            (SP500.csv + VIXCLS.csv)
+         python bsm_event.py --backtest --data data --underlying BTC   (any registered underlying)
          python bsm_event.py --backtest --data data --signals daily_signals.csv
          python bsm_event.py --events-synthetic
          python bsm_event.py --events contracts.csv --data data
@@ -1445,11 +1446,68 @@ def align(*series):
     return common, [v[np.searchsorted(d, common)] for d, v in series]
 
 
+# Underlyings. Any priced daily series works; `vol` names an implied-vol index in percentage points
+# (VIX-style) when one exists, otherwise a point-in-time GJR-GARCH forecast stands in for it.
+# `kalshi` lists the binary series written on the underlying and `events` (a regex on event tickers)
+# picks one daily settlement. rate / dividend set the forward (for FX: domestic / foreign rate),
+# skew is beta in sigma_K = v - beta ln(F/K). Files are FRED ids (<id>.csv) unless listed.
+UNDERLYINGS = {
+    'SPX': {'name': 'S&P 500', 'price': 'SP500', 'vol': 'VIXCLS', 'days_per_year': 252,
+            'rate': 0.04, 'dividend': 0.015, 'skew': -0.3, 'kalshi': ['KXINXU', 'KXINX'], 'events': r'H1600$',
+            'price_files': ('SPX.csv', 'GSPC.csv', '^GSPC.csv'), 'vol_files': ('VIX.csv', '^VIX.csv')},
+    'NDX': {'name': 'Nasdaq-100', 'price': 'NASDAQ100', 'vol': 'VXNCLS', 'days_per_year': 252,
+            'rate': 0.04, 'dividend': 0.007, 'skew': -0.3, 'kalshi': ['KXNASDAQ100U', 'KXNASDAQ100'],
+            'events': r'H1600$'},
+    'DJIA': {'name': 'Dow Jones Industrial Average', 'price': 'DJIA', 'vol': 'VXDCLS', 'days_per_year': 252,
+             'rate': 0.04, 'dividend': 0.02, 'skew': -0.3, 'kalshi': [], 'events': ''},
+    'WTI': {'name': 'WTI crude oil', 'price': 'DCOILWTICO', 'vol': 'OVXCLS', 'days_per_year': 252,
+            'rate': 0.04, 'dividend': 0.04, 'skew': 0.0, 'kalshi': ['KXWTI'], 'events': r'\d{2}[A-Z]{3}\d{2}14$',
+            'note': 'model state is FRED spot; Kalshi settles on the front futures contract (basis risk)'},
+    'BTC': {'name': 'Bitcoin', 'price': 'CBBTCUSD', 'vol': None, 'days_per_year': 365,
+            'rate': 0.0, 'dividend': 0.0, 'skew': 0.0, 'kalshi': ['KXBTCD', 'KXBTC'], 'events': r'\d{2}[A-Z]{3}\d{2}17$'},
+    'ETH': {'name': 'Ether', 'price': 'CBETHUSD', 'vol': None, 'days_per_year': 365,
+            'rate': 0.0, 'dividend': 0.0, 'skew': 0.0, 'kalshi': ['KXETHD'], 'events': r'\d{2}[A-Z]{3}\d{2}17$'},
+    'EURUSD': {'name': 'EUR/USD', 'price': 'DEXUSEU', 'vol': None, 'days_per_year': 252,
+               'rate': 0.04, 'dividend': 0.02, 'skew': 0.0, 'kalshi': ['KXEURUSD'], 'events': r'10$',
+               'note': 'FRED H.10 rates arrive about a week late; stale states are not journaled'},
+    'USDJPY': {'name': 'USD/JPY', 'price': 'DEXJPUS', 'vol': None, 'days_per_year': 252,
+               'rate': 0.005, 'dividend': 0.04, 'skew': 0.0, 'kalshi': ['KXUSDJPY'], 'events': r'10$',
+               'note': 'FRED H.10 rates arrive about a week late; stale states are not journaled'},
+}
+
+
+def underlying_of_series(series):
+    return next((k for k, u in UNDERLYINGS.items() if series in u['kalshi']), None)
+
+
+def gjr_vol_index(S, days_per_year=252, block=63, min_train=252):
+    """Point-in-time GJR one-step vol, annualised, in percentage points like VIX.
+
+    Element t uses only returns before t (walk-forward fits); NaN before the first fit."""
+    wf = walk_forward_gjr(np.diff(np.log(S)), block, min_train)
+    return 100.0 * np.sqrt(days_per_year * wf.sigma2)
+
+
+def load_underlying(data_dir, key):
+    """(dates, S, V) for a registered underlying; V is its vol index or the GJR stand-in.
+
+    Non-positive prices (WTI spot on 2020-04-20 settled at -37.63) cannot enter a log-return
+    model; they are dropped, so the return across the gap spans the missing days."""
+    u = UNDERLYINGS[key]
+    pd_, pv = load_series(find_file(data_dir, (f"{u['price']}.csv",) + tuple(u.get('price_files', ()))))
+    price = (pd_[pv > 0], pv[pv > 0])
+    if u['vol']:
+        vol = load_series(find_file(data_dir, (f"{u['vol']}.csv",) + tuple(u.get('vol_files', ()))))
+        dates, (S, V) = align(price, vol)
+        return dates, S, V
+    dates, S = price
+    V = gjr_vol_index(S, u['days_per_year'])
+    ok = np.isfinite(V)
+    return dates[ok], S[ok], V[ok]
+
+
 def load_spx_vix(data_dir):
-    spx = load_series(find_file(data_dir, ('SP500.csv', 'SPX.csv', 'GSPC.csv', '^GSPC.csv')))
-    vix = load_series(find_file(data_dir, ('VIX.csv', 'VIXCLS.csv', '^VIX.csv')))
-    dates, (S, V) = align(spx, vix)
-    return dates, S, V
+    return load_underlying(data_dir, 'SPX')
 
 
 def load_daily_signals(path):
@@ -1508,6 +1566,7 @@ class BacktestConfig:
     vol_floor: float = 0.02
     paths: bool = False                 # H daily GJR steps per path instead of the closed form
     level_map: tuple = (0.0, 1.0)       # ATM vol v = a + b * VIX / 100
+    days_per_year: int = 252            # 365 for assets that trade every day (crypto)
     seed: int = 20261001
     models: tuple = ('normal', 'gpd', 'skewt', 'fhs', 'spectral')
 
@@ -1543,7 +1602,7 @@ def run_var_backtest(dates, S, V, cfg=None, signals=None, out_csv=None, log=prin
     n = len(S)
     H = cfg.horizon
     step = cfg.step or H
-    T, hy = cfg.tenor_days / TRADING_DAYS, H / TRADING_DAYS
+    T, hy = cfg.tenor_days / cfg.days_per_year, H / cfg.days_per_year
     if n < cfg.min_train + 4 * H + 50:
         raise ValueError(f'need more than {cfg.min_train + 4 * H + 50} observations, have {n}')
     vmap = lambda x: cfg.level_map[0] + cfg.level_map[1] * x / 100.0
@@ -2182,7 +2241,9 @@ def main(argv=None):
     ap.add_argument('--selftest', action='store_true')
     ap.add_argument('--demo', action='store_true')
     ap.add_argument('--backtest', action='store_true')
-    ap.add_argument('--data', default=None, help='directory with SP500.csv and VIX.csv')
+    ap.add_argument('--data', default=None, help='directory of FRED-style CSVs (<id>.csv)')
+    ap.add_argument('--underlying', default='SPX', choices=sorted(UNDERLYINGS),
+                    help='registered underlying for --data runs (see UNDERLYINGS)')
     ap.add_argument('--synthetic', action='store_true', help='use synthetic market data')
     ap.add_argument('--signals', default=None, help='daily signal CSV from bsm_microstructure.py')
     ap.add_argument('--paths', action='store_true', help='path simulation with H daily GJR steps')
@@ -2202,22 +2263,31 @@ def main(argv=None):
         demo()
     if args.backtest:
         if args.data:
-            dates, S, V = load_spx_vix(args.data)
-            print(f'Loaded {len(S)} aligned S&P/VIX observations {dates[0]} .. {dates[-1]}')
+            u = UNDERLYINGS[args.underlying]
+            dates, S, V = load_underlying(args.data, args.underlying)
+            print(f'Loaded {len(S)} {u["name"]} observations {dates[0]} .. {dates[-1]}; vol: '
+                  + (u['vol'] or 'point-in-time GJR forecast (no implied-vol index)'))
         elif args.synthetic:
             dates, S, V = synthetic_market()
             print(f'Synthetic market: {len(S)} days (exercises the code; not market evidence)')
         else:
             ap.error('--backtest needs --data DIR or --synthetic')
         cfg = BacktestConfig(n_sims=args.sims, horizon=args.horizon, paths=args.paths)
+        if args.data:
+            u = UNDERLYINGS[args.underlying]
+            cfg = replace(cfg, days_per_year=u['days_per_year'], rate=u['rate'], dividend=u['dividend'],
+                          skew=u['skew'])
         signals = load_daily_signals(args.signals) if args.signals else None
         run_var_backtest(dates, S, V, cfg, signals, args.out)
     if args.events or args.events_synthetic:
         if args.events:
             if not args.data:
-                ap.error('--events needs --data DIR for the S&P/VIX state')
-            dates, S, V = load_spx_vix(args.data)
+                ap.error('--events needs --data DIR for the underlying state')
+            dates, S, V = load_underlying(args.data, args.underlying)
             con = read_contracts(args.events)
+            u = UNDERLYINGS[args.underlying]
+            run_event_backtest(con, dates, S, V, skew=u['skew'], rate=u['rate'], dividend=u['dividend'])
+            return 0
         else:
             dates, S, V = synthetic_market()
             con = synthetic_contracts(dates, S, V)

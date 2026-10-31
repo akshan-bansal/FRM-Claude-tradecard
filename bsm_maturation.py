@@ -7,11 +7,17 @@ contract. `mature` fills in each label once it is knowable and stamps `matured_d
 became known, so evaluations can embargo on it. Hyperparameters are frozen in journal/config.json
 before the first forward forecast (pre-registration): the forward record is never tuned on itself.
 
-Streams
-  var     1- and 5-day VaR of rolling 21-day S&P digitals (3 strikes x 5 models), marked to model
-  kalshi  Kalshi S&P contracts settling on the 4pm close (KXINXU above/below, KXINX range ladder):
+Every underlying registered in bsm_event.UNDERLYINGS is handled the same way (S&P 500, Nasdaq-100,
+Dow, WTI, Bitcoin, Ether, EUR/USD, USD/JPY by default; `enabled` in config.json narrows the list).
+Each gets its own frozen config on its first cycle; underlyings without an implied-vol index use a
+point-in-time GJR forecast in its place.
+
+Streams (per underlying)
+  var     1- and 5-day VaR of rolling 21-day digitals (3 strikes x 5 models), marked to model
+  kalshi  Kalshi binaries on the underlying (above/below and range ladders, one daily settlement):
           market quote and model p_Q at snapshot time; label = Kalshi's settlement. These are
-          observed digital prices, which the paper's marked-to-model backtest lacks.
+          observed digital prices, which the paper's marked-to-model backtest lacks. A forecast is
+          skipped when the latest close is more than `max_state_lag` business days old (FRED FX).
   cross   5-day VaR of the cross-asset book (Gaussian, per-factor GPD tails, joint FHS)
 Already-matured history is backfilled where it exists: FRED daily series, and settled Kalshi
 contracts with their pre-open (09:00 New York) quotes from hourly candles.
@@ -42,6 +48,7 @@ import http.client
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -71,6 +78,61 @@ DEFAULT_CFG = {
                'dividend': 0.015, 'snapshot_hour_ny': 9},
     'cross': {'horizons': [5], 'window': 504, 'tail_k': 4.0, 'n_sims': 5000},
 }
+CROSS_FRED = ['DGS2', 'DGS10', 'DEXUSEU', 'DEXJPUS']
+MAX_STATE_LAG = 3  # business days from the model's last close to settlement before a state is stale
+
+
+def enabled_underlyings(cfg):
+    return [k for k in (cfg or {}).get('enabled', list(be.UNDERLYINGS)) if k in be.UNDERLYINGS]
+
+
+def fred_ids(cfg=None):
+    ids = ['SP500', 'VIXCLS'] + CROSS_FRED
+    for key in enabled_underlyings(cfg):
+        u = be.UNDERLYINGS[key]
+        ids += [u['price']] + ([u['vol']] if u['vol'] else [])
+    return list(dict.fromkeys(ids))
+
+
+def default_underlying_cfg(key):
+    u = be.UNDERLYINGS[key]
+    var = {**json.loads(json.dumps(DEFAULT_CFG['var'])), 'rate': u['rate'], 'dividend': u['dividend'],
+           'skew': u['skew'], 'days_per_year': u['days_per_year']}
+    kal = {'series': list(u['kalshi']), 'events': u['events'], 'skew': u['skew'], 'rate': u['rate'],
+           'dividend': u['dividend'], 'snapshot_hour_ny': 9, 'max_state_lag': MAX_STATE_LAG,
+           'days_per_year': u['days_per_year']}
+    return var, kal
+
+
+def ucfg(cfg, key, fallback=False):
+    """(var config, kalshi config) of one underlying. The S&P keeps its original frozen sections;
+    others live under cfg['underlyings'][key] once frozen (fallback=True returns registry defaults)."""
+    if key == 'SPX':
+        k = cfg['kalshi']
+        return ({**cfg['var'], 'days_per_year': cfg['var'].get('days_per_year', 252)},
+                {**k, 'events': k.get('events', k.get('event_suffix', 'H1600') + '$'),
+                 'max_state_lag': k.get('max_state_lag', MAX_STATE_LAG), 'days_per_year': 252})
+    sec = (cfg or {}).get('underlyings', {}).get(key)
+    if sec:
+        return sec['var'], sec['kalshi']
+    return default_underlying_cfg(key) if fallback else (None, None)
+
+
+def year_frac(state_date, expiry, days_per_year):
+    """Model time from the state close to the settlement day: trading days for exchange-traded
+    underlyings, calendar days for ones that trade every day."""
+    if days_per_year >= 365:
+        return max(int((np.datetime64(expiry, 'D') - np.datetime64(state_date, 'D')).astype(int)), 1) / 365.0
+    return trading_days(state_date, expiry) / days_per_year
+
+
+def load_cached(data_dir, key, cache):
+    if key not in cache:
+        try:
+            cache[key] = be.load_underlying(data_dir, key)
+        except FileNotFoundError:
+            cache[key] = None
+    return cache[key]
 
 
 # ---------------------------------------------------------------------------
@@ -168,36 +230,59 @@ def http_text(url, timeout=60, retries=3):
             raise
 
 
-def refresh_fred(data_dir, jdir, fetch=http_text, log=print):
-    """Fetch every FRED series; if history changed, keep the old file in data/vintages/."""
+def replace_with_retry(tmp, path, tries=6, pause=0.5):
+    """os.replace that waits out transient locks (OneDrive sync or antivirus holding the file)."""
+    for attempt in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt + 1 == tries:
+                raise
+            time.sleep(pause * (attempt + 1))
+
+
+def _refresh_one(sid, data_dir, fetch, stamp, log):
+    text = fetch(FRED_URL.format(sid))
+    path = os.path.join(data_dir, f'{sid}.csv')
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8', newline='') as f:
+        f.write(text)
+    nd, nv = be.load_series(tmp)
+    revised = dropped = 0
+    if os.path.exists(path):
+        od, ov = be.load_series(path)
+        common, io, inn = np.intersect1d(od, nd, return_indices=True)
+        revised = int(np.sum(np.abs(ov[io] - nv[inn]) > 1e-9))
+        dropped = len(od) - len(common)
+        if revised or dropped:
+            vdir = os.path.join(data_dir, 'vintages')
+            os.makedirs(vdir, exist_ok=True)
+            with open(path, 'rb') as src, gzip.open(os.path.join(vdir, f'{sid}_{stamp}.csv.gz'), 'wb') as dst:
+                dst.write(src.read())
+    replace_with_retry(tmp, path)
+    log(f'  FRED {sid:8s} {len(nd):6d} obs {nd[0]} .. {nd[-1]}'
+        + (f'  ({revised} revised, {dropped} dropped; old file kept in vintages/)' if revised or dropped else ''))
+    return {'fetched_at': now_iso(), 'series': sid, 'rows': len(nd), 'first': str(nd[0]), 'last': str(nd[-1]),
+            'sha256': hashlib.sha256(text.encode()).hexdigest(), 'revised': revised, 'dropped': dropped}
+
+
+def refresh_fred(data_dir, jdir, fetch=http_text, log=print, ids=None):
+    """Fetch FRED series (default: the S&P and cross-asset set); if history changed, keep the old
+    file in data/vintages/. Each series is independent: one that fails (network, or a file locked
+    by OneDrive sync) is reported after all the others have been refreshed."""
     os.makedirs(data_dir, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-    rows = []
-    for sid, fname in FRED.items():
-        text = fetch(FRED_URL.format(sid))
-        path = os.path.join(data_dir, fname)
-        tmp = path + '.tmp'
-        with open(tmp, 'w', encoding='utf-8', newline='') as f:
-            f.write(text)
-        nd, nv = be.load_series(tmp)
-        revised = dropped = 0
-        if os.path.exists(path):
-            od, ov = be.load_series(path)
-            common, io, inn = np.intersect1d(od, nd, return_indices=True)
-            revised = int(np.sum(np.abs(ov[io] - nv[inn]) > 1e-9))
-            dropped = len(od) - len(common)
-            if revised or dropped:
-                vdir = os.path.join(data_dir, 'vintages')
-                os.makedirs(vdir, exist_ok=True)
-                with open(path, 'rb') as src, gzip.open(os.path.join(vdir, f'{sid}_{stamp}.csv.gz'), 'wb') as dst:
-                    dst.write(src.read())
-        os.replace(tmp, path)
-        rows.append({'fetched_at': now_iso(), 'series': sid, 'rows': len(nd), 'first': str(nd[0]),
-                     'last': str(nd[-1]), 'sha256': hashlib.sha256(text.encode()).hexdigest(),
-                     'revised': revised, 'dropped': dropped})
-        log(f'  FRED {sid:8s} {len(nd):6d} obs {nd[0]} .. {nd[-1]}'
-            + (f'  ({revised} revised, {dropped} dropped; old file kept in vintages/)' if revised or dropped else ''))
+    rows, failed = [], []
+    for sid in (ids or list(FRED)):
+        try:
+            rows.append(_refresh_one(sid, data_dir, fetch, stamp, log))
+        except Exception as exc:
+            failed.append(f'{sid} ({type(exc).__name__}: {exc})')
+            log(f'  FRED {sid:8s} FAILED: {type(exc).__name__}: {exc}')
     append_jsonl(jfile(jdir, 'fetch_log'), rows)
+    if failed:
+        raise RuntimeError('FRED refresh failed for ' + '; '.join(failed))
     return rows
 
 
@@ -220,28 +305,46 @@ def _state_before(dates, S, V, day):
     return str(dates[i]), float(S[i]), float(V[i]) / 100.0
 
 
-def backfill_kalshi(data_dir, series, days=40, near=0.015, grid=25, suffix='H1600', log=print):
-    """Settled contracts of the last `days` daily-close events with their 09:00 New York quotes.
+def select_contracts(markets, S0, v0, T, max_strikes=12):
+    """Contracts to record for one settlement day, chosen from the prior close (never the outcome).
 
-    KXINXU keeps strikes within +-near of the prior close on a `grid`-point lattice (chosen from
-    the prior close, never the settlement, so selection has no lookahead); KXINX keeps the whole
-    range ladder. Incremental: events already in the CSV are skipped.
+    A range ladder (any 'between' bucket) is kept whole. For above/below strikes, keep those within
+    max(1%, 2.5 sigma sqrt(T)) of the prior close and thin them to max_strikes evenly spaced ones.
     """
+    if any(m.get('strike_type') == 'between' for m in markets):
+        return markets
+    width = max(0.01, 2.5 * v0 * math.sqrt(T))
+    near = sorted((m for m in markets if m.get('floor_strike') is not None
+                   and abs(m['floor_strike'] / S0 - 1) <= width), key=lambda m: m['floor_strike'])
+    if len(near) <= max_strikes:
+        return near
+    keep = sorted(set(np.round(np.linspace(0, len(near) - 1, max_strikes)).astype(int)))
+    return [near[i] for i in keep]
+
+
+def backfill_kalshi(data_dir, series, days=40, key=None, kcfg=None, max_strikes=12, log=print):
+    """Settled contracts of the last `days` daily settlements with their 09:00 New York quotes.
+
+    Incremental: events already in the CSV are skipped. Settlement days whose model state would be
+    stale (more than max_state_lag business days old) are skipped and counted.
+    """
+    key = key or be.underlying_of_series(series) or 'SPX'
+    kcfg = kcfg or default_underlying_cfg(key)[1]
+    pattern = re.compile(kcfg['events'])
+    dpy = kcfg.get('days_per_year', 252)
     out = os.path.join(data_dir, 'kalshi', f'{series}_settled.csv')
     done = {r['event'] for r in _read_csv(out)}
-    dates, S = be.load_series(be.find_file(data_dir, ('SP500.csv',)))
-    vd, vv = be.load_series(be.find_file(data_dir, ('VIXCLS.csv', 'VIX.csv')))
-    dates, (S, V) = be.align((dates, S), (vd, vv))
+    dates, S, V = be.load_underlying(data_dir, key)
     events = []
     for ev in ms.kalshi_paged('/events', 'events', series_ticker=series, status='settled', limit=200):
-        if not ev['event_ticker'].endswith(suffix):
+        if not pattern.search(ev['event_ticker']):
             continue
         events.append(ev['event_ticker'])
         if len(events) >= days:
             break
     todo = [e for e in reversed(events) if e not in done]
-    log(f'  Kalshi {series}: {len(events)} recent settled {suffix} events, {len(todo)} new to backfill')
-    rows, requests = [], 0
+    log(f'  Kalshi {series} ({key}): {len(events)} recent settled daily events, {len(todo)} new to backfill')
+    rows, requests, stale = [], 0, 0
     for ev in todo:
         markets = list(ms.kalshi_paged('/markets', 'markets', event_ticker=ev, limit=1000))
         requests += 1
@@ -253,14 +356,12 @@ def backfill_kalshi(data_dir, series, days=40, near=0.015, grid=25, suffix='H160
         if state is None:
             continue
         sd, S0, v0 = state
-        snap = ny_ts(expiry, DEFAULT_CFG['kalshi']['snapshot_hour_ny'])
-        for m in markets:
-            fl, cp = m.get('floor_strike'), m.get('cap_strike')
-            if series == 'KXINXU':
-                if fl is None or abs(fl / S0 - 1) > near or round(fl) % grid:
-                    continue
-            if m.get('result') not in ('yes', 'no'):
-                continue
+        if trading_days(sd, expiry) > kcfg.get('max_state_lag', MAX_STATE_LAG):
+            stale += 1
+            continue
+        snap = ny_ts(expiry, kcfg.get('snapshot_hour_ny', 9))
+        settled = [m for m in markets if m.get('result') in ('yes', 'no')]
+        for m in select_contracts(settled, S0, v0, year_frac(sd, expiry, dpy), max_strikes):
             bid = ask = qts = None
             open_ts = ms._epoch(m['open_time'])
             if open_ts < snap:
@@ -268,14 +369,15 @@ def backfill_kalshi(data_dir, series, days=40, near=0.015, grid=25, suffix='H160
                                    start_ts=open_ts, end_ts=int(snap), period_interval=60)
                 requests += 1
                 for c in cs.get('candlesticks', []):
-                    t, b, a, _, _ = ms.parse_candle(c)
-                    if t <= snap and b is not None and a is not None:
-                        bid, ask, qts = b, a, t
+                    tt, b, a, _, _ = ms.parse_candle(c)
+                    if tt <= snap and b is not None and a is not None:
+                        bid, ask, qts = b, a, tt
                 time.sleep(ms.KALSHI_PAUSE)
             rows.append({'series': series, 'event': ev, 'ticker': m['ticker'], 'strike_type': m.get('strike_type'),
-                         'floor': fl, 'cap': cp, 'close_time': m['close_time'], 'expiry': str(expiry),
-                         'quote_ts': qts, 'bid': bid, 'ask': ask, 'result': 1 if m['result'] == 'yes' else 0,
-                         'settlement': m.get('expiration_value'), 'state_date': sd, 'S0': S0, 'v0': v0})
+                         'floor': m.get('floor_strike'), 'cap': m.get('cap_strike'), 'close_time': m['close_time'],
+                         'expiry': str(expiry), 'quote_ts': qts, 'bid': bid, 'ask': ask,
+                         'result': 1 if m['result'] == 'yes' else 0, 'settlement': m.get('expiration_value'),
+                         'state_date': sd, 'S0': S0, 'v0': v0})
         time.sleep(ms.KALSHI_PAUSE)
     if rows:
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -285,7 +387,8 @@ def backfill_kalshi(data_dir, series, days=40, near=0.015, grid=25, suffix='H160
             if new:
                 w.writeheader()
             w.writerows(rows)
-    log(f'  Kalshi {series}: {len(rows)} settled contracts added ({requests} requests) -> {out}')
+    log(f'  Kalshi {series} ({key}): {len(rows)} settled contracts added ({requests} requests'
+        + (f'; {stale} days skipped with a stale state' if stale else '') + f') -> {out}')
     return rows
 
 
@@ -318,12 +421,16 @@ def _seed(*parts):
     return int(hashlib.sha256('|'.join(map(str, parts)).encode()).hexdigest()[:12], 16)
 
 
-def var_snapshot(data_dir, jdir, cfg, log=print):
-    c = cfg['var']
-    dates, S, V = be.load_spx_vix(data_dir)
+def var_snapshot(data_dir, jdir, cfg, log=print, key='SPX'):
+    c, _ = ucfg(cfg, key)
+    if c is None:
+        log(f'  var {key}: no frozen config yet; skipped')
+        return []
+    dpy = c.get('days_per_year', 252)
+    dates, S, V = be.load_underlying(data_dir, key)
     asof = str(dates[-1])
-    if any(r['asof'] == asof for r in read_jsonl(jfile(jdir, 'forecasts_var'))):
-        log(f'  var: forecasts as of {asof} already journaled')
+    if any(r['asof'] == asof and r.get('underlying', 'SPX') == key for r in read_jsonl(jfile(jdir, 'forecasts_var'))):
+        log(f'  var {key}: forecasts as of {asof} already journaled')
         return []
     rS, rV = np.diff(np.log(S)), np.diff(V / 100.0)
     pS, s2S, zS = be.fit_gjr(rS)
@@ -336,12 +443,13 @@ def var_snapshot(data_dir, jdir, cfg, log=print):
     rows_fhs = np.column_stack([zS, zV])
     vmap = lambda x: c['level_map'][0] + c['level_map'][1] * x / 100.0
     S0, v0 = float(S[-1]), max(vmap(V[-1]), c['vol_floor'])
-    U = np.clip(np.random.default_rng(_seed('var', asof)).random((c['n_sims'], 2)), 1e-12, 1 - 1e-12)
-    T = c['tenor_days'] / be.TRADING_DAYS
+    U = np.clip(np.random.default_rng(_seed('var', asof) if key == 'SPX' else _seed('var', key, asof))
+                .random((c['n_sims'], 2)), 1e-12, 1 - 1e-12)
+    T = c['tenor_days'] / dpy
     levels = np.array(c['levels'])
     out = []
     for H in c['horizons']:
-        hy = H / be.TRADING_DAYS
+        hy = H / dpy
         hS = math.sqrt(be.horizon_variance(s2S[-1], pS, H))
         hV = math.sqrt(be.horizon_variance(s2V[-1], pV, H))
         for mi, mny in enumerate(c['moneyness']):
@@ -371,15 +479,19 @@ def var_snapshot(data_dir, jdir, cfg, log=print):
                 else:
                     pnl = c['position'] * (con.price(S_new, v_new, T - hy) - p0)
                 loss = -pnl
-                out.append({'id': f'var|{asof}|h{H}|m{mny}|{name}', 'stream': 'var', 'made_at': now_iso(),
+                fid = f'var|{asof}|h{H}|m{mny}|{name}' if key == 'SPX' else f'var|{key}|{asof}|h{H}|m{mny}|{name}'
+                out.append({'id': fid, 'stream': 'var', 'made_at': now_iso(), 'underlying': key,
                             'asof': asof, 'horizon': H, 'moneyness': mny, 'model': name, 'strike': mny * S0,
                             'S0': S0, 'v0': v0, 'tenor': T, 'p0': p0, 'position': c['position'],
                             'contract': {'rate': c['rate'], 'dividend': c['dividend'], 'skew': c['skew'],
-                                         'vol_floor': c['vol_floor'], 'level_map': c['level_map']},
+                                         'vol_floor': c['vol_floor'], 'level_map': c['level_map'],
+                                         'days_per_year': dpy},
                             'levels': c['levels'], 'var': np.quantile(loss, levels).round(10),
                             'quantiles': np.quantile(loss, QGRID).round(10), **extra})
     append_jsonl(jfile(jdir, 'forecasts_var'), out)
-    log(f'  var: journaled {len(out)} forecasts as of {asof} (S {S0:.2f}, VIX {V[-1]:.2f}; horizons {c["horizons"]})')
+    vol_name = be.UNDERLYINGS[key]['vol'] or 'GJR vol'
+    log(f'  var {key}: journaled {len(out)} forecasts as of {asof} (price {S0:.6g}, {vol_name} {V[-1]:.2f}; '
+        f'horizons {c["horizons"]})')
     return out
 
 
@@ -422,34 +534,52 @@ def cross_snapshot(data_dir, jdir, cfg, log=print):
 
 
 def kalshi_snapshot(data_dir, jdir, store_root, cfg, log=print):
-    c = cfg['kalshi']
-    dates, S, V = be.load_spx_vix(data_dir)
+    """Journal every open daily contract of every enabled underlying with the model's p_Q."""
     ts = time.time()
     store = ms.Store(store_root)
-    out = []
-    for series in c['series']:
-        markets = [m for m in ms.kalshi_paged('/markets', 'markets', series_ticker=series, status='open', limit=1000)
-                   if m['event_ticker'].endswith(c['event_suffix'])]
-        store.append([ms.market_snapshot(m, ts) for m in markets], folder=series)
-        for m in markets:
-            expiry = ny_date(ms._epoch(m['close_time']))
-            state = _state_before(dates, S, V, expiry)
-            if state is None:
-                continue
-            sd, S0, v0 = state
-            T = trading_days(sd, expiry) / be.TRADING_DAYS
-            p = kalshi_prob(m.get('strike_type'), m.get('floor_strike'), m.get('cap_strike'), S0, v0, T,
-                            c['skew'], c['rate'], c['dividend'])
-            out.append({'id': f'kalshi|{m["ticker"]}|{int(ts)}', 'stream': 'kalshi', 'made_at': now_iso(),
-                        'ts': ts, 'series': series, 'event': m['event_ticker'], 'ticker': m['ticker'],
-                        'strike_type': m.get('strike_type'), 'floor': m.get('floor_strike'),
-                        'cap': m.get('cap_strike'), 'close_time': m['close_time'], 'expiry': str(expiry),
-                        'bid': ms._price(m, 'yes_bid'), 'ask': ms._price(m, 'yes_ask'),
-                        'bid_size': ms._num(m, 'yes_bid_size'), 'ask_size': ms._num(m, 'yes_ask_size'),
-                        'state_date': sd, 'S0': S0, 'v0': v0, 'T': T, 'p_model': p})
+    out, cache, counts = [], {}, []
+    for key in enabled_underlyings(cfg):
+        _, c = ucfg(cfg, key, fallback=True)
+        if not c['series']:
+            continue
+        data = load_cached(data_dir, key, cache)
+        if data is None:
+            log(f'  kalshi {key}: no price data; skipped')
+            continue
+        dates, S, V = data
+        pattern = re.compile(c['events'])
+        dpy = c.get('days_per_year', 252)
+        n0, stale = len(out), 0
+        for series in c['series']:
+            markets = [m for m in ms.kalshi_paged('/markets', 'markets', series_ticker=series, status='open',
+                                                  limit=1000) if pattern.search(m['event_ticker'])]
+            store.append([ms.market_snapshot(m, ts) for m in markets], folder=series)
+            for m in markets:
+                expiry = ny_date(ms._epoch(m['close_time']))
+                state = _state_before(dates, S, V, expiry)
+                if state is None:
+                    continue
+                sd, S0, v0 = state
+                # stale = the latest close is old relative to *now* (e.g. FRED's lagged FX rates);
+                # a contract settling days ahead is not stale merely because settlement is far off
+                if trading_days(sd, ny_date(ts)) > c.get('max_state_lag', MAX_STATE_LAG):
+                    stale += 1
+                    continue
+                T = year_frac(sd, expiry, dpy)
+                p = kalshi_prob(m.get('strike_type'), m.get('floor_strike'), m.get('cap_strike'), S0, v0, T,
+                                c['skew'], c['rate'], c['dividend'])
+                out.append({'id': f'kalshi|{m["ticker"]}|{int(ts)}', 'stream': 'kalshi', 'made_at': now_iso(),
+                            'underlying': key, 'ts': ts, 'series': series, 'event': m['event_ticker'],
+                            'ticker': m['ticker'], 'strike_type': m.get('strike_type'), 'floor': m.get('floor_strike'),
+                            'cap': m.get('cap_strike'), 'close_time': m['close_time'], 'expiry': str(expiry),
+                            'bid': ms._price(m, 'yes_bid'), 'ask': ms._price(m, 'yes_ask'),
+                            'bid_size': ms._num(m, 'yes_bid_size'), 'ask_size': ms._num(m, 'yes_ask_size'),
+                            'state_date': sd, 'S0': S0, 'v0': v0, 'T': T, 'p_model': p})
+            time.sleep(ms.KALSHI_PAUSE)
+        counts.append(f'{key} {len(out) - n0}' + (f' ({stale} stale skipped)' if stale else ''))
     append_jsonl(jfile(jdir, 'forecasts_kalshi'), out)
-    log(f'  kalshi: journaled {len(out)} open contracts ({", ".join(c["series"])}) with model p_Q; '
-        f'ladders also appended to {store_root}/kalshi_markets/')
+    log(f'  kalshi: journaled {len(out)} open contracts with model p_Q -- ' + ', '.join(counts)
+        + f'; ladders also appended to {store_root}/kalshi_markets/')
     return out
 
 
@@ -462,12 +592,17 @@ def _pit(quantiles, x):
 
 
 def var_mature(data_dir, jdir, log=print):
-    dates, S, V = be.load_spx_vix(data_dir)
     done = {r['id'] for r in read_jsonl(jfile(jdir, 'matured_var'))}
-    out, waiting = [], 0
+    out, waiting, cache = [], 0, {}
     for r in read_jsonl(jfile(jdir, 'forecasts_var')):
         if r['id'] in done:
             continue
+        key = r.get('underlying', 'SPX')
+        data = load_cached(data_dir, key, cache)
+        if data is None:
+            waiting += 1
+            continue
+        dates, S, V = data
         i = int(np.searchsorted(dates, np.datetime64(r['asof'])))
         j = i + r['horizon']
         if i >= len(dates) or str(dates[i]) != r['asof'] or j >= len(dates):
@@ -476,8 +611,10 @@ def var_mature(data_dir, jdir, log=print):
         k = r['contract']
         con = be.BSMDigital(r['strike'], r['tenor'], k['rate'], k['dividend'], k['skew'])
         v1 = max(k['level_map'][0] + k['level_map'][1] * V[j] / 100.0, k['vol_floor'])
-        loss = -r['position'] * (float(con.price(S[j], v1, r['tenor'] - r['horizon'] / be.TRADING_DAYS)) - r['p0'])
+        dpy = k.get('days_per_year', 252)
+        loss = -r['position'] * (float(con.price(S[j], v1, r['tenor'] - r['horizon'] / dpy)) - r['p0'])
         out.append({'id': r['id'], 'matured_date': str(dates[j]), 'matured_at': now_iso(), 'asof': r['asof'],
+                    'underlying': key,
                     'horizon': r['horizon'], 'moneyness': r['moneyness'], 'model': r['model'],
                     'realized_loss': loss, 'breach': [bool(loss > v) for v in r['var']],
                     'pinball': [float(be.pinball(loss, v, lv)) for v, lv in zip(r['var'], r['levels'])],
@@ -558,14 +695,15 @@ def var_scorecard(jdir, log=print):
         return
     by = {}
     for r in mat:
-        by.setdefault((r['horizon'], r['model']), []).append(r)
+        by.setdefault((r.get('underlying', 'SPX'), r['horizon'], r['model']), []).append(r)
     asofs = sorted({r['asof'] for r in fc.values()})
-    log(f'  var: {len(fc)} forecasts over {len(asofs)} snapshot days ({asofs[0]} .. {asofs[-1]}); '
-        f'{len(mat)} matured')
+    unds = sorted({r.get('underlying', 'SPX') for r in fc.values()})
+    log(f'  var: {len(fc)} forecasts over {len(asofs)} snapshot days ({asofs[0]} .. {asofs[-1]}) for '
+        f'{", ".join(unds)}; {len(mat)} matured')
     if not mat:
         return
-    log('  horizon model     matured indep  level breach%  Kupiec p  Chr. cc p  Berk. p   ETA to 250 indep')
-    for (h, model), rows in sorted(by.items()):
+    log('  underlying horizon model     matured indep  level breach%  Kupiec p  Chr. cc p  Berk. p   ETA to 250 indep')
+    for (und, h, model), rows in sorted(by.items()):
         rows = sorted(rows, key=lambda r: r['asof'])
         mid = [r for r in rows if r['moneyness'] == 1.0]
         ind = [mid[i] for i in _independent([r['asof'] for r in mid], h)]
@@ -577,16 +715,16 @@ def var_scorecard(jdir, log=print):
             kp = be.kupiec(hits, 1 - lv)[1] if len(hits) else float('nan')
             cc = be.christoffersen(hits, 1 - lv)['p_cc'] if len(hits) > 2 else float('nan')
             bk = be.berkowitz([r['pit'] for r in ind])['p'] if len(ind) >= 10 else float('nan')
-            log(f'  {h:4d}d  {model:9s} {len(rows):6d} {len(ind):5d}   {lv:4.2f}  {100 * allhits.mean():6.2f}   '
+            log(f'  {und:10s} {h:4d}d  {model:9s} {len(rows):6d} {len(ind):5d}   {lv:4.2f}  {100 * allhits.mean():6.2f}   '
                 f'{kp:7.3f}   {cc:7.3f}   {bk:6.3f}   {eta}')
 
 
-def gjr_vol_asof(dates, S, state_date, cache):
-    """Annualised one-day-ahead GJR-GARCH vol using S&P closes through state_date only."""
+def gjr_vol_asof(dates, S, state_date, cache, days_per_year=252):
+    """Annualised one-step-ahead GJR-GARCH vol using closes through state_date only."""
     if state_date not in cache:
         i = int(np.searchsorted(dates, np.datetime64(state_date), side='right'))
         _, s2, _ = be.fit_gjr(np.diff(np.log(S[:i])))
-        cache[state_date] = math.sqrt(be.TRADING_DAYS * s2[-1])
+        cache[state_date] = math.sqrt(days_per_year * s2[-1])
     return cache[state_date]
 
 
@@ -609,48 +747,56 @@ def fit_ladder(legs, skew=-0.3, rate=0.04, dividend=0.015):
 
 
 def _kalshi_rows(data_dir, jdir, cfg):
-    """Matured Kalshi contracts: backfilled settled history plus matured forward snapshots.
+    """Matured Kalshi contracts of every enabled underlying: backfilled settled history plus matured
+    forward snapshots.
 
-    Besides the journaled p (VIX vol, frozen config), each row carries p_gjr: the same prior-close
-    model with a one-day GJR-GARCH vol fitted on closes through the state date (point in time)."""
-    k = cfg['kalshi']
-    dates, S, _ = be.load_spx_vix(data_dir)
-    vcache = {}
-    rows = []
-    for series in k['series']:
-        for r in _read_csv(os.path.join(data_dir, 'kalshi', f'{series}_settled.csv')):
-            T = trading_days(r['state_date'], r['expiry']) / be.TRADING_DAYS
-            S0, v0 = float(r['S0']), float(r['v0'])
-            vg = gjr_vol_asof(dates, S, r['state_date'], vcache)
-            rows.append({'source': 'backfill', 'series': series, 'event': r['event'], 'ticker': r['ticker'],
-                         'expiry': r['expiry'], 'quote_date': r['expiry'], 'bid': _f(r['bid']), 'ask': _f(r['ask']),
-                         'y': int(r['result']), 'strike_type': r['strike_type'], 'floor': _f(r['floor']),
-                         'cap': _f(r['cap']), 'S0': S0, 'v0': v0, 'T': T,
-                         'p': kalshi_prob(r['strike_type'], _f(r['floor']), _f(r['cap']), S0, v0, T,
-                                          k['skew'], k['rate'], k['dividend']),
-                         'p_gjr': kalshi_prob(r['strike_type'], _f(r['floor']), _f(r['cap']), S0, vg, T,
-                                              k['skew'], k['rate'], k['dividend'])})
+    Besides the journaled p (vol index or GJR stand-in, frozen config), each row carries p_gjr: the
+    same prior-close model with a one-step GJR-GARCH vol fitted on closes through the state date."""
     mat = {r['id']: r for r in read_jsonl(jfile(jdir, 'matured_kalshi'))}
-    first_daily = {}
-    for r in read_jsonl(jfile(jdir, 'forecasts_kalshi')):
-        if r['id'] in mat:
-            key = (r['ticker'], ny_date(r['ts']))
-            if key not in first_daily or r['ts'] < first_daily[key]['ts']:
-                first_daily[key] = r
-    for r in first_daily.values():
-        # The model state is the prior close, so market quotes are comparable only before the open;
-        # later quotes still count for model calibration but not for market-vs-model scoring.
-        local = datetime.fromtimestamp(r['ts'] + 3600 * ny_offset_hours(r['ts']), timezone.utc)
-        pre_open = local.hour + local.minute / 60 < 9.5 and str(local.date()) == r['expiry']
-        vg = gjr_vol_asof(dates, S, r['state_date'], vcache)
-        rows.append({'source': 'forward', 'series': r['series'], 'event': r['event'], 'ticker': r['ticker'],
-                     'expiry': r['expiry'], 'quote_date': str(ny_date(r['ts'])),
-                     'bid': _f(r['bid']) if pre_open else float('nan'),
-                     'ask': _f(r['ask']) if pre_open else float('nan'), 'y': mat[r['id']]['outcome'],
-                     'strike_type': r['strike_type'], 'floor': _f(r['floor']), 'cap': _f(r['cap']), 'p': r['p_model'],
-                     'S0': r['S0'], 'v0': r['v0'], 'T': r['T'],
-                     'p_gjr': kalshi_prob(r['strike_type'], _f(r['floor']), _f(r['cap']), r['S0'], vg, r['T'],
-                                          k['skew'], k['rate'], k['dividend'])})
+    forward = [r for r in read_jsonl(jfile(jdir, 'forecasts_kalshi')) if r['id'] in mat]
+    rows, cache = [], {}
+    for key in enabled_underlyings(cfg):
+        _, k = ucfg(cfg, key, fallback=True)
+        data = load_cached(data_dir, key, cache)
+        if data is None or not k['series']:
+            continue
+        dates, S, _ = data
+        dpy = k.get('days_per_year', 252)
+        vcache = {}
+        args = (k['skew'], k['rate'], k['dividend'])
+        for series in k['series']:
+            for r in _read_csv(os.path.join(data_dir, 'kalshi', f'{series}_settled.csv')):
+                T = year_frac(r['state_date'], r['expiry'], dpy)
+                S0, v0 = float(r['S0']), float(r['v0'])
+                vg = gjr_vol_asof(dates, S, r['state_date'], vcache, dpy)
+                rows.append({'source': 'backfill', 'underlying': key, 'series': series, 'event': r['event'],
+                             'ticker': r['ticker'], 'expiry': r['expiry'], 'quote_date': r['expiry'],
+                             'bid': _f(r['bid']), 'ask': _f(r['ask']), 'y': int(r['result']),
+                             'strike_type': r['strike_type'], 'floor': _f(r['floor']), 'cap': _f(r['cap']),
+                             'S0': S0, 'v0': v0, 'T': T,
+                             'p': kalshi_prob(r['strike_type'], _f(r['floor']), _f(r['cap']), S0, v0, T, *args),
+                             'p_gjr': kalshi_prob(r['strike_type'], _f(r['floor']), _f(r['cap']), S0, vg, T, *args)})
+        first_daily = {}
+        for r in forward:
+            if r.get('underlying', be.underlying_of_series(r['series'])) != key:
+                continue
+            fk = (r['ticker'], ny_date(r['ts']))
+            if fk not in first_daily or r['ts'] < first_daily[fk]['ts']:
+                first_daily[fk] = r
+        for r in first_daily.values():
+            # The model state is the prior close, so market quotes are comparable only before the open;
+            # later quotes still count for model calibration but not for market-vs-model scoring.
+            local = datetime.fromtimestamp(r['ts'] + 3600 * ny_offset_hours(r['ts']), timezone.utc)
+            pre_open = local.hour + local.minute / 60 < 9.5 and str(local.date()) == r['expiry']
+            vg = gjr_vol_asof(dates, S, r['state_date'], vcache, dpy)
+            rows.append({'source': 'forward', 'underlying': key, 'series': r['series'], 'event': r['event'],
+                         'ticker': r['ticker'], 'expiry': r['expiry'], 'quote_date': str(ny_date(r['ts'])),
+                         'bid': _f(r['bid']) if pre_open else float('nan'),
+                         'ask': _f(r['ask']) if pre_open else float('nan'), 'y': mat[r['id']]['outcome'],
+                         'strike_type': r['strike_type'], 'floor': _f(r['floor']), 'cap': _f(r['cap']),
+                         'p': r['p_model'], 'S0': r['S0'], 'v0': r['v0'], 'T': r['T'],
+                         'p_gjr': kalshi_prob(r['strike_type'], _f(r['floor']), _f(r['cap']), r['S0'], vg, r['T'],
+                                              *args)})
     return rows
 
 
@@ -660,13 +806,15 @@ def kalshi_scorecard(data_dir, jdir, cfg, log=print):
     if not rows:
         log(f'  kalshi: no matured contracts yet ({pend} journaled quotes pending settlement)')
         return
-    for series in cfg['kalshi']['series']:
+    for key, series in [(k, s) for k in enabled_underlyings(cfg) for s in ucfg(cfg, k, fallback=True)[1]['series']]:
+        kc = ucfg(cfg, key, fallback=True)[1]
         rs = [r for r in rows if r['series'] == series]
         if not rs:
             continue
         nb = sum(r['source'] == 'backfill' for r in rs)
         evs = sorted({r['event'] for r in rs})
-        log(f'  kalshi {series}: {len(rs)} matured contracts ({nb} backfilled, {len(rs) - nb} forward) '
+        vol_name = be.UNDERLYINGS[key]['vol'] or 'GJR vol'
+        log(f'  kalshi {series} ({key}): {len(rs)} matured contracts ({nb} backfilled, {len(rs) - nb} forward) '
             f'over {len(evs)} settlement days; {pend} forward quotes pending overall')
         y = np.array([r['y'] for r in rs], float)
         p = np.clip(np.array([r['p'] for r in rs], float), 1e-6, 1 - 1e-6)
@@ -688,8 +836,7 @@ def kalshi_scorecard(data_dir, jdir, cfg, log=print):
             groups.setdefault((rs[i]['event'], rs[i]['quote_date']), []).append(i)
         for idx in groups.values():
             if len(idx) >= 4:
-                _, v_fit, pf = fit_ladder([rs[i] for i in idx], cfg['kalshi']['skew'], cfg['kalshi']['rate'],
-                                          cfg['kalshi']['dividend'])
+                _, v_fit, pf = fit_ladder([rs[i] for i in idx], kc['skew'], kc['rate'], kc['dividend'])
                 p_fit[idx] = pf
                 vol_ratio.append(v_fit / rs[idx[0]]['v0'])
         fitted = np.isfinite(p_fit)
@@ -700,21 +847,20 @@ def kalshi_scorecard(data_dir, jdir, cfg, log=print):
         for key, idx in groups.items():
             if len(idx) >= 4 and np.isfinite(p_fit[idx[0]]):
                 day_ratio.setdefault(rs[idx[0]]['expiry'], []).append(
-                    fit_ladder([rs[i] for i in idx], cfg['kalshi']['skew'], cfg['kalshi']['rate'],
-                               cfg['kalshi']['dividend'])[1] / rs[idx[0]]['v0'])
+                    fit_ladder([rs[i] for i in idx], kc['skew'], kc['rate'], kc['dividend'])[1] / rs[idx[0]]['v0'])
         p_ts = np.full(len(rs), np.nan)
         for i, r in enumerate(rs):
             past = [x for dday, xs in day_ratio.items() if dday < r['expiry'] for x in xs]
             if len(past) >= 5:
                 p_ts[i] = kalshi_prob(r['strike_type'], r['floor'], r['cap'], r['S0'], r['v0'] * float(np.median(past)),
-                                      r['T'], cfg['kalshi']['skew'], cfg['kalshi']['rate'], cfg['kalshi']['dividend'])
+                                      r['T'], kc['skew'], kc['rate'], kc['dividend'])
         has_ts = np.isfinite(p_ts)
         p_ts = np.clip(np.where(has_ts, p_ts, 0.5), 1e-6, 1 - 1e-6)
         mid_q = np.clip((bid + ask) / 2, 1e-4, 1 - 1e-4)
         allm = np.ones(len(rs), bool)
         log('    forecast                       n     Brier    log loss   AUC')
-        for name, q, m in (('model p_Q (VIX vol, frozen)', p, allm), ('model p_Q (GJR 1-day vol)', p_gjr, allm),
-                           ('model p_Q (VIX, same days)', p, has_ts),
+        for name, q, m in ((f'model p_Q ({vol_name}, frozen)', p, allm), ('model p_Q (GJR 1-day vol)', p_gjr, allm),
+                           (f'model p_Q ({vol_name}, same days)', p, has_ts),
                            ('model p_Q (learned vol scale)', p_ts, has_ts),
                            ('model p_Q recalibrated', p_lp, allm), ('model p_Q (two-sided)', p, two),
                            ('market mid (two-sided)', mid, two), ('market mid (quoted ladders)', mid_q, fitted),
@@ -730,7 +876,7 @@ def kalshi_scorecard(data_dir, jdir, cfg, log=print):
                 mean, (lo, hi) = be.cluster_bootstrap((a - b)[fitted], evarr[fitted])
                 log(f'    ladder-fit minus market mid, {label}: {mean:+.4f} [{lo:+.4f}, {hi:+.4f}] '
                     f'(cluster bootstrap by settlement day; negative = curve better)')
-            log(f'    ladder-implied 1-day vol / VIX: median {np.median(vol_ratio):.2f} '
+            log(f'    ladder-implied 1-day vol / {vol_name}: median {np.median(vol_ratio):.2f} '
                 f'(range {np.min(vol_ratio):.2f} to {np.max(vol_ratio):.2f}) over {len(vol_ratio)} ladders')
         if two.sum() >= 20:
             pnl, side = be.edge_trades(p_lp[two], bid[two], ask[two], y[two], 0.02, 0.01)
@@ -739,7 +885,7 @@ def kalshi_scorecard(data_dir, jdir, cfg, log=print):
                 mean, (lo, hi) = be.cluster_bootstrap(pnl[traded], np.array([r['event'] for r in rs])[two][traded])
                 log(f'    edge trades vs quotes (recalibrated p, threshold 0.02 + fee 0.01): {traded.sum()} trades, '
                     f'mean {mean:+.4f} [{lo:+.4f}, {hi:+.4f}] per contract (cluster bootstrap by settlement day)')
-        if series == 'KXINX':
+        if any(r['strike_type'] == 'between' for r in rs):
             _ladder_scorecard(rs, log)
 
 
@@ -793,8 +939,11 @@ def cross_scorecard(jdir, log=print):
 
 def status(data_dir, jdir, cfg, log=print):
     log('MATURITY STATUS')
-    for row in read_jsonl(jfile(jdir, 'fetch_log'))[-len(FRED):]:
-        log(f'  data {row["series"]:8s} last {row["last"]} (fetched {row["fetched_at"]})')
+    latest = {}
+    for row in read_jsonl(jfile(jdir, 'fetch_log')):
+        latest[row['series']] = row
+    for sid, row in sorted(latest.items()):
+        log(f'  data {sid:10s} last {row["last"]} (fetched {row["fetched_at"]})')
     var_scorecard(jdir, log)
     kalshi_scorecard(data_dir, jdir, cfg, log)
     cross_scorecard(jdir, log)
@@ -835,6 +984,40 @@ def freeze(data_dir, jdir, tune=True, force=False, log=print):
     return cfg
 
 
+def _write_config(jdir, cfg):
+    path = os.path.join(jdir, 'config.json')
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=2, default=_default)
+    os.replace(tmp, path)
+
+
+def freeze_underlying(data_dir, jdir, key, min_obs=1100, log=print):
+    """Pre-register one more underlying: tune on its history with the walk-forward backtest
+    (tuning split only) and add its section to config.json. Frozen sections are never rewritten."""
+    cfg = load_config(jdir)
+    if key == 'SPX' or key in cfg.get('underlyings', {}):
+        return cfg
+    dates, S, V = be.load_underlying(data_dir, key)
+    if len(S) < min_obs:
+        log(f'  freeze {key}: only {len(S)} observations (< {min_obs}); not frozen, no forecasts journaled')
+        return cfg
+    var, kal = default_underlying_cfg(key)
+    log(f'Tuning {key} on {dates[0]} .. {dates[-1]} (tuning split only) ...')
+    summary = be.run_var_backtest(dates, S, V, be.BacktestConfig(days_per_year=var['days_per_year'], rate=var['rate'],
+                                                                 dividend=var['dividend'], skew=var['skew']), log=log)
+    var['tail_k'] = summary['tail_k']
+    var['gammas'] = [float(g) for g in summary['chosen_gamma']]
+    cfg.setdefault('underlyings', {})[key] = {
+        'var': var, 'kalshi': kal,
+        'frozen': {'at': now_iso(), 'history': [str(dates[0]), str(dates[-1])],
+                   'source': 'tail index and tempering powers from the backtest tuning split',
+                   'code_sha256_16': _code_hash()}}
+    _write_config(jdir, cfg)
+    log(f'  froze {key}: tail_k {var["tail_k"]}, gammas {var["gammas"]}')
+    return cfg
+
+
 def run_cycle(data_dir, jdir, store_root, days=40, log=print):
     """One daily cycle. Stages are independent: a failing source (say, Kalshi unreachable) is
     logged and skipped so the others still run; returns the number of failed stages."""
@@ -851,14 +1034,21 @@ def run_cycle(data_dir, jdir, store_root, days=40, log=print):
             log('     ' + traceback.format_exc().strip().splitlines()[-1])
             return None
 
-    stage('FRED refresh', refresh_fred, data_dir, jdir, http_text, log)
+    stage('FRED refresh', refresh_fred, data_dir, jdir, http_text, log, fred_ids(load_config(jdir, required=False)))
     cfg = load_config(jdir, required=False) or freeze(data_dir, jdir, tune=True, log=log)
-    for series in cfg['kalshi']['series']:
-        stage(f'Kalshi backfill {series}', backfill_kalshi, data_dir, series, days, 0.015, 25, 'H1600', log)
+    for key in enabled_underlyings(cfg):
+        if key != 'SPX':
+            stage(f'freeze {key}', freeze_underlying, data_dir, jdir, key, 1100, log)
+    cfg = load_config(jdir)
+    for key in enabled_underlyings(cfg):
+        _, kc = ucfg(cfg, key)
+        for series in (kc or {}).get('series', []):
+            stage(f'Kalshi backfill {series}', backfill_kalshi, data_dir, series, days, key, kc, 12, log)
     stage('var mature', var_mature, data_dir, jdir, log)
     stage('cross mature', cross_mature, data_dir, jdir, log)
     stage('kalshi mature', kalshi_mature, jdir, log)
-    stage('var snapshot', var_snapshot, data_dir, jdir, cfg, log)
+    for key in enabled_underlyings(cfg):
+        stage(f'var snapshot {key}', var_snapshot, data_dir, jdir, cfg, log, key)
     stage('cross snapshot', cross_snapshot, data_dir, jdir, cfg, log)
     stage('kalshi snapshot', kalshi_snapshot, data_dir, jdir, store_root, cfg, log)
     stage('status', status, data_dir, jdir, cfg, log)
@@ -979,15 +1169,21 @@ def main(argv=None):
     if args.selftest:
         return 0 if selftest() else 1
     if args.cmd == 'backfill':
-        refresh_fred(args.data, args.journal)
+        cfg = load_config(args.journal, required=False)
+        refresh_fred(args.data, args.journal, ids=fred_ids(cfg))
         if not args.no_kalshi:
-            for series in DEFAULT_CFG['kalshi']['series']:
-                backfill_kalshi(args.data, series, days=args.days)
+            for key in enabled_underlyings(cfg):
+                _, kc = ucfg(cfg, key, fallback=True) if cfg else default_underlying_cfg(key)
+                for series in kc['series']:
+                    backfill_kalshi(args.data, series, args.days, key, kc)
     elif args.cmd == 'freeze':
         freeze(args.data, args.journal, tune=not args.no_tune, force=args.force)
+        for key in enabled_underlyings(load_config(args.journal)):
+            freeze_underlying(args.data, args.journal, key)
     elif args.cmd == 'snapshot':
         cfg = load_config(args.journal)
-        var_snapshot(args.data, args.journal, cfg)
+        for key in enabled_underlyings(cfg):
+            var_snapshot(args.data, args.journal, cfg, key=key)
         cross_snapshot(args.data, args.journal, cfg)
         kalshi_snapshot(args.data, args.journal, args.store, cfg)
     elif args.cmd == 'mature':

@@ -27,12 +27,37 @@ Run it at about **09:00 New York time on weekdays**. Kalshi forecasts use the pr
 model state, so only pre-open market quotes are comparable with the model. Quotes taken later
 still count toward calibrating the model, but not toward the market-versus-model comparison.
 
+## Underlyings
+
+Every underlying registered in `bsm_event.UNDERLYINGS` runs through the same streams. To add
+one, add a registry entry with:
+- a FRED price id;
+- an implied-vol index id, or `None` to use the point-in-time GJR forecast instead;
+- its Kalshi series, and a regex that picks one daily settlement from their event tickers;
+- its rate, dividend (or foreign rate) and skew;
+- its day count: 252, or 365 for assets that trade every day.
+
+To narrow the list, set `"enabled": [...]` in `config.json`.
+
+| Key | Price | Vol | Kalshi series | Notes |
+|---|---|---|---|---|
+| SPX | SP500 | VIXCLS | KXINXU, KXINX | Original frozen config |
+| NDX | NASDAQ100 | VXNCLS | KXNASDAQ100U, KXNASDAQ100 | |
+| DJIA | DJIA | VXDCLS | — | VaR stream only |
+| WTI | DCOILWTICO | OVXCLS | KXWTI (2:30pm daily) | Kalshi settles on futures, the model uses spot: basis risk. The non-positive price on 2020-04-20 is dropped. FRED spot lags about 4 business days, so forward snapshots are often stale. |
+| BTC, ETH | CBBTCUSD, CBETHUSD | GJR fallback | KXBTCD, KXBTC / KXETHD | 365-day calendar; 5pm ET settlement |
+| EURUSD, USDJPY | DEXUSEU, DEXJPUS | GJR fallback | KXEURUSD / KXUSDJPY | FRED's H.10 rates arrive about a week late, so most forward states are stale and skipped. |
+
+Each new underlying is tuned on its own history and frozen into `config.json` under
+`underlyings.<key>` on its first cycle. Existing frozen sections are never rewritten. Gold has
+Kalshi contracts but no FRED price series, so it is not registered.
+
 ## Streams
 
 | Stream | Forecast | Matures | Label |
 |---|---|---|---|
-| `var` | 1- and 5-day VaR plus a 103-point quantile grid, 3 strikes × 5 models, rolling 21-day S&P digital | 1 or 5 trading days later | Realised marked-to-model loss, breaches, PIT |
-| `kalshi` | Every open 4pm-settling `KXINXU` (above/below) and `KXINX` (range) contract: quote, sizes, model p_Q | When Kalshi settles | `yes`/`no` and the settlement value |
+| `var` | Per underlying: 1- and 5-day VaR plus a 103-point quantile grid, 3 strikes × 5 models, rolling 21-day digital | 1 or 5 trading days later | Realised marked-to-model loss, breaches, PIT |
+| `kalshi` | Every open daily contract of every enabled underlying: quote, sizes, model p_Q. Skipped if the model state is more than 3 business days old. | When Kalshi settles | `yes`/`no` and the settlement value |
 | `cross` | 5-day VaR of the cross-asset book (Gaussian, GPD, FHS) | 5 trading days later | Realised book loss |
 
 ## Files

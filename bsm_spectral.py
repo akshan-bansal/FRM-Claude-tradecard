@@ -21,7 +21,8 @@ Install: python -m pip install numpy scipy
 Run:     python bsm_spectral.py --selftest
          python bsm_spectral.py --demo
          python bsm_spectral.py --backtest --synthetic
-         python bsm_spectral.py --backtest --data data          (SP500.csv + VIX.csv)
+         python bsm_spectral.py --backtest --data data          (SP500.csv + VIXCLS.csv)
+         python bsm_spectral.py --backtest --data data --underlying NDX   (any registered underlying)
 """
 from __future__ import annotations
 
@@ -374,9 +375,9 @@ def demo():
 def run_data(dates, S, V):
     """Real-data diagnostics: filter comparison with power, anisotropy at today's state, fibre backtest."""
     X = np.column_stack([np.diff(np.log(S)), np.diff(np.asarray(V) / 100)])
-    print(f'Shock-covariance filters, {dates[0]} .. {dates[-1]} (index log return, VIX change)')
+    print(f'Shock-covariance filters, {dates[0]} .. {dates[-1]} (price log return, vol-index change)')
     print_filter_comparison(compare_filters(X))
-    print(f'\nStraddle anisotropy across horizons at the last state (S {S[-1]:.2f}, VIX {V[-1]:.2f})')
+    print(f'\nStraddle anisotropy across horizons at the last state (S {S[-1]:.2f}, vol {V[-1]:.2f})')
     sd_v = float(np.std(np.diff(np.asarray(V[-253:]) / 100)))
     rho = float(np.corrcoef(X[-252:].T)[0, 1])
     anisotropy_by_horizon(S=float(S[-1]), v=float(V[-1]) / 100, sd_vol_daily=sd_v, corr=rho)
@@ -391,6 +392,8 @@ def main(argv=None):
     ap.add_argument('--backtest', action='store_true')
     ap.add_argument('--data', default=None)
     ap.add_argument('--synthetic', action='store_true')
+    ap.add_argument('--underlying', default='SPX', choices=sorted(be.UNDERLYINGS),
+                    help='registered underlying for --data runs')
     args = ap.parse_args(argv)
     if not (args.selftest or args.demo or args.backtest):
         ap.print_help()
@@ -401,7 +404,7 @@ def main(argv=None):
         demo()
     if args.backtest:
         if args.data:
-            run_data(*be.load_spx_vix(args.data))
+            run_data(*be.load_underlying(args.data, args.underlying))
             return 0
         if args.synthetic:
             dates, S, V = be.synthetic_market()

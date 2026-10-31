@@ -17,6 +17,7 @@ message ContractParams {
   double skew = 3;        // beta in sigma_K = v - beta ln(F/K)
   double vol_floor = 4;
   repeated double level_map = 5;  // ATM vol v = level_map[0] + level_map[1] * VIX / 100
+  optional int32 days_per_year = 6;  // 252, or 365 for assets that trade every day
 }
 
 // VaR of a rolling S&P digital for one horizon, strike and model.
@@ -43,6 +44,7 @@ message VarForecast {
   optional bool ratio_gate = 19;
   optional bool crossing = 20;
   optional double radius = 21;     // tail-consistent stress radius
+  optional string underlying = 22; // key in bsm_event.UNDERLYINGS; absent = SPX
 }
 
 message VarMatured {
@@ -57,6 +59,7 @@ message VarMatured {
   repeated bool breach = 9;      // per level
   repeated double pinball = 10;  // per level
   double pit = 11;
+  optional string underlying = 12;
 }
 
 // ---------------------------------------------------------------- kalshi stream
@@ -83,6 +86,7 @@ message KalshiForecast {
   double v0 = 19;
   double T = 20;              // trading years from state_date to expiry
   double p_model = 21;
+  optional string underlying = 22; // absent = SPX
 }
 
 message KalshiMatured {
@@ -179,6 +183,7 @@ message MaturationConfig {
     double vol_floor = 15;
     repeated double level_map = 16;
     repeated string models = 17;
+    optional int32 days_per_year = 18;
   }
   message Kalshi {
     repeated string series = 1;
@@ -187,6 +192,9 @@ message MaturationConfig {
     double rate = 4;
     double dividend = 5;
     int32 snapshot_hour_ny = 6;
+    optional string events = 7;          // regex on event tickers selecting the daily settlement
+    optional int32 max_state_lag = 8;    // business days before a model state counts as stale
+    optional int32 days_per_year = 9;
   }
   message Cross {
     repeated int32 horizons = 1;
@@ -199,11 +207,20 @@ message MaturationConfig {
     repeated string history = 2;
     string source = 3;
     string code_sha256_16 = 4;
+    repeated string amendments = 5;  // dated, non-tuning corrections (e.g. contract selection)
+  }
+  // Section frozen for one more underlying (the top-level var / kalshi sections are the S&P's).
+  message Underlying {
+    Var var = 1;
+    Kalshi kalshi = 2;
+    Frozen frozen = 3;
   }
   Var var = 1;
   Kalshi kalshi = 2;
   Cross cross = 3;
   Frozen frozen = 4;
+  map<string, Underlying> underlyings = 5;
+  repeated string enabled = 6;          // empty = every registered underlying
 }
 
 // Envelope for shipping any journal record over one channel.

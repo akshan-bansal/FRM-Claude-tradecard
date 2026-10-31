@@ -79,10 +79,14 @@ def to_dict(msg):
 
 
 def same(a, b):
-    """Equality up to representation: None == absent, 7525 == 7525.0, ints written as strings
-    by the JSON mapping of int64 compare by value. Floats must match exactly."""
+    """Equality up to representation: None, empty strings, lists and maps == absent (proto3 has no
+    presence for them), 7525 == 7525.0, int64s written as strings compare by value. Floats must
+    match exactly."""
+    def present(v):
+        return v is not None and v != [] and v != {} and v != ''
+
     if isinstance(a, dict) and isinstance(b, dict):
-        keys = {k for k in a if a[k] is not None} | {k for k in b if b[k] is not None}
+        keys = {k for k in a if present(a[k])} | {k for k in b if present(b[k])}
         return all(same(a.get(k), b.get(k)) for k in keys)
     if isinstance(a, list) and isinstance(b, list):
         return len(a) == len(b) and all(same(x, y) for x, y in zip(a, b))

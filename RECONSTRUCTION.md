@@ -81,6 +81,29 @@ Demo results that reproduce the paper's qualitative findings:
    - order-flow imbalance R² is only 0.04 over the full sample. The 0.93 seen early came from a few large moves.
 5. **Module split: declined.** `bsm_event.py` stays one coherent file, organised by its numbered sections.
 
+## All-purpose extensions (2026-10-30)
+
+- **Any underlying.** `bsm_event.UNDERLYINGS` registers the S&P 500, Nasdaq-100, Dow, WTI, Bitcoin, Ether, EUR/USD and USD/JPY. Underlyings without an implied-vol index use a point-in-time GJR forecast.
+  - `bsm_event.py` and `bsm_spectral.py` take `--underlying KEY` for real-data runs.
+  - The maturation pipeline journals, matures and scores every enabled underlying. See `MATURATION.md`.
+  - **First cross-underlying evidence** (20–41 settled days per Kalshi series):
+    - The ladder-fitted model curve beats the market's own mids on log loss, with intervals excluding zero, for the S&P range ladder, the Nasdaq range ladder, WTI, Bitcoin (both series) and Ether. It ties on the S&P and Nasdaq above/below contracts and on FX.
+    - Markets price 1-day volatility at about half of the underlying's vol index or GJR forecast: 0.47–0.62×, and 0.26–0.33× for FX.
+    - The raw WTI model is poor (Brier 0.39 against the market's 0.07). It uses FRED spot while Kalshi settles on futures, so the futures basis enters directly.
+- **Multi-modal threat detection, `bsm_detect.py`.** The same false-alarm-control statistics, applied to screening across three sensor modalities:
+  - **Spectroscopy:** matched filter with a Marchenko–Pastur-denoised background.
+  - **Dual-energy X-ray:** Reed–Xiaoli pixel anomaly detector.
+  - **Trace / vapour time series:** CUSUM.
+
+  Scores are calibrated with GPD tails and fused across modalities with correlation-aware weights. Results on synthetic data with placeholder signatures:
+  - Tail calibration holds false-alarm rates of 1e-2, 1e-3 and 1e-4 to within 15% using 5,000 clean items.
+  - The MP-denoised background quadruples the matched filter's detection rate (0.05 → 0.20) with 200 training spectra for 128 channels.
+  - Fisher fusion, which assumes independent sensors, over-alarms about 9× because shared clutter correlates the modalities.
+  - Optimal linear fusion (weights R⁻¹δ, from threat simulants) detects 97.6% of threats against 41% for the best single sensor, at a calibrated false-alarm rate of 9e-4 against a 1e-3 target.
+  - The PID loop holds the false-alarm rate under baseline drift, and CUSUM flags the drift.
+
+  This is a statistical framework for calibrating and evaluating detectors. It is not a certified screening system.
+
 ## Choices made where the paper is silent
 
 - **Skew sign.** The smile is σ_K = v − β ln(F/K), exactly as the paper writes it, so equity skew needs β < 0. The default is −0.3.

@@ -6,21 +6,23 @@ from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Map
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class ContractParams(_message.Message):
-    __slots__ = ("rate", "dividend", "skew", "vol_floor", "level_map")
+    __slots__ = ("rate", "dividend", "skew", "vol_floor", "level_map", "days_per_year")
     RATE_FIELD_NUMBER: _ClassVar[int]
     DIVIDEND_FIELD_NUMBER: _ClassVar[int]
     SKEW_FIELD_NUMBER: _ClassVar[int]
     VOL_FLOOR_FIELD_NUMBER: _ClassVar[int]
     LEVEL_MAP_FIELD_NUMBER: _ClassVar[int]
+    DAYS_PER_YEAR_FIELD_NUMBER: _ClassVar[int]
     rate: float
     dividend: float
     skew: float
     vol_floor: float
     level_map: _containers.RepeatedScalarFieldContainer[float]
-    def __init__(self, rate: _Optional[float] = ..., dividend: _Optional[float] = ..., skew: _Optional[float] = ..., vol_floor: _Optional[float] = ..., level_map: _Optional[_Iterable[float]] = ...) -> None: ...
+    days_per_year: int
+    def __init__(self, rate: _Optional[float] = ..., dividend: _Optional[float] = ..., skew: _Optional[float] = ..., vol_floor: _Optional[float] = ..., level_map: _Optional[_Iterable[float]] = ..., days_per_year: _Optional[int] = ...) -> None: ...
 
 class VarForecast(_message.Message):
-    __slots__ = ("id", "stream", "made_at", "asof", "horizon", "moneyness", "model", "strike", "S0", "v0", "tenor", "p0", "position", "contract", "levels", "var", "quantiles", "action", "ratio_gate", "crossing", "radius")
+    __slots__ = ("id", "stream", "made_at", "asof", "horizon", "moneyness", "model", "strike", "S0", "v0", "tenor", "p0", "position", "contract", "levels", "var", "quantiles", "action", "ratio_gate", "crossing", "radius", "underlying")
     ID_FIELD_NUMBER: _ClassVar[int]
     STREAM_FIELD_NUMBER: _ClassVar[int]
     MADE_AT_FIELD_NUMBER: _ClassVar[int]
@@ -42,6 +44,7 @@ class VarForecast(_message.Message):
     RATIO_GATE_FIELD_NUMBER: _ClassVar[int]
     CROSSING_FIELD_NUMBER: _ClassVar[int]
     RADIUS_FIELD_NUMBER: _ClassVar[int]
+    UNDERLYING_FIELD_NUMBER: _ClassVar[int]
     id: str
     stream: str
     made_at: str
@@ -63,10 +66,11 @@ class VarForecast(_message.Message):
     ratio_gate: bool
     crossing: bool
     radius: float
-    def __init__(self, id: _Optional[str] = ..., stream: _Optional[str] = ..., made_at: _Optional[str] = ..., asof: _Optional[str] = ..., horizon: _Optional[int] = ..., moneyness: _Optional[float] = ..., model: _Optional[str] = ..., strike: _Optional[float] = ..., S0: _Optional[float] = ..., v0: _Optional[float] = ..., tenor: _Optional[float] = ..., p0: _Optional[float] = ..., position: _Optional[float] = ..., contract: _Optional[_Union[ContractParams, _Mapping]] = ..., levels: _Optional[_Iterable[float]] = ..., var: _Optional[_Iterable[float]] = ..., quantiles: _Optional[_Iterable[float]] = ..., action: _Optional[str] = ..., ratio_gate: bool = ..., crossing: bool = ..., radius: _Optional[float] = ...) -> None: ...
+    underlying: str
+    def __init__(self, id: _Optional[str] = ..., stream: _Optional[str] = ..., made_at: _Optional[str] = ..., asof: _Optional[str] = ..., horizon: _Optional[int] = ..., moneyness: _Optional[float] = ..., model: _Optional[str] = ..., strike: _Optional[float] = ..., S0: _Optional[float] = ..., v0: _Optional[float] = ..., tenor: _Optional[float] = ..., p0: _Optional[float] = ..., position: _Optional[float] = ..., contract: _Optional[_Union[ContractParams, _Mapping]] = ..., levels: _Optional[_Iterable[float]] = ..., var: _Optional[_Iterable[float]] = ..., quantiles: _Optional[_Iterable[float]] = ..., action: _Optional[str] = ..., ratio_gate: bool = ..., crossing: bool = ..., radius: _Optional[float] = ..., underlying: _Optional[str] = ...) -> None: ...
 
 class VarMatured(_message.Message):
-    __slots__ = ("id", "matured_date", "matured_at", "asof", "horizon", "moneyness", "model", "realized_loss", "breach", "pinball", "pit")
+    __slots__ = ("id", "matured_date", "matured_at", "asof", "horizon", "moneyness", "model", "realized_loss", "breach", "pinball", "pit", "underlying")
     ID_FIELD_NUMBER: _ClassVar[int]
     MATURED_DATE_FIELD_NUMBER: _ClassVar[int]
     MATURED_AT_FIELD_NUMBER: _ClassVar[int]
@@ -78,6 +82,7 @@ class VarMatured(_message.Message):
     BREACH_FIELD_NUMBER: _ClassVar[int]
     PINBALL_FIELD_NUMBER: _ClassVar[int]
     PIT_FIELD_NUMBER: _ClassVar[int]
+    UNDERLYING_FIELD_NUMBER: _ClassVar[int]
     id: str
     matured_date: str
     matured_at: str
@@ -89,10 +94,11 @@ class VarMatured(_message.Message):
     breach: _containers.RepeatedScalarFieldContainer[bool]
     pinball: _containers.RepeatedScalarFieldContainer[float]
     pit: float
-    def __init__(self, id: _Optional[str] = ..., matured_date: _Optional[str] = ..., matured_at: _Optional[str] = ..., asof: _Optional[str] = ..., horizon: _Optional[int] = ..., moneyness: _Optional[float] = ..., model: _Optional[str] = ..., realized_loss: _Optional[float] = ..., breach: _Optional[_Iterable[bool]] = ..., pinball: _Optional[_Iterable[float]] = ..., pit: _Optional[float] = ...) -> None: ...
+    underlying: str
+    def __init__(self, id: _Optional[str] = ..., matured_date: _Optional[str] = ..., matured_at: _Optional[str] = ..., asof: _Optional[str] = ..., horizon: _Optional[int] = ..., moneyness: _Optional[float] = ..., model: _Optional[str] = ..., realized_loss: _Optional[float] = ..., breach: _Optional[_Iterable[bool]] = ..., pinball: _Optional[_Iterable[float]] = ..., pit: _Optional[float] = ..., underlying: _Optional[str] = ...) -> None: ...
 
 class KalshiForecast(_message.Message):
-    __slots__ = ("id", "stream", "made_at", "ts", "series", "event", "ticker", "strike_type", "floor", "cap", "close_time", "expiry", "bid", "ask", "bid_size", "ask_size", "state_date", "S0", "v0", "T", "p_model")
+    __slots__ = ("id", "stream", "made_at", "ts", "series", "event", "ticker", "strike_type", "floor", "cap", "close_time", "expiry", "bid", "ask", "bid_size", "ask_size", "state_date", "S0", "v0", "T", "p_model", "underlying")
     ID_FIELD_NUMBER: _ClassVar[int]
     STREAM_FIELD_NUMBER: _ClassVar[int]
     MADE_AT_FIELD_NUMBER: _ClassVar[int]
@@ -114,6 +120,7 @@ class KalshiForecast(_message.Message):
     V0_FIELD_NUMBER: _ClassVar[int]
     T_FIELD_NUMBER: _ClassVar[int]
     P_MODEL_FIELD_NUMBER: _ClassVar[int]
+    UNDERLYING_FIELD_NUMBER: _ClassVar[int]
     id: str
     stream: str
     made_at: str
@@ -135,7 +142,8 @@ class KalshiForecast(_message.Message):
     v0: float
     T: float
     p_model: float
-    def __init__(self, id: _Optional[str] = ..., stream: _Optional[str] = ..., made_at: _Optional[str] = ..., ts: _Optional[float] = ..., series: _Optional[str] = ..., event: _Optional[str] = ..., ticker: _Optional[str] = ..., strike_type: _Optional[str] = ..., floor: _Optional[float] = ..., cap: _Optional[float] = ..., close_time: _Optional[str] = ..., expiry: _Optional[str] = ..., bid: _Optional[float] = ..., ask: _Optional[float] = ..., bid_size: _Optional[float] = ..., ask_size: _Optional[float] = ..., state_date: _Optional[str] = ..., S0: _Optional[float] = ..., v0: _Optional[float] = ..., T: _Optional[float] = ..., p_model: _Optional[float] = ...) -> None: ...
+    underlying: str
+    def __init__(self, id: _Optional[str] = ..., stream: _Optional[str] = ..., made_at: _Optional[str] = ..., ts: _Optional[float] = ..., series: _Optional[str] = ..., event: _Optional[str] = ..., ticker: _Optional[str] = ..., strike_type: _Optional[str] = ..., floor: _Optional[float] = ..., cap: _Optional[float] = ..., close_time: _Optional[str] = ..., expiry: _Optional[str] = ..., bid: _Optional[float] = ..., ask: _Optional[float] = ..., bid_size: _Optional[float] = ..., ask_size: _Optional[float] = ..., state_date: _Optional[str] = ..., S0: _Optional[float] = ..., v0: _Optional[float] = ..., T: _Optional[float] = ..., p_model: _Optional[float] = ..., underlying: _Optional[str] = ...) -> None: ...
 
 class KalshiMatured(_message.Message):
     __slots__ = ("id", "matured_date", "matured_at", "ticker", "outcome", "settlement")
@@ -268,9 +276,9 @@ class FetchLog(_message.Message):
     def __init__(self, fetched_at: _Optional[str] = ..., series: _Optional[str] = ..., rows: _Optional[int] = ..., first: _Optional[str] = ..., last: _Optional[str] = ..., sha256: _Optional[str] = ..., revised: _Optional[int] = ..., dropped: _Optional[int] = ...) -> None: ...
 
 class MaturationConfig(_message.Message):
-    __slots__ = ("var", "kalshi", "cross", "frozen")
+    __slots__ = ("var", "kalshi", "cross", "frozen", "underlyings", "enabled")
     class Var(_message.Message):
-        __slots__ = ("horizons", "tenor_days", "moneyness", "position", "levels", "n_sims", "tail_frac", "tail_k", "xi_max", "gammas", "rho_floor", "skew", "rate", "dividend", "vol_floor", "level_map", "models")
+        __slots__ = ("horizons", "tenor_days", "moneyness", "position", "levels", "n_sims", "tail_frac", "tail_k", "xi_max", "gammas", "rho_floor", "skew", "rate", "dividend", "vol_floor", "level_map", "models", "days_per_year")
         HORIZONS_FIELD_NUMBER: _ClassVar[int]
         TENOR_DAYS_FIELD_NUMBER: _ClassVar[int]
         MONEYNESS_FIELD_NUMBER: _ClassVar[int]
@@ -288,6 +296,7 @@ class MaturationConfig(_message.Message):
         VOL_FLOOR_FIELD_NUMBER: _ClassVar[int]
         LEVEL_MAP_FIELD_NUMBER: _ClassVar[int]
         MODELS_FIELD_NUMBER: _ClassVar[int]
+        DAYS_PER_YEAR_FIELD_NUMBER: _ClassVar[int]
         horizons: _containers.RepeatedScalarFieldContainer[int]
         tenor_days: int
         moneyness: _containers.RepeatedScalarFieldContainer[float]
@@ -305,22 +314,29 @@ class MaturationConfig(_message.Message):
         vol_floor: float
         level_map: _containers.RepeatedScalarFieldContainer[float]
         models: _containers.RepeatedScalarFieldContainer[str]
-        def __init__(self, horizons: _Optional[_Iterable[int]] = ..., tenor_days: _Optional[int] = ..., moneyness: _Optional[_Iterable[float]] = ..., position: _Optional[float] = ..., levels: _Optional[_Iterable[float]] = ..., n_sims: _Optional[int] = ..., tail_frac: _Optional[float] = ..., tail_k: _Optional[float] = ..., xi_max: _Optional[float] = ..., gammas: _Optional[_Iterable[float]] = ..., rho_floor: _Optional[float] = ..., skew: _Optional[float] = ..., rate: _Optional[float] = ..., dividend: _Optional[float] = ..., vol_floor: _Optional[float] = ..., level_map: _Optional[_Iterable[float]] = ..., models: _Optional[_Iterable[str]] = ...) -> None: ...
+        days_per_year: int
+        def __init__(self, horizons: _Optional[_Iterable[int]] = ..., tenor_days: _Optional[int] = ..., moneyness: _Optional[_Iterable[float]] = ..., position: _Optional[float] = ..., levels: _Optional[_Iterable[float]] = ..., n_sims: _Optional[int] = ..., tail_frac: _Optional[float] = ..., tail_k: _Optional[float] = ..., xi_max: _Optional[float] = ..., gammas: _Optional[_Iterable[float]] = ..., rho_floor: _Optional[float] = ..., skew: _Optional[float] = ..., rate: _Optional[float] = ..., dividend: _Optional[float] = ..., vol_floor: _Optional[float] = ..., level_map: _Optional[_Iterable[float]] = ..., models: _Optional[_Iterable[str]] = ..., days_per_year: _Optional[int] = ...) -> None: ...
     class Kalshi(_message.Message):
-        __slots__ = ("series", "event_suffix", "skew", "rate", "dividend", "snapshot_hour_ny")
+        __slots__ = ("series", "event_suffix", "skew", "rate", "dividend", "snapshot_hour_ny", "events", "max_state_lag", "days_per_year")
         SERIES_FIELD_NUMBER: _ClassVar[int]
         EVENT_SUFFIX_FIELD_NUMBER: _ClassVar[int]
         SKEW_FIELD_NUMBER: _ClassVar[int]
         RATE_FIELD_NUMBER: _ClassVar[int]
         DIVIDEND_FIELD_NUMBER: _ClassVar[int]
         SNAPSHOT_HOUR_NY_FIELD_NUMBER: _ClassVar[int]
+        EVENTS_FIELD_NUMBER: _ClassVar[int]
+        MAX_STATE_LAG_FIELD_NUMBER: _ClassVar[int]
+        DAYS_PER_YEAR_FIELD_NUMBER: _ClassVar[int]
         series: _containers.RepeatedScalarFieldContainer[str]
         event_suffix: str
         skew: float
         rate: float
         dividend: float
         snapshot_hour_ny: int
-        def __init__(self, series: _Optional[_Iterable[str]] = ..., event_suffix: _Optional[str] = ..., skew: _Optional[float] = ..., rate: _Optional[float] = ..., dividend: _Optional[float] = ..., snapshot_hour_ny: _Optional[int] = ...) -> None: ...
+        events: str
+        max_state_lag: int
+        days_per_year: int
+        def __init__(self, series: _Optional[_Iterable[str]] = ..., event_suffix: _Optional[str] = ..., skew: _Optional[float] = ..., rate: _Optional[float] = ..., dividend: _Optional[float] = ..., snapshot_hour_ny: _Optional[int] = ..., events: _Optional[str] = ..., max_state_lag: _Optional[int] = ..., days_per_year: _Optional[int] = ...) -> None: ...
     class Cross(_message.Message):
         __slots__ = ("horizons", "window", "tail_k", "n_sims")
         HORIZONS_FIELD_NUMBER: _ClassVar[int]
@@ -333,25 +349,47 @@ class MaturationConfig(_message.Message):
         n_sims: int
         def __init__(self, horizons: _Optional[_Iterable[int]] = ..., window: _Optional[int] = ..., tail_k: _Optional[float] = ..., n_sims: _Optional[int] = ...) -> None: ...
     class Frozen(_message.Message):
-        __slots__ = ("at", "history", "source", "code_sha256_16")
+        __slots__ = ("at", "history", "source", "code_sha256_16", "amendments")
         AT_FIELD_NUMBER: _ClassVar[int]
         HISTORY_FIELD_NUMBER: _ClassVar[int]
         SOURCE_FIELD_NUMBER: _ClassVar[int]
         CODE_SHA256_16_FIELD_NUMBER: _ClassVar[int]
+        AMENDMENTS_FIELD_NUMBER: _ClassVar[int]
         at: str
         history: _containers.RepeatedScalarFieldContainer[str]
         source: str
         code_sha256_16: str
-        def __init__(self, at: _Optional[str] = ..., history: _Optional[_Iterable[str]] = ..., source: _Optional[str] = ..., code_sha256_16: _Optional[str] = ...) -> None: ...
+        amendments: _containers.RepeatedScalarFieldContainer[str]
+        def __init__(self, at: _Optional[str] = ..., history: _Optional[_Iterable[str]] = ..., source: _Optional[str] = ..., code_sha256_16: _Optional[str] = ..., amendments: _Optional[_Iterable[str]] = ...) -> None: ...
+    class Underlying(_message.Message):
+        __slots__ = ("var", "kalshi", "frozen")
+        VAR_FIELD_NUMBER: _ClassVar[int]
+        KALSHI_FIELD_NUMBER: _ClassVar[int]
+        FROZEN_FIELD_NUMBER: _ClassVar[int]
+        var: MaturationConfig.Var
+        kalshi: MaturationConfig.Kalshi
+        frozen: MaturationConfig.Frozen
+        def __init__(self, var: _Optional[_Union[MaturationConfig.Var, _Mapping]] = ..., kalshi: _Optional[_Union[MaturationConfig.Kalshi, _Mapping]] = ..., frozen: _Optional[_Union[MaturationConfig.Frozen, _Mapping]] = ...) -> None: ...
+    class UnderlyingsEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: MaturationConfig.Underlying
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[_Union[MaturationConfig.Underlying, _Mapping]] = ...) -> None: ...
     VAR_FIELD_NUMBER: _ClassVar[int]
     KALSHI_FIELD_NUMBER: _ClassVar[int]
     CROSS_FIELD_NUMBER: _ClassVar[int]
     FROZEN_FIELD_NUMBER: _ClassVar[int]
+    UNDERLYINGS_FIELD_NUMBER: _ClassVar[int]
+    ENABLED_FIELD_NUMBER: _ClassVar[int]
     var: MaturationConfig.Var
     kalshi: MaturationConfig.Kalshi
     cross: MaturationConfig.Cross
     frozen: MaturationConfig.Frozen
-    def __init__(self, var: _Optional[_Union[MaturationConfig.Var, _Mapping]] = ..., kalshi: _Optional[_Union[MaturationConfig.Kalshi, _Mapping]] = ..., cross: _Optional[_Union[MaturationConfig.Cross, _Mapping]] = ..., frozen: _Optional[_Union[MaturationConfig.Frozen, _Mapping]] = ...) -> None: ...
+    underlyings: _containers.MessageMap[str, MaturationConfig.Underlying]
+    enabled: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, var: _Optional[_Union[MaturationConfig.Var, _Mapping]] = ..., kalshi: _Optional[_Union[MaturationConfig.Kalshi, _Mapping]] = ..., cross: _Optional[_Union[MaturationConfig.Cross, _Mapping]] = ..., frozen: _Optional[_Union[MaturationConfig.Frozen, _Mapping]] = ..., underlyings: _Optional[_Mapping[str, MaturationConfig.Underlying]] = ..., enabled: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class JournalEntry(_message.Message):
     __slots__ = ("var_forecast", "var_matured", "kalshi_forecast", "kalshi_matured", "cross_forecast", "cross_matured", "fetch_log", "kalshi_settled")
