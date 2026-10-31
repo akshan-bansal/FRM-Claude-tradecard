@@ -19,6 +19,15 @@ Route surface (same as before this port):
     POST   /v1/intents/{intent_id}/response
     GET    /v1/intel/{ref}
     GET    /v1/passbook
+    GET    /v1/stats            (desk: live session strip)
+    GET    /v1/basket           (desk: card-signed baskets and pending proposals)
+    POST   /v1/basket/analyze   (desk: run the engines over typed symbols)
+    POST   /v1/basket/propose   (desk: queue a basket for the card; approves nothing)
+    GET    /v1/ib/access        (desk: which IB ports answer right now)
+    GET    /v1/meters/snapshot  (desk: atlas readings from the journals)
+    GET    /v1/desk/page        (desk: the built QuantPort.io page)
+  Public shell (unversioned, carries no data):
+    GET    /desk
 
 Legacy (unversioned) callers of the /v1 routes still resolve during the
 deprecation window; a middleware rewrites the scope path and logs a
@@ -46,6 +55,7 @@ from .approval import CardRegistry, InMemoryApprovalStore
 from .router import OrderIntent
 
 SPEC_VERSION = "1.0.0"
+DEFAULT_DESK_PAGE = Path(__file__).resolve().parents[3] / "pwa" / "desk.html"
 
 Broker = Literal["ib", "kraken", "questrade"]
 Verdict = Literal["ACCEPT", "DECLINE", "EXPIRED"]
@@ -141,6 +151,10 @@ class PromptOut(BaseModel):
             "treat `canonical` as opaque and pass it straight into the signer."
         ),
     )
+    fingerprint: str = Field(
+        default="",
+        description="`7F3A...91C2`: head and tail of the SHA-256 of `canonical`, for comparing "
+                    "the desk panel against the card screen by eye. Never used to verify.")
 
 
 class PromptsList(BaseModel):
@@ -187,6 +201,40 @@ class PassbookPage(BaseModel):
     offset: int
 
 
+class StatsBody(BaseModel):
+    """The desk's live session strip. A field the shim cannot source is null and named in
+    ``placeholders``: a client must render null as unknown, never as a flat book or a fast card."""
+    session_id: str | None = Field(default=None, description="Null when the session has no mark yet.")
+    prompt_scope: str = Field(description="What the prompt counts cover: this session, or the whole store.")
+    starting_equity: float | None = None
+    session_equity: float | None = Field(default=None, description="Latest journalled mark, never recomputed.")
+    peak_equity: float | None = None
+    max_drawdown_pct: float | None = Field(default=None, description="Percent, worst journalled mark.")
+    acceptance_rate: float = Field(ge=0, le=1)
+    intents_total: int = Field(ge=0)
+    intents_approved: int = Field(ge=0)
+    intents_declined: int = Field(ge=0)
+    intents_expired: int = Field(ge=0)
+    intents_pending: int = Field(ge=0)
+    avg_ttl_response: float | None = Field(
+        default=None, ge=0,
+        description="Median seconds from issue to the card's answer over ACCEPT/DECLINE only "
+                    "(an EXPIRED row's resolved_at is the sweep, not a decision).")
+    gate_rejections: int = Field(ge=0, description="Rows in state/rejected.jsonl within gate_scope.")
+    gate_scope: str = ""
+    last_gate_reason: str = ""
+    overlay_scalar: float | None = Field(default=None, ge=0, le=1)
+    overlay_risk_zone: str | None = None
+    placeholders: list[str] = Field(default_factory=list)
+
+
+class BasketAsk(BaseModel):
+    """A venue and the symbols a human typed for it."""
+    model_config = ConfigDict(extra="forbid")
+    venue: Literal["kraken", "qt", "ib"]
+    symbols: list[str] = Field(min_length=1, max_length=60)
+
+
 # --------------------------------------------------------------------------- #
 # app factory                                                                 #
 # --------------------------------------------------------------------------- #
@@ -197,6 +245,10 @@ def create_app(
     *,
     writeup_dir: Path = DEFAULT_WRITEUP_DIR,
     auth_token: str | None = None,
+    desk_page: Path | None = None,    # built desk panel; None -> DEFAULT_DESK_PAGE
+    state_dir: Path | None = None,    # journals the desk routes read
+    session_id: str | None = None,    # the book this shim is attached to
+    session_started_at: datetime | None = None,   # scopes the live strip's prompt counts
 ) -> FastAPI:
     """Build the FastAPI app. Store + registry are injected so tests (and
     the ``wire_card_approval`` helper) can swap in the SQLite variants."""
@@ -219,7 +271,7 @@ def create_app(
     # auth                                                               #
     # ------------------------------------------------------------------ #
 
-    _PUBLIC_PATHS = {"/healthz", "/openapi.json"}
+    _PUBLIC_PATHS = {"/healthz", "/openapi.json", "/desk"}
     _VERSIONED_PREFIX = "/v1"
 
     def require_auth(
@@ -416,6 +468,140 @@ def create_app(
         return {"entries": entries,
                 "limit": min(max(limit, 0), 500),
                 "offset": max(offset, 0)}
+
+    # ------------------------------------------------------------------ #
+    # QuantPort.io desk panel: live strip, baskets, IB probe, atlas      #
+    # ------------------------------------------------------------------ #
+
+    @app.get("/v1/stats", response_model=StatsBody, responses={401: {"model": ErrorBody}},
+             dependencies=[Auth], tags=["desk"])
+    def get_stats():
+        from .desk_feed import session_stats
+        return session_stats(store, state_dir, session_id, session_started_at)
+
+    def _basket_files() -> tuple[Path, Path]:
+        if state_dir is None:
+            raise HTTPException(503, "this shim has no state dir, so it cannot read or write baskets")
+        return Path(state_dir) / "baskets.jsonl", Path(state_dir) / "basket_proposals.jsonl"
+
+    @app.get("/v1/basket", dependencies=[Auth], tags=["desk"])
+    def get_baskets():
+        from .basket import BasketBook, pending_proposals, registry_verifier
+        bpath, ppath = _basket_files()
+        book = BasketBook(bpath, registry_verifier(Path(state_dir) / "approval.db"))  # type: ignore[arg-type]
+        venues = {}
+        for v in ("kraken", "qt", "ib"):
+            ap = book.approved(v)
+            venues[v] = None if ap is None else {
+                "symbols": sorted(ap.symbols), "issued_at": ap.issued_at, "signed_at": ap.signed_at,
+                "card_id": ap.card_id, "analysis_hash": ap.analysis_hash}
+        return {"venues": venues, "rejected_rows": book.rejected_rows,
+                "proposals": [{k: p[k] for k in ("id", "venue", "symbols", "issued_at", "fingerprint",
+                                                  "analysis_hash")} for p in pending_proposals(ppath)]}
+
+    @app.post("/v1/basket/analyze", dependencies=[Auth], tags=["desk"])
+    def post_basket_analyze(ask: BasketAsk):
+        from .desk_feed import analyse_basket
+        _basket_files()
+        return analyse_basket(ask.venue, ask.symbols, Path(state_dir))  # type: ignore[arg-type]
+
+    @app.post("/v1/basket/propose", dependencies=[Auth], tags=["desk"])
+    def post_basket_propose(ask: BasketAsk):
+        """Analyse, then queue the basket for the card. Nothing is approved by this call: the card
+        must sign the fingerprint returned here (scripts/basket.py on the simulated card)."""
+        from .basket import append_proposal, make_proposal
+        from .desk_feed import analyse_basket
+        _, ppath = _basket_files()
+        rep = analyse_basket(ask.venue, ask.symbols, Path(state_dir))  # type: ignore[arg-type]
+        refused = [r["symbol"] for r in rep["rows"] if r["policy_refusal"]]
+        if refused:
+            raise HTTPException(422, f"venue policy refuses: {', '.join(refused)}")
+        prop = make_proposal(venue=ask.venue, symbols=ask.symbols, analysis=rep)
+        append_proposal(prop, ppath)
+        return {k: prop[k] for k in ("id", "venue", "symbols", "issued_at", "fingerprint", "analysis_hash")}
+
+    @app.get("/v1/ib/access", dependencies=[Auth], tags=["desk"])
+    def get_ib_access():
+        from .desk_feed import ib_access
+        return ib_access()
+
+    @app.get("/v1/meters/snapshot", include_in_schema=False, dependencies=[Auth])
+    def meters_snapshot():
+        """Atlas readings from the journals, in the same schema an uploaded snapshot uses."""
+        if state_dir is None:
+            return JSONResponse({"schema_version": 1, "mode": "NO STATE DIR", "readings": {},
+                                 "notes": ["This shim was started without a state directory, so it "
+                                           "has no journals to read readings from."]})
+        from .desk_feed import meters_snapshot as _snapshot
+        try:
+            return JSONResponse(_snapshot(Path(state_dir)))
+        except Exception as exc:       # a contradictory journal is reported, not rounded off
+            return JSONResponse({"schema_version": 1, "mode": "UNREADABLE", "readings": {},
+                                 "notes": [f"{type(exc).__name__}: {exc}"]}, status_code=409)
+
+    # Serving the built panel from the shim is what makes it live: its fetches become same-origin,
+    # so no CORS hole is opened and the token never travels in a URL. The split is deliberate:
+    #
+    #   GET /desk            public, carries no data: a shell that asks for the token if needed
+    #   GET /v1/desk/page    the built page, behind the same auth as every other /v1 route
+    #
+    # The page is journal-derived (equity, fills, P&L), so reaching the port must not be enough to
+    # read it. The shell keeps the token in sessionStorage and writes the page into the document.
+
+    @app.get("/desk", include_in_schema=False)
+    def desk_shell() -> Response:
+        cfg = json.dumps({"spec": SPEC_VERSION, "auth_required": auth_token is not None,
+                          "poll_seconds": 2})
+        shell = (
+            "<!doctype html><meta charset=utf-8>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<title>QuantPort.io</title>"
+            "<style>body{margin:0;height:100vh;display:grid;place-items:center;background:#0b1417;"
+            "color:#e6eef0;font:13px ui-monospace,Menlo,monospace}"
+            "form{display:none;gap:8px;margin-top:14px}form.on{display:flex}"
+            "input,button{font:inherit;color:#e6eef0;background:#172c35;border:1px solid #213d48;"
+            "border-radius:2px;padding:8px 10px}button{cursor:pointer}"
+            "p{color:#7d99a3;letter-spacing:.1em}</style>"
+            "<main><div style='letter-spacing:.14em'>QUANTPORT<span style='color:#3fb8c4'>.IO</span>"
+            "</div><p id=msg>CONNECTING TO THE SHIM…</p>"
+            "<form id=f><input id=t type=password placeholder='shim token' autocomplete='off'>"
+            "<button>UNLOCK</button></form></main>"
+            # Scoped: document.write hands the document to the built page but keeps this Window, so
+            # a name declared here would still be declared when the page's own script runs, and two
+            # `const $` in one scope is a SyntaxError that kills the whole page.
+            "<script>(function(){\n"
+            f"const CFG={cfg};const KEY='tc.shim.token';\n"
+            "const $=(i)=>document.getElementById(i);\n"
+            "async function load(){\n"
+            "  const tok=sessionStorage.getItem(KEY);\n"
+            "  let r;\n"
+            "  try{ r=await fetch('/v1/desk/page',{headers:tok?{Authorization:'Bearer '+tok}:{}});}\n"
+            "  catch(e){ $('msg').textContent='SHIM UNREACHABLE — '+e.message; return; }\n"
+            "  if(r.status===401){ sessionStorage.removeItem(KEY);\n"
+            "    $('msg').textContent='THIS SHIM NEEDS ITS TOKEN. The session printed it at launch.';\n"
+            "    $('f').className='on'; $('t').focus(); return; }\n"
+            "  if(!r.ok){ $('msg').textContent='SHIM RETURNED '+r.status+' — '+(await r.text()).slice(0,160); return; }\n"
+            "  const html=await r.text();\n"
+            "  const pre='<scr'+'ipt>window.__SHIM__='+JSON.stringify(CFG)+';</scr'+'ipt>';\n"
+            "  document.open(); document.write(pre+html); document.close();\n"
+            "}\n"
+            "$('f').addEventListener('submit',(e)=>{e.preventDefault();\n"
+            "  sessionStorage.setItem(KEY,$('t').value.trim()); $('f').className='';\n"
+            "  $('msg').textContent='UNLOCKING…'; load();});\n"
+            "load();\n"
+            "})();</script>"
+        )
+        return Response(shell, media_type="text/html; charset=utf-8",
+                        headers={"Cache-Control": "no-store"})
+
+    @app.get("/v1/desk/page", include_in_schema=False, dependencies=[Auth])
+    def desk_built_page() -> Response:
+        page = desk_page if desk_page is not None else DEFAULT_DESK_PAGE
+        if not page.exists():
+            return JSONResponse({"error": "the desk panel has not been built", "expected": str(page),
+                                 "build": "python scripts/build_desk_dash.py"}, status_code=404)
+        return Response(page.read_text(encoding="utf-8"), media_type="text/html; charset=utf-8",
+                        headers={"Cache-Control": "no-store"})
 
     # ------------------------------------------------------------------ #
     # security scheme in the generated spec                              #

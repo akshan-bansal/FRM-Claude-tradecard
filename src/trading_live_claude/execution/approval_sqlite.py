@@ -117,6 +117,16 @@ class SqliteCardRegistry:
         self._cache: dict[str, Ed25519PublicKey] = {}
         self._reload_cache()
 
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    def __enter__(self) -> SqliteCardRegistry:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     def _reload_cache(self) -> None:
         with self._lock:
             self._cache.clear()

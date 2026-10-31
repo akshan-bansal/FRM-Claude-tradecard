@@ -15,6 +15,7 @@ import asyncio
 import secrets
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from ..intel.vs_engine import DEFAULT_WRITEUP_DIR
@@ -30,11 +31,14 @@ def run_shim(
     port: int = 8787,
     writeup_dir: Path = DEFAULT_WRITEUP_DIR,
     auth_token: str | None = None,
+    state_dir: Path | None = None,
+    session_id: str | None = None,
 ) -> None:
     """Blocking uvicorn.run() — call from the main thread only."""
     import uvicorn
     app = create_app(store, registry,
-                     writeup_dir=writeup_dir, auth_token=auth_token)
+                     writeup_dir=writeup_dir, auth_token=auth_token, state_dir=state_dir,
+                     session_id=session_id)
     sys.stderr.write(
         f"approval shim listening on http://{host}:{port}"
         f"{' (auth required)' if auth_token else ' (OPEN — loopback only)'}\n"
@@ -50,12 +54,17 @@ def start_shim_thread(
     port: int,
     writeup_dir: Path | None = None,
     auth_token: str | None = None,
+    state_dir: Path | None = None,
+    session_id: str | None = None,
+    session_started_at: datetime | None = None,
 ) -> threading.Thread:
     """Daemon-thread wrapper. Runs uvicorn.Server on its own event loop so
     it doesn't compete with the main thread's signal handling."""
     import uvicorn
     resolved = writeup_dir if writeup_dir is not None else DEFAULT_WRITEUP_DIR
-    app = create_app(store, registry, writeup_dir=resolved, auth_token=auth_token)
+    app = create_app(store, registry, writeup_dir=resolved, auth_token=auth_token,
+                     state_dir=state_dir, session_id=session_id,
+                     session_started_at=session_started_at)
     config = uvicorn.Config(app, host=host, port=port,
                             log_level="warning", access_log=False,
                             lifespan="off")

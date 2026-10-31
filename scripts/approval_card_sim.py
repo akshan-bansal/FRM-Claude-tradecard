@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import sys
 import time
@@ -102,10 +103,14 @@ def render_prompt(p: dict) -> str:
         f"${p['notional_usd']:>10,.2f}  R=${p['risk_dollars']:>7,.2f}  "
         f"[{p['strategy']}]  {seconds_left}s"
     )
+    # Recomputed here over the exact bytes about to be signed, not read from the prompt's own
+    # `fingerprint` field: the point is that the desk panel and the card agree independently.
+    d = hashlib.sha256(str(p.get("canonical", "")).encode("utf-8")).hexdigest().upper()
+    hash_line = f"\n  HASH {d[:4]}...{d[-4:]}   (recomputed here, over the exact bytes to be signed)"
     thesis = p.get("thesis") or ""
     if thesis:
-        return header + f"\n  intel> {thesis}"
-    return header
+        return header + f"\n  intel> {thesis}" + hash_line
+    return header + hash_line
 
 
 # --------------------------------------------------------------------------- #

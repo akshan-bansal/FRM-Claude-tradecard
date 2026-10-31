@@ -62,6 +62,7 @@ class PaperBroker(Broker):
         # KrakenBroker→"kraken", IBBroker→"ib", IBWebBroker→"ib_web"); fall back to feed's ``name``
         # for any future broker that doesn't declare one.
         self._venue = venue or getattr(feed, "venue", None) or getattr(feed, "name", "unknown")
+        self.venue = self._venue  # the override the class attribute promises; card prompts read it
         self._starting_equity = starting_equity
         self._equity = starting_equity
         self._cash = starting_equity

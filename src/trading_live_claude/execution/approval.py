@@ -26,6 +26,7 @@ response for an intent that has expired or already been consumed.
 """
 from __future__ import annotations
 
+import hashlib
 import secrets
 import threading
 import time
@@ -87,6 +88,22 @@ def canonical_bytes(
     return "|".join(parts).encode("utf-8")
 
 
+def fingerprint(canonical: bytes, *, chars: int = 8) -> str:
+    """Human-comparable digest of the exact bytes signed: ``7F3A...91C2``.
+
+    ``chars`` hex characters of the SHA-256 digest are shown, split evenly between head and tail.
+    It is for eyeballing that the desk panel and the card screen refer to the same intent;
+    verification always uses the full signature over the full canonical bytes, never this.
+
+    Derive it from the stored record the card was served, not by recomputing the fields from a
+    separate source, or the display and the signature can drift apart.
+    """
+    if chars < 2 or chars % 2:
+        raise ValueError(f"chars must be an even number >= 2, got {chars}")
+    d = hashlib.sha256(canonical).hexdigest().upper()
+    return f"{d[: chars // 2]}...{d[-(chars // 2):]}"
+
+
 # --------------------------------------------------------------------------- #
 # data classes                                                                #
 # --------------------------------------------------------------------------- #
@@ -115,6 +132,11 @@ class Prompt:
     nonce: str
     canonical: str
 
+    @property
+    def fingerprint(self) -> str:
+        """``7F3A...91C2`` over the exact bytes the card signs (see ``fingerprint()``)."""
+        return fingerprint(self.canonical.encode("utf-8"))
+
     def to_dict(self) -> dict[str, object]:
         return {
             "intent_id": self.intent_id,
@@ -136,6 +158,7 @@ class Prompt:
             "intel_ref": self.intel_ref,
             "nonce": self.nonce,
             "canonical": self.canonical,
+            "fingerprint": self.fingerprint,
         }
 
 
@@ -444,6 +467,21 @@ class InMemoryApprovalStore:
 
 ThesisFn = "Callable[[OrderIntent, str], tuple[str, str]]"  # (intent, broker) -> (thesis, intel_ref)
 
+# The brokers a card prompt can name: the shim's ``Broker`` literal, which is also in the signed bytes.
+_CARD_BROKERS = {"ib": "ib", "ib_web": "ib", "kraken": "kraken", "questrade": "questrade"}
+
+
+def card_broker(broker: object) -> str:
+    """The broker a card prompt names and the card signs. A paper broker names the venue it fills against
+    (``kraken``); the prompt's ``mode`` is what says paper. Raises for a broker the protocol cannot name,
+    so a session fails at start instead of publishing prompts the shim cannot serve (2026-10-31: a
+    paper Kraken session published ``broker="paper"`` and every ``GET /v1/intents/pending`` was a 500)."""
+    for key in (getattr(broker, "venue", None), getattr(broker, "name", None)):
+        if isinstance(key, str) and key in _CARD_BROKERS:
+            return _CARD_BROKERS[key]
+    raise ValueError(f"card approval cannot name broker {getattr(broker, 'name', broker)!r}: "
+                     f"its venue must be one of {sorted(_CARD_BROKERS)}")
+
 
 class ApprovalRouter:
     """Wraps a :class:`Router` and requires a card-signed ACCEPT before dispatch.
@@ -476,6 +514,7 @@ class ApprovalRouter:
         self.store = store
         self.ttl_seconds = ttl_seconds
         self.thesis_fn = thesis_fn
+        self.card_venue = card_broker(inner.broker)
 
     def submit(
         self,
@@ -518,14 +557,14 @@ class ApprovalRouter:
         thesis, intel_ref = "", ""
         if self.thesis_fn is not None:
             try:
-                thesis, intel_ref = self.thesis_fn(intent, self.inner.broker.name)  # type: ignore[operator]
+                thesis, intel_ref = self.thesis_fn(intent, self.card_venue)  # type: ignore[operator]
             except Exception as e:  # narrator failure must not break the loop
                 log.warning("approval_router.thesis_fn_failed",
                             symbol=intent.symbol, error=str(e))
         prompt = self.store.publish(
             intent,
             mode=self.inner.mode,
-            broker=self.inner.broker.name,
+            broker=self.card_venue,
             ttl_seconds=self.ttl_seconds,
             thesis=thesis,
             intel_ref=intel_ref,
@@ -565,6 +604,11 @@ class CardWiring:
     shim_url: str
     auth_token: str | None = None
 
+    @property
+    def desk_url(self) -> str:
+        """The QuantPort.io desk panel, served by this shim (``GET /desk``)."""
+        return self.shim_url + "/desk"
+
 
 def wire_card_approval(
     inner: Router,
@@ -576,6 +620,8 @@ def wire_card_approval(
     thesis_fn: object | None = None,
     auth_token: str | None = "auto",
     db_path: "Path | None" = None,
+    state_dir: "Path | None" = None,
+    session_id: str | None = None,
 ) -> CardWiring:
     """Build the card-approval layer around ``inner`` and (optionally) spin the shim.
 
@@ -594,6 +640,10 @@ def wire_card_approval(
     prompts + pubkeys survive a restart. When ``None`` (default), the
     in-memory implementations are used — fine for tests and for a paper
     loop that treats every session as fresh.
+
+    ``state_dir`` / ``session_id`` tell the shim which journals and which book it reports on, so the
+    desk panel's live strip, basket tab and atlas readings describe this session. Without them those
+    routes answer with what they cannot source rather than guessing a book.
     """
     registry: "CardRegistry | SqliteCardRegistry"
     store: "InMemoryApprovalStore | SqliteApprovalStore"
@@ -621,6 +671,8 @@ def wire_card_approval(
         from .approval_server import start_shim_thread
         shim_thread = start_shim_thread(
             store, registry, shim_host, shim_port, auth_token=resolved_token,
+            state_dir=state_dir, session_id=session_id,
+            session_started_at=datetime.now(UTC) if session_id else None,
         )
 
     return CardWiring(

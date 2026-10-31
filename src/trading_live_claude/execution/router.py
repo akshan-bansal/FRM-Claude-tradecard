@@ -21,7 +21,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from ..brokers.base import Broker, OrderRejected
 from ..brokers.models import Order, OrderAction, OrderType
@@ -30,6 +30,9 @@ from ..risk.heat import PortfolioHeat
 from ..risk.kill_switch import KillSwitch
 from .daily_budget import DailyBudget
 from .journal import OrderJournal
+
+if TYPE_CHECKING:
+    from .basket import BasketGate
 
 RouterMode = Literal["paper", "dry-run", "live", "autonomous"]
 LIVE_CONFIRM_PHRASE = "I UNDERSTAND THE RISK"
@@ -115,6 +118,11 @@ class Router:
         # Telegram, and never opens even a fractional position — while a 50%-cap
         # position would have been perfectly valid.
         self.on_size_cap_breach: Literal["trim", "reject"] = on_size_cap_breach
+        # Card-signed basket gate (execution/basket.py). None = not enforced, which is how every
+        # session started without --require-basket runs. Set by the launch scripts after
+        # construction; when set, an ENTRY outside the signed basket, or on a venue with no valid
+        # signed basket, is rejected. Exits are never gated by it.
+        self.basket_gate: BasketGate | None = None
 
     # ----- alternate constructors --------------------------------------------
 
@@ -231,6 +239,12 @@ class Router:
         # 5. open positions cap (only for entries)
         if intent.action == OrderAction.BUY and open_positions >= self.max_open_positions:
             reasons.append(f"open positions {open_positions} >= cap {self.max_open_positions}")
+
+        # 5b. card-signed basket (additional gate; entries only, exits always pass)
+        if intent.action == OrderAction.BUY and self.basket_gate is not None:
+            basket_reason = self.basket_gate.check_entry(intent.symbol)
+            if basket_reason:
+                reasons.append(basket_reason)
 
         # 6. portfolio heat
         snap = self.heat.snapshot(equity=equity, open_risk_dollars=existing_risk + intent.risk_dollars)

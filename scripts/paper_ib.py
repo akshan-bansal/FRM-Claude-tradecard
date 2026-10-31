@@ -205,6 +205,9 @@ def main() -> None:
                          "TradeCard (or scripts/approval_card_sim.py) must ACCEPT before the "
                          "order is dispatched. Boots the approval shim on --card-shim-port.")
     ap.add_argument("--card-shim-port", type=int, default=8787)
+    ap.add_argument("--require-basket", dest="require_basket", action="store_true",
+                    help="Gate ENTRIES on a card-signed basket for this venue (scripts/basket.py, or the "
+                         "QuantPort.io BASKET tab). Off by default; exits are never gated.")
     ap.add_argument("--card-ttl", type=float, default=90.0,
                     help="Seconds a card prompt stays live before it auto-EXPIRES.")
     args = ap.parse_args()
@@ -231,6 +234,11 @@ def main() -> None:
         min_ticket_usd=settings.min_ticket_usd,
     )
 
+    from trading_live_claude.execution.basket import attach_basket_gate
+    if attach_basket_gate(router, "ib", Path(settings.state_dir), enabled=args.require_basket):
+        print("[ib-paper] basket gate ON: entries need a card-signed ib basket "
+              "(python scripts/basket.py status).", flush=True)
+
     if args.require_card:
         _engine = VSInvestmentEngine()
         def _thesis(intent, broker):
@@ -247,6 +255,8 @@ def main() -> None:
             ttl_seconds=args.card_ttl,
             thesis_fn=_thesis,
             db_path=_card_db,
+            state_dir=Path(settings.state_dir),
+            session_id=exec_broker.session_id,
         )
         router = _wiring.router
         print(f"[ib-paper] --require-card ON — approval shim at {_wiring.shim_url}.",
@@ -254,6 +264,8 @@ def main() -> None:
         print(f"[ib-paper] card auth token: {_wiring.auth_token}", flush=True)
         print("[ib-paper] Pair the card by passing the token as "
               "Authorization: Bearer <token> on every request.", flush=True)
+        print(f"[ib-paper] desk panel LIVE at {_wiring.desk_url} "
+              "(build it first: python scripts/build_desk_dash.py).", flush=True)
 
     market = MarketData(exec_broker, cache=CandleCache(settings.data_cache_dir))
     sizer = PositionSizer(risk_pct=settings.risk_pct_per_trade)

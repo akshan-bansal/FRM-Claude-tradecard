@@ -87,3 +87,6 @@ state/oasis_seeds/
 state/oasis_inbox/
 state/oasis_runs.jsonl
 state/oasis_ledger.jsonl
+
+# The QuantPort.io desk page is built from state/ journals (scripts/build_desk_dash.py): trade history
+pwa/desk.html

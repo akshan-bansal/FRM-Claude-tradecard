@@ -30,11 +30,15 @@ def main() -> None:
     ap.add_argument("--auth-token", default=None,
                     help="Require this bearer token on every non-/healthz request. "
                          "Omit to run OPEN (only safe on strict loopback).")
+    ap.add_argument("--state-dir", type=Path, default=None,
+                    help="Journals the QuantPort.io desk routes read (/desk, /v1/stats, baskets, atlas).")
+    ap.add_argument("--session-id", default=None,
+                    help="The paper session whose book the desk's live strip reports on.")
     args = ap.parse_args()
     registry = CardRegistry()
     store = InMemoryApprovalStore(registry)
     run_shim(store, registry, host=args.host, port=args.port,
-             auth_token=args.auth_token)
+             auth_token=args.auth_token, state_dir=args.state_dir, session_id=args.session_id)
 
 
 if __name__ == "__main__":

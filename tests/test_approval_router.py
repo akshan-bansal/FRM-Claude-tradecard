@@ -23,6 +23,7 @@ from trading_live_claude.execution.router import OrderIntent, Router
 
 class _StubBroker:
     name = "stub"
+    venue = "questrade"  # a card prompt must name a venue the shim knows (see card_broker)
 
     def __init__(self) -> None:
         self.placed: list = []
@@ -273,3 +274,56 @@ def test_publish_carries_broker_and_thesis(paper_router: Router, store):
     assert prompt.broker == "kraken"
     assert "kraken" in prompt.canonical
     assert prompt.thesis.startswith("reg-shift")
+
+
+# --------------------------------------------------------------------------- #
+# the broker a prompt names (2026-10-31)                                      #
+# --------------------------------------------------------------------------- #
+
+def test_a_paper_session_names_the_venue_it_fills_against(tmp_path: Path, store) -> None:
+    """A paper Kraken session published broker="paper", which the shim's response model refuses, so every
+    GET /v1/intents/pending was a 500 and the card could approve nothing."""
+    from trading_live_claude.brokers.paper import PaperBroker
+    from trading_live_claude.execution.approval_asgi import PromptOut
+
+    class _KrakenFeed(_StubBroker):
+        name = venue = "kraken"
+
+    inner_store, _ = store
+    paper = PaperBroker(feed=_KrakenFeed(), journal_dir=tmp_path)
+    router = Router.build_default(mode="paper", broker=paper, state_dir=tmp_path)
+    approval = ApprovalRouter(router, store=inner_store, ttl_seconds=0.5)
+    assert approval.card_venue == "kraken" and paper.venue == "kraken"
+
+    t = threading.Thread(target=approval.submit, args=(_intent(),),
+                         kwargs={"equity": 100_000, "existing_risk": 0, "open_positions": 0})
+    t.start()
+    for _ in range(100):
+        if pending := inner_store.pending():
+            break
+        threading.Event().wait(0.01)
+    assert pending and pending[0].broker == "kraken" and pending[0].mode == "paper"
+    PromptOut.model_validate(pending[0].to_dict())  # what GET /v1/intents/pending serves; raised before
+    t.join(timeout=5)
+
+
+@pytest.mark.parametrize("venue, expected", [("ib", "ib"), ("ib_web", "ib"), ("kraken", "kraken"),
+                                             ("questrade", "questrade")])
+def test_card_broker_maps_every_feed_venue_onto_the_card_protocol(venue: str, expected: str) -> None:
+    from trading_live_claude.execution.approval import card_broker
+
+    class _Feed(_StubBroker):
+        pass
+
+    _Feed.venue = venue
+    assert card_broker(_Feed()) == expected
+
+
+def test_a_broker_the_card_cannot_name_fails_at_construction(tmp_path: Path, store) -> None:
+    class _Nameless(_StubBroker):
+        name = venue = "paper"
+
+    inner_store, _ = store
+    router = Router.build_default(mode="paper", broker=_Nameless(), state_dir=tmp_path)
+    with pytest.raises(ValueError, match="cannot name broker"):
+        ApprovalRouter(router, store=inner_store)
