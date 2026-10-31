@@ -126,6 +126,9 @@ class Order(BaseModel):
     intended_target: float | None = Field(default=None, exclude=True)
     risk_dollars: float | None = Field(default=None, exclude=True)
     strategy: str | None = Field(default=None, exclude=True)
+    # The broker's own order reference when it is not an integer (a Kraken txid). ``id`` stays the
+    # integer handle the journals use; this is what a cancel or an execution lookup needs.
+    broker_ref: str | None = Field(default=None, exclude=True)
 
     def to_questrade_payload(self) -> dict:
         body: dict = {
@@ -146,6 +149,32 @@ class Order(BaseModel):
         if self.stopPrice is not None:
             body["stopPrice"] = self.stopPrice
         return body
+
+
+class Execution(BaseModel):
+    """One execution as the broker reports it, pulled back after the order was placed.
+
+    This is the record tax and audit rest on: price, quantity, fees and time come from the broker's
+    execution report, never from the intent or from ``place_order``'s acknowledgement.
+    ``currency_source`` says where ``currency`` came from (the broker's report, its symbol record,
+    or the instrument's listing), since the CAD conversion depends on it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    exec_id: str
+    order_id: str | None
+    symbol: str
+    side: Literal["Buy", "Sell"]
+    quantity: float
+    price: float
+    fee: float = 0.0
+    fee_currency: str | None = None
+    currency: str | None = None
+    currency_source: str = "unknown"
+    time: datetime
+    venue: str
+    account: str | None = None
 
 
 class Fill(BaseModel):

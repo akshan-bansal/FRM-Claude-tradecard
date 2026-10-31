@@ -53,16 +53,34 @@ class KillSwitch:
         )
 
     def trip(self, reason: str) -> None:
+        before = self.state()
         self._path.write_text(f"{datetime.now(UTC).isoformat()} :: {reason}\n", encoding="utf-8")
         log.error("kill_switch.tripped", reason=reason)
+        # evaluate() re-trips on every poll while a limit is breached; only a change is an event.
+        if not before.halted or not before.reason.endswith(f":: {reason}"):
+            self._record("KILL_SWITCH_TRIPPED", {"reason": reason, "was_halted": before.halted})
 
     def clear(self, ack: str) -> None:
         """Remove the sentinel. Requires explicit ack text to discourage accidental clears."""
         if ack.strip().upper() != "I HAVE INVESTIGATED":
             raise PermissionError("Refusing to clear kill switch without explicit ack.")
         if self._path.exists():
+            reason = self.state().reason
             self._path.unlink()
             log.warning("kill_switch.cleared")
+            self._record("KILL_SWITCH_CLEARED", {"cleared_reason": reason, "ack": ack.strip()})
+
+    def _record(self, event: str, payload: dict[str, object]) -> None:
+        """Append to the shared ``control`` ledger stream. Never stops a trip or a clear.
+
+        The stream is shared because a trip comes from whichever process sees the breach: a
+        running book, the daemon, or ``trading kill`` in a shell.
+        """
+        try:
+            from ..audit.ledger import Ledger
+            Ledger(self.state_dir / "ledger", stream="control", shared=True).append(event, payload)
+        except Exception as e:                          # the sentinel file is the control
+            log.error("kill_switch.ledger_failed", ledger_event=event, error=str(e))
 
     def evaluate(self, *, equity: float, peak_equity: float, day_open_equity: float) -> KillState:
         """Decide whether to trip based on current account state."""

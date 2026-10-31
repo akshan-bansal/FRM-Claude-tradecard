@@ -29,7 +29,7 @@ from typing import Iterator
 
 from ..logging_setup import get_logger
 from .base import Broker, OrderRejected
-from .models import Account, Candle, Fill, Order, OrderAction, Position, Quote
+from .models import Account, Candle, Execution, Fill, Order, OrderAction, Position, Quote
 
 log = get_logger(__name__)
 
@@ -360,3 +360,23 @@ class PaperBroker(Broker):
     @property
     def fills(self) -> list[Fill]:
         return list(self._fills)
+
+    def executions(self, account_number: str, *, since: datetime | None = None) -> list[Execution]:
+        """This session's simulated fills as executions, for the same reconciliation live uses.
+
+        Currency is the quote currency the instrument is listed in (``instrument_currency``); a
+        paper fill has no broker report to take it from, and the row says so.
+        """
+        from ..audit.semantics import instrument_currency
+        out: list[Execution] = []
+        for f in self._fills:
+            if since is not None and f.fill_time < since:
+                continue
+            ccy = instrument_currency(f.symbol, self._venue)
+            out.append(Execution(
+                exec_id=f"paper:{self.session_id}:{f.order_id}", order_id=str(f.order_id),
+                symbol=f.symbol, side="Buy" if str(f.side) == "Buy" else "Sell",
+                quantity=f.quantity, price=f.price, fee=f.commission, fee_currency=ccy,
+                currency=ccy, currency_source="listing (paper fill)" if ccy else "unknown",
+                time=f.fill_time, venue=f"paper:{self._venue}", account=account_number))
+        return out

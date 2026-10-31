@@ -90,6 +90,12 @@ class LiveMonitor:
         self.strategy_map = strategy_map or {}
         self.sizer = sizer
         self.router = router
+        # Strategy versions for the audit ledger come from the instances running here, so a tuned
+        # parameter set versions differently from the default. Installed only when the router has
+        # no resolver yet: a caller's explicit one wins.
+        self._install_strategy_version_resolver(router)
+        # The router's ledger, so one stream carries the chain from signal to fill.
+        self.ledger = getattr(getattr(router, "inner", router), "ledger", None)
         self.account_number = account_number
         self.symbols = symbols
         # How the heat gate estimates risk: per-trade model (atr/var/cvar) and aggregation
@@ -327,7 +333,13 @@ class LiveMonitor:
                         persistence_halt, persistence_reason = False, ""
                     if persistence_halt:
                         self._persistence_last_reason[symbol] = persistence_reason
-                if sized.shares > 0 and not overlay_halt and not persistence_halt:
+                routable = sized.shares > 0 and not overlay_halt and not persistence_halt
+                if not routable:
+                    self._ledger_signal(symbol, strat, price, df, sized=sized, intent_id=None,
+                                        reason=("overlay halt" if overlay_halt else
+                                                "persistence halt" if persistence_halt else
+                                                "sized to zero shares"), conviction=conviction)
+                if routable:
                     entry_rets = df["close"].pct_change() if self.risk_model != "atr" else None
                     risk_dollars = per_trade_risk(
                         sized.shares, price, stop_distance=abs(price - sized.stop),
@@ -344,6 +356,8 @@ class LiveMonitor:
                         risk_dollars=risk_dollars,
                         account_number=self.account_number,
                     )
+                    self._ledger_signal(symbol, strat, price, df, sized=sized,
+                                        intent_id=intent.intent_id, reason="", conviction=conviction)
                     self.router.submit(
                         intent,
                         equity=equity,
@@ -445,6 +459,63 @@ class LiveMonitor:
                         {"weight": round(target_w, 3), "target": target, "delta": delta,
                          "drawdown": round(drawdown, 3)}))
         return events
+
+    def _ledger_signal(self, symbol: str, strat: object, price: float, df: object, *,
+                       sized: object, intent_id: str | None, reason: str,
+                       conviction: float) -> None:
+        """STRATEGY_SIGNAL for an entry that goes on to the router, SIGNAL_SUPPRESSED (with the
+        reason) for one that does not. Without the second, an empty ledger would look the same as
+        a broken one."""
+        if self.ledger is None:
+            return
+        bar_ts: object = None
+        try:
+            frame = cast("pd.DataFrame", df)
+            bar_ts = frame["time"].iloc[-1] if "time" in frame.columns else frame.index[-1]
+        except Exception:                          # a frame without a usable bar stamp
+            bar_ts = None
+        payload = {"symbol": symbol, "price": price,
+                   "shares": float(getattr(sized, "shares", 0) or 0),
+                   "stop": getattr(sized, "stop", None), "target": getattr(sized, "target", None),
+                   "conviction": round(float(conviction), 4), "bar_ts": str(bar_ts),
+                   "reason": reason}
+        try:
+            self.ledger.append("SIGNAL_SUPPRESSED" if reason else "STRATEGY_SIGNAL", payload,
+                               intent_id=intent_id, strategy_id=str(getattr(strat, "name", "")),
+                               strategy_version=self._strategy_version_of(strat))
+        except Exception as e:                    # never let the audit path break a poll
+            log.warning("monitor.ledger_signal_failed", symbol=symbol, error=str(e))
+
+    def _strategy_version_of(self, strat: object) -> str | None:
+        from ..audit.versioning import strategy_version
+        cache: dict[int, str] = self.__dict__.setdefault("_strategy_version_cache", {})
+        key = id(strat)
+        if key not in cache:
+            cache[key] = strategy_version(strat)
+        return cache[key] or None
+
+    def _install_strategy_version_resolver(self, router: object) -> None:
+        """Wire ``Router.strategy_version_for`` from this monitor's strategy instances."""
+        inner = getattr(router, "inner", router)          # unwrap an ApprovalRouter
+        if getattr(inner, "strategy_version_for", "missing") is not None:
+            return
+        from ..audit.versioning import strategy_version
+
+        instances: dict[str, object] = {}
+        for strat in (self.strategy, *self.strategy_map.values()):
+            if strat is not None:
+                instances.setdefault(str(getattr(strat, "name", "")), strat)
+        cache: dict[str, str] = {}
+
+        def resolve(name: str) -> str:
+            if name not in cache:
+                inst = instances.get(name)
+                # An unknown name (a hedge intent, say): record nothing rather than attribute it to
+                # a strategy that did not produce it.
+                cache[name] = strategy_version(inst) if inst is not None else ""
+            return cache[name]
+
+        inner.strategy_version_for = resolve
 
     def run_forever(self, max_iterations: int | None = None) -> None:
         i = 0

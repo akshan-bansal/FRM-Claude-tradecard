@@ -38,12 +38,12 @@ short-circuits before dispatch).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from ..logging_setup import get_logger
 from .base import Broker, BrokerError, OrderRejected
-from .models import Account, Candle, Order, OrderAction, Position, Quote
+from .models import Account, Candle, Execution, Order, OrderAction, Position, Quote
 
 log = get_logger(__name__)
 
@@ -414,6 +414,34 @@ class IBBroker(Broker):
         log.info("ib.algo.submitted", symbol=contract.symbol, algo=algo,
                  qty=quantity, action=action, order_id=oid, tif=tif)
         return oid
+
+    def executions(self, account_number: str, *, since: datetime | None = None) -> list[Execution]:
+        """Executions from ``reqExecutions`` with their commission reports.
+
+        The fee is the commission report's, in the currency IB reports it in; the trade currency
+        is the contract's.
+        """
+        ib = self._require_ib()
+        out: list[Execution] = []
+        for fill in ib.reqExecutions():
+            ex = fill.execution
+            when = ex.time if ex.time.tzinfo else ex.time.replace(tzinfo=UTC)
+            if since is not None and when < since:
+                continue
+            if account_number and ex.acctNumber and ex.acctNumber != account_number:
+                continue
+            report = getattr(fill, "commissionReport", None)
+            ccy = getattr(fill.contract, "currency", None) or None
+            out.append(Execution(
+                exec_id=f"ib:{ex.execId}", order_id=str(ex.orderId),
+                symbol=str(fill.contract.localSymbol or fill.contract.symbol),
+                side="Buy" if ex.side in ("BOT", "BUY") else "Sell",
+                quantity=float(ex.shares), price=float(ex.price),
+                fee=float(getattr(report, "commission", 0.0) or 0.0),
+                fee_currency=getattr(report, "currency", None) or None, currency=ccy,
+                currency_source="ib contract" if ccy else "unknown", time=when, venue="ib",
+                account=ex.acctNumber or account_number))
+        return out
 
     def cancel_order(self, account_number: str, order_id: int) -> None:
         if not self._enable_live_orders:
