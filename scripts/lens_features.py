@@ -24,7 +24,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from trading_live_claude.analysis.feature_store import Sources, build, load_store, universe
+from trading_live_claude.analysis.feature_store import (
+    Sources,
+    build,
+    load_store,
+    news_symbols,
+    universe,
+)
 from trading_live_claude.news.gkg_themes import load_theme_map
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -57,7 +63,7 @@ def _overlay_poller():  # type: ignore[no-untyped-def]
 
 def _build(days: list[date], *, force: bool) -> int:
     insts = universe(ROOT / "config" / "basket_seed.json")
-    src = Sources.load(STATE, [i.symbol for i in insts],
+    src = Sources.load(STATE, news_symbols(insts),
                        theme_map=load_theme_map(ROOT / "config" / "gkg_theme_domains.yaml"))
     rows = build(STORE, src, insts, days, now=datetime.now(UTC), force_rebuild=force)
     modes = collections.Counter(r["mode"] for r in rows)

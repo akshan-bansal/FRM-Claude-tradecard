@@ -125,11 +125,13 @@ class MarketContext:
         )
 
 
-ASSET_CLASS_HINT: dict[str, str] = {
-    "ib":        "future",
-    "kraken":    "crypto",
-    "questrade": "equity",
-}
+def asset_class_for(broker: str, symbol: str) -> OverlayClass:
+    """The overlay class the thesis reports, from the broker AND the symbol: a Questrade intent on
+    CGL.TO is precious metals and on DBC a commodity, not equity; an IB futures root is a future.
+    Same resolver as the feature store and the paper sessions, so the card never names another class."""
+    from .routing import classify_instrument
+
+    return classify_instrument(symbol, broker)
 
 
 # --------------------------------------------------------------------------- #
@@ -185,7 +187,7 @@ class VSInvestmentEngine:
         market = market or MarketContext()
         core, notes = self._reason_clauses(intent, broker, market)
         overlay_clause, overlay_map, overlay_warnings = self._overlay_clauses(
-            broker, overlay_snapshot, overlay_decisions
+            broker, intent.symbol, overlay_snapshot, overlay_decisions
         )
         # Priority order (least droppable first): core -> overlay risk -> notes.
         # Risk signals must never be truncated in favor of user-supplied notes.
@@ -272,6 +274,7 @@ class VSInvestmentEngine:
     @staticmethod
     def _overlay_clauses(
         broker: str,
+        symbol: str,
         snap: "IntelSnapshot | None",
         decisions: "list[OverlayDecision] | None",
     ) -> tuple[str, dict[str, float], list[str]]:
@@ -303,16 +306,15 @@ class VSInvestmentEngine:
             clauses.append(f"F&G {snap.fear_greed:.0f}")
 
         if decisions:
-            klass: OverlayClass | None = ASSET_CLASS_HINT.get(broker)  # type: ignore[assignment]
-            if klass is not None:
-                for d in decisions:
-                    if d.asset_class == klass and d.scalar < 0.9:
-                        clauses.append(f"{klass} scalar {d.scalar:.2f}")
-                        if d.halt_new_entries:
-                            warnings.append(
-                                f"overlay HALT on {klass} — router should have rejected"
-                            )
-                        break
+            klass = asset_class_for(broker, symbol)
+            for d in decisions:
+                if d.asset_class == klass and d.scalar < 0.9:
+                    clauses.append(f"{klass} scalar {d.scalar:.2f}")
+                    if d.halt_new_entries:
+                        warnings.append(
+                            f"overlay HALT on {klass} — router should have rejected"
+                        )
+                    break
 
         return "; ".join(clauses), overlay_map, warnings
 

@@ -33,6 +33,10 @@ DZ.DISASTER,06 Stress domains,Disaster (abnormal),z,-4,4,3600,graph adapter,Disa
 OV.CRYPTO,07 Intel overlay,Crypto scalar,x,0,1,7200,intel_overlay.jsonl,De-risk multiplier for crypto in the last non-empty snapshot
 OV.EQUITY,07 Intel overlay,Equity scalar,x,0,1,7200,intel_overlay.jsonl,De-risk multiplier for equities
 OV.COMMODITY,07 Intel overlay,Commodity scalar,x,0,1,7200,intel_overlay.jsonl,De-risk multiplier for commodities
+OV.FUTURE,07 Intel overlay,Futures scalar,x,0,1,7200,intel_overlay.jsonl,De-risk multiplier for futures (the IB metal roots GC MGC SI SIL)
+OV.PRECIOUS_METALS,07 Intel overlay,Precious metals scalar,x,0,1,7200,intel_overlay.jsonl,De-risk multiplier for metal ETFs (CGL.TO)
+OV.FX,07 Intel overlay,FX scalar,x,0,1,7200,intel_overlay.jsonl,De-risk multiplier for currency pairs
+OV.FIXED_INCOME,07 Intel overlay,Fixed income scalar,x,0,1,7200,intel_overlay.jsonl,De-risk multiplier for bond ETFs
 OV.GPR,07 Intel overlay,Strategic risk,index,0,100,7200,intel_overlay.jsonl,WorldMonitor geopolitical index
 OV.FG,07 Intel overlay,Fear and greed,index,0,100,7200,intel_overlay.jsonl,Market fear and greed reading
 OV.DEGRADED,07 Intel overlay,Feed degraded,flag,0,1,7200,intel_overlay.jsonl,1 when the snapshot was built from a partial fetch

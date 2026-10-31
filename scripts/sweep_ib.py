@@ -42,6 +42,7 @@ from trading_live_claude.intel.routing import (
     _COMMODITY_SYMBOLS,
     PersistenceGate,
     classify_symbol,
+    futures_overrides,
 )
 from trading_live_claude.intel.worldmonitor import WorldMonitorClient
 from trading_live_claude.intel.overlay import IntelSnapshot as _IntelSnapshot
@@ -166,7 +167,9 @@ def main() -> None:
     # Refresh cadence must be LARGE, not zero — refresh_seconds=0 forces a re-read on every call
     # (elapsed < 0 is never true). One read at construction is enough for a sweep that completes
     # in bounded time.
-    gate = PersistenceGate(min_polls=args.persistence_min_polls, refresh_seconds=3600.0)
+    # Same class as the overlay column below: a --futures root is a future, not the stock of that ticker.
+    gate = PersistenceGate(min_polls=args.persistence_min_polls, refresh_seconds=3600.0,
+                           class_overrides=futures_overrides(fut_list))
     gate.refresh(force=True)
     print(f"[sweep-ib] persistence gate: min_polls={args.persistence_min_polls}, "
           f"per-domain runs={gate._persistence_by_domain or {}}", flush=True)

@@ -95,6 +95,8 @@ class CommoditySpec(AssetSpec):
 class FutureSpec(AssetSpec):
     """Futures roots. ``root`` is the IB-style symbol (ES, CL); ``exchange_group`` disambiguates
     the venue (CME vs NYMEX vs COMEX). ``contract_size`` × ``tick_size`` = tick dollar-value.
+    ``micro_of`` names the full-size root a micro contract tracks (MGC -> GC): same underlying,
+    so news about it is news about the parent.
     """
     asset_class: OverlayClass = "future"
     root: str = ""
@@ -102,6 +104,7 @@ class FutureSpec(AssetSpec):
     contract_size: float = 0.0
     tick_size: float = 0.0
     tick_value: float = 0.0                # dollars per tick (contract_size × tick_size × mult)
+    micro_of: str = ""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -191,6 +194,8 @@ _FUTURES_REGISTRY: dict[str, FutureSpec] = {
     "GC":  FutureSpec(symbol="GC",  root="GC",  exchange_group="COMEX", contract_size=100.0,   tick_size=0.10,   tick_value=10.00, currency="USD"),
     "SI":  FutureSpec(symbol="SI",  root="SI",  exchange_group="COMEX", contract_size=5000.0,  tick_size=0.005,  tick_value=25.00, currency="USD"),
     "HG":  FutureSpec(symbol="HG",  root="HG",  exchange_group="COMEX", contract_size=25000.0, tick_size=0.0005, tick_value=12.50, currency="USD"),
+    "MGC": FutureSpec(symbol="MGC", root="MGC", exchange_group="COMEX", contract_size=10.0,    tick_size=0.10,   tick_value=1.00,  currency="USD", micro_of="GC"),
+    "SIL": FutureSpec(symbol="SIL", root="SIL", exchange_group="COMEX", contract_size=1000.0,  tick_size=0.005,  tick_value=5.00,  currency="USD", micro_of="SI"),
     # CBOT rates (quoted in points and 32nds; tick_value here is dollar-per-tick)
     "ZN":  FutureSpec(symbol="ZN",  root="ZN",  exchange_group="CBOT",  contract_size=100000.0, tick_size=0.015625, tick_value=15.625, currency="USD"),
     "ZB":  FutureSpec(symbol="ZB",  root="ZB",  exchange_group="CBOT",  contract_size=100000.0, tick_size=0.03125,  tick_value=31.25,  currency="USD"),

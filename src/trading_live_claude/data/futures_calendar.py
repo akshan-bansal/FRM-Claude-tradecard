@@ -97,6 +97,9 @@ ROOT_CALENDARS: dict[str, RootCalendar] = {
     "GC":  RootCalendar(root="GC",  exchange_group="COMEX", cycle="quarterly", active_days=90, roll_lead_days=5),
     "SI":  RootCalendar(root="SI",  exchange_group="COMEX", cycle="quarterly", active_days=90, roll_lead_days=5),
     "HG":  RootCalendar(root="HG",  exchange_group="COMEX", cycle="quarterly", active_days=90, roll_lead_days=5),
+    # COMEX micros roll with their full-size parent, so they splice on the same calendar.
+    "MGC": RootCalendar(root="MGC", exchange_group="COMEX", cycle="quarterly", active_days=90, roll_lead_days=5),
+    "SIL": RootCalendar(root="SIL", exchange_group="COMEX", cycle="quarterly", active_days=90, roll_lead_days=5),
     # CBOT rates — quarterly HMUZ, standard 5-day roll
     "ZN":  RootCalendar(root="ZN",  exchange_group="CBOT",  cycle="quarterly", active_days=90, roll_lead_days=5),
     "ZB":  RootCalendar(root="ZB",  exchange_group="CBOT",  cycle="quarterly", active_days=90, roll_lead_days=5),

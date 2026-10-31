@@ -16,9 +16,10 @@ polls. This turns the difference between "one 6x event-acceleration spike is noi
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
+from trading_live_claude.data.futures_calendar import ROOT_CALENDARS
 from trading_live_claude.intel.graph import (
     default_graph_journal,
     edge_persistence,
@@ -86,6 +87,31 @@ def classify_symbol(symbol: str, overrides: Mapping[str, OverlayClass] | None = 
     if s in _COMMODITY_SYMBOLS:
         return "commodity"
     return "equity"
+
+
+def futures_overrides(roots: Iterable[str]) -> dict[str, OverlayClass]:
+    """``class_overrides`` for roots a session trades as futures (paper_ib/sweep_ib ``--futures``)."""
+    return {r.strip().upper(): "future" for r in roots if r.strip()}
+
+
+def classify_instrument(symbol: str, venue: str,
+                        overrides: Mapping[str, OverlayClass] | None = None) -> OverlayClass:
+    """Overlay class when the venue is known. Use this, not :func:`classify_symbol`, wherever the venue
+    is in hand, so every consumer agrees.
+
+    The venue settles what the ticker cannot: every Kraken pair is crypto, and on IB a registered futures
+    root (GC, SIL) is a future even though the same letters are also a stock or ETF ticker. Everything
+    else goes through :func:`classify_symbol`; explicit ``overrides`` win over both.
+    """
+    s = symbol.strip().upper()
+    if overrides and s in {k.upper() for k in overrides}:
+        return classify_symbol(symbol, overrides)
+    v = venue.strip().lower()
+    if v == "kraken":
+        return "crypto"
+    if v == "ib" and s.lstrip("/") in ROOT_CALENDARS:
+        return "future"
+    return classify_symbol(symbol, overrides)
 
 
 class OverlayProvider:

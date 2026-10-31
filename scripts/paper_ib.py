@@ -309,7 +309,7 @@ def main() -> None:
         import asyncio as _asyncio
 
         from trading_live_claude.intel.interpret import interpret as _interpret
-        from trading_live_claude.intel.routing import OverlayProvider
+        from trading_live_claude.intel.routing import OverlayProvider, futures_overrides
         from trading_live_claude.intel.worldmonitor import WorldMonitorClient
 
         def _snapshot():
@@ -318,7 +318,9 @@ def main() -> None:
                     return await wm.snapshot()
             return _asyncio.run(_f())
 
-        overlay_provider = OverlayProvider(_snapshot, refresh_seconds=900.0)
+        # --futures roots take the futures overlay; by ticker alone GC/SI would read as equity.
+        overlay_provider = OverlayProvider(_snapshot, refresh_seconds=900.0,
+                                           class_overrides=futures_overrides(futures_list))
         overlay_for = overlay_provider
 
         def _interpret_current():

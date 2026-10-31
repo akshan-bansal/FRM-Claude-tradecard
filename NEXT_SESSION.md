@@ -1433,8 +1433,10 @@ Do NOT commit any of this until the user says so — the standing rule in
 - No feedback loop. Accepted vs declined vs expired verdicts aren't fed back into future
   thesis phrasing or priority (a decline pattern for a given clause could down-weight it
   next time).
-- Broker → asset-class mapping is 1:1 in `ASSET_CLASS_HINT`. Reality: IB trades equities,
-  futures, options, bonds, FX. The single-slot mapping under-labels multi-asset intents.
+- ~~Broker → asset-class mapping is 1:1 in `ASSET_CLASS_HINT`.~~ DONE 2026-10-30: the thesis
+  resolves broker + symbol through `routing.classify_instrument` (CGL.TO on Questrade is precious
+  metals, an IB futures root is a future), the same resolver the feature store and the IB scripts
+  use. `tests/test_asset_class_integrity.py` locks every per-class table and every basket symbol.
 - No writeup pruning. `state/intel_writeups/` grows unbounded.
 - No multi-lingual output — a Canadian user might want FR/EN toggle.
 - Existing strategies still don't emit the `score`/`rank`/`r_multiple` columns the engine

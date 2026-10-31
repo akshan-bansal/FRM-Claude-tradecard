@@ -21,6 +21,7 @@ from trading_live_claude.analysis.feature_store import _is_empty_overlay, load_s
 from trading_live_claude.analysis.graph_adapter import GraphSources, domain_z, venue_share
 from trading_live_claude.analysis.pit import TimeIndex, coverage_hours, parse_ts, read_jsonl
 from trading_live_claude.atlas.catalog import Meter
+from trading_live_claude.intel.overlay import OVERLAY_CLASSES
 from trading_live_claude.news.gkg_themes import load_theme_map
 
 DAY = timedelta(days=1)
@@ -175,7 +176,8 @@ def _overlay(state: Path, root: Path, now: datetime) -> dict[str, Reading]:
     snap, dec = r.get("snapshot") or {}, r.get("decisions") or {}
     scope = "last non-empty overlay snapshot"
     out: dict[str, Reading] = {}
-    for mid, cls in (("OV.CRYPTO", "crypto"), ("OV.EQUITY", "equity"), ("OV.COMMODITY", "commodity")):
+    for cls in OVERLAY_CLASSES:  # one meter per class, so no class the basket holds goes unseen
+        mid = f"OV.{cls.upper()}"
         v = (dec.get(cls) or {}).get("scalar")
         if isinstance(v, (int, float)):
             out[mid] = (float(v), at, scope)

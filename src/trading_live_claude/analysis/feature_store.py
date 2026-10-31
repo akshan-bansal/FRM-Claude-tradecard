@@ -20,6 +20,10 @@ Clocks are never mixed. Each feature family reads one clock and says so in its n
 * ``soc_*``   - the latest OASIS society stance on the symbol, as of when the run was INGESTED here
                 (``state/oasis_runs.jsonl``), never the VM's own finish time; unknown after 7 days.
 
+A micro future (MGC, SIL) has no aliases of its own, so its mention-based families (``live_*``, ``gkg_*``,
+``gx_*``, ``soc_*``) are its parent's (GC, SI), with ``coverage.news_from`` saying so. Counted as its own,
+they would be zeros that measured nothing.
+
 Every row carries coverage per clock, so a lens can tell "nothing happened" from "nothing was
 recorded". A row is ``mode: live`` when built within ``LIVE_GRACE`` of its cutoff (truly point in time)
 and ``mode: rebuild`` otherwise (reconstructed from the journals). A rebuild never replaces a live row.
@@ -37,12 +41,13 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from trading_live_claude.analysis.asset_spec import FutureSpec, spec_for
 from trading_live_claude.analysis.graph_adapter import GraphSources, graph_features
 from trading_live_claude.analysis.pit import TimeIndex
 from trading_live_claude.analysis.pit import coverage_hours as _coverage_hours
 from trading_live_claude.analysis.pit import parse_ts as _ts
 from trading_live_claude.analysis.pit import read_jsonl as _jsonl
-from trading_live_claude.intel.routing import classify_symbol
+from trading_live_claude.intel.routing import classify_instrument
 from trading_live_claude.news.gkg_themes import ThemeMap
 
 VERSION = 1
@@ -65,18 +70,31 @@ class Instrument:
     symbol: str
     venue: str
     asset_class: str
+    news_from: str = ""  # a micro future reads its parent's news (MGC -> GC); empty = its own
+
+    @property
+    def news_symbol(self) -> str:
+        return self.news_from or self.symbol
 
 
 def universe(seed_path: Path) -> list[Instrument]:
-    """The basket universe. The venue fixes the overlay class where the symbol alone cannot: IB roots
-    (GC, SI) are futures, Kraken pairs are crypto, QT names go through ``classify_symbol``."""
+    """The basket universe. The venue fixes the overlay class where the symbol alone cannot (IB roots
+    such as GC are futures, Kraken pairs are crypto); see ``routing.classify_instrument``."""
     seed: dict[str, Any] = json.loads(seed_path.read_text(encoding="utf-8"))
     out: list[Instrument] = []
     for venue in ("kraken", "qt", "ib"):
         for sym in seed.get(venue) or ():
-            cls = {"kraken": "crypto", "ib": "future"}.get(venue) or classify_symbol(sym)
-            out.append(Instrument(sym, venue, cls))
+            cls = classify_instrument(sym, venue)
+            spec = spec_for(sym) if cls == "future" else None
+            parent = spec.micro_of if isinstance(spec, FutureSpec) else ""
+            out.append(Instrument(sym, venue, cls, news_from=parent))
     return out
+
+
+def news_symbols(instruments: Iterable[Instrument]) -> list[str]:
+    """Every symbol whose articles must be loaded: the instruments plus the parents they read from.
+    Pass this to :meth:`Sources.load`; a parent left out would turn a micro's counts into false zeros."""
+    return sorted({i.symbol for i in instruments} | {i.news_symbol for i in instruments})
 
 
 def cutoff_for(day: date, asset_class: str) -> datetime:
@@ -267,16 +285,19 @@ def build_row(inst: Instrument, day: date, src: Sources, *, now: datetime,
         return None
     live_cov = _coverage_hours(src.live_passes, cutoff - DAY, cutoff)
     gkg_cov = _coverage_hours(src.gkg_files, cutoff - DAY, cutoff)
+    news = inst.news_symbol  # mention-based families (live, gkg, gx, soc) read the parent for a micro
     ov, ov_age = _overlay_family(src, cutoff, inst.asset_class)
     graph_fam, graph_ok = _graph_family(src, cutoff)
-    soc, soc_age = _society_family(src, cutoff, inst.symbol)
+    soc, soc_age = _society_family(src, cutoff, news)
     features: dict[str, Any] = {
-        **_news_family("live", src.live.get(inst.symbol), cutoff, coverage=live_cov, day_coverage=live_days),
-        **_news_family("gkg", src.gkg.get(inst.symbol), cutoff, coverage=gkg_cov, day_coverage=gkg_days),
+        **_news_family("live", src.live.get(news), cutoff, coverage=live_cov, day_coverage=live_days),
+        **_news_family("gkg", src.gkg.get(news), cutoff, coverage=gkg_cov, day_coverage=gkg_days),
         **ov, **graph_fam, **soc,
     }
     coverage: dict[str, Any] = {"live": live_cov, "gkg": gkg_cov, "overlay_age_h": ov_age, "graph": graph_ok,
                                 "society_age_h": soc_age}
+    if news != inst.symbol:
+        coverage["news_from"] = news
     if graph is not None:
         features.update(graph[0])
         coverage["gx"] = dict(graph[1])
@@ -346,7 +367,10 @@ def build(store: Path, src: Sources, instruments: Sequence[Instrument], days: Se
 def _graph_by_row(src: Sources, instruments: Sequence[Instrument], days: Sequence[date], *,
                   now: datetime) -> dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]]:
     """The graph adapter's output keyed by (date, symbol). Symbols sharing a cutoff form one
-    cross-section (crypto at 00:00 UTC, the rest at 20:00), which is what the residualisation needs."""
+    cross-section (crypto at 00:00 UTC, the rest at 20:00), which is what the residualisation needs.
+
+    A micro stays out of the cross-section (its zero mentions would be a fake row in the backbone and
+    the regression) and takes its parent's values, marked ``inherited_from``."""
     if src.graph is None:
         return {}
     groups: dict[datetime, list[tuple[str, str]]] = defaultdict(list)
@@ -354,11 +378,17 @@ def _graph_by_row(src: Sources, instruments: Sequence[Instrument], days: Sequenc
         for d in days:
             c = cutoff_for(d, inst.asset_class)
             if now >= c:
-                groups[c].append((d.isoformat(), inst.symbol))
+                groups[c].append((d.isoformat(), inst.news_symbol))
     out: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
     for c, keys in groups.items():
+        keys = list(dict.fromkeys(keys))
         feats = graph_features(src.graph, c, [s for _, s in keys])
         out.update({(d, s): feats[s] for d, s in keys})
+    for inst in instruments:
+        if inst.news_symbol != inst.symbol:
+            for d in days:
+                if (hit := out.get((d.isoformat(), inst.news_symbol))) is not None:
+                    out[(d.isoformat(), inst.symbol)] = (hit[0], {**hit[1], "inherited_from": inst.news_symbol})
     return out
 
 
