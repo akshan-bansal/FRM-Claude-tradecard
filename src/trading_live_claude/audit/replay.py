@@ -111,7 +111,10 @@ def replay_row(row: Mapping[str, Any]) -> dict[str, Any]:
     if gate_version_now(thr) != row.get("risk_check_version"):
         return base | {"status": "code changed",
                        "why": "today's Router._gate is not the code that wrote this row"}
-    router = Router(mode="dry-run", broker=_NullBroker(), journal=_NullJournal(),  # type: ignore[arg-type]
+    routes = thr.get("brokers") or ["replay"]
+    router = Router(mode="dry-run", brokers={r: _NullBroker() for r in routes},  # type: ignore[misc]
+                    default_broker=thr.get("default_broker") or routes[0],
+                    journal=_NullJournal(),  # type: ignore[arg-type]
                     kill_switch=_KS(bool(observed.get("kill_switch_halted"))),  # type: ignore[arg-type]
                     heat=PortfolioHeat(cap_pct=float(thr["heat_cap_pct"])),
                     max_open_positions=int(thr["max_open_positions"]),
@@ -133,7 +136,7 @@ def replay_row(row: Mapping[str, Any]) -> dict[str, Any]:
                          target=float(p["target"]) if p.get("target") is not None else None,
                          strategy=str(row.get("strategy_id") or ""),
                          risk_dollars=float(p["risk_dollars"]), account_number="replay",
-                         timestamp=datetime.now(UTC))
+                         timestamp=datetime.now(UTC), broker=str(p.get("broker") or ""))
     decision = router._gate(intent, equity=float(inputs["equity"]),
                             existing_risk=float(inputs["existing_risk"]),
                             open_positions=int(inputs["open_positions"]),

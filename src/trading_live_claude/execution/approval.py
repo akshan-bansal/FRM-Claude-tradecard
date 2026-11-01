@@ -548,7 +548,10 @@ class ApprovalRouter:
         self.store = store
         self.ttl_seconds = ttl_seconds
         self.thesis_fn = thesis_fn
-        self.card_venue = card_broker(inner.broker)
+        # One signed venue per route, named at start so an unnameable broker fails here, not on the
+        # first prompt. The prompt names the route the intent will actually go out on.
+        self.card_venues = {route: card_broker(b) for route, b in inner.brokers.items()}
+        self.card_venue = self.card_venues[inner.default_broker]
 
     def submit(
         self,
@@ -557,6 +560,7 @@ class ApprovalRouter:
         equity: float,
         existing_risk: float,
         open_positions: int,
+        current_open_notional: float = 0.0,
     ) -> Order | None:
         self.inner.announce_intent(intent)
         requested_shares = intent.shares
@@ -565,12 +569,13 @@ class ApprovalRouter:
             equity=equity,
             existing_risk=existing_risk,
             open_positions=open_positions,
+            current_open_notional=current_open_notional,
         )
         # The pre-prompt gate is a decision in its own right: without this row the chain would
         # begin at INTENT_SENT, and a rejection here would leave no gate record at all.
         self.inner.record_gate(intent, decision, requested_shares=requested_shares, equity=equity,
                                existing_risk=existing_risk, open_positions=open_positions,
-                               current_open_notional=0.0)
+                               current_open_notional=current_open_notional)
         if not decision.accepted:
             self.inner.journal.order_intent(
                 {
@@ -597,17 +602,18 @@ class ApprovalRouter:
                         symbol=intent.symbol, reasons=decision.rejected_reasons)
             return None
 
+        venue = self.card_venues[self.inner.route(intent)]
         thesis, intel_ref = "", ""
         if self.thesis_fn is not None:
             try:
-                thesis, intel_ref = self.thesis_fn(intent, self.card_venue)  # type: ignore[operator]
+                thesis, intel_ref = self.thesis_fn(intent, venue)  # type: ignore[operator]
             except Exception as e:  # narrator failure must not break the loop
                 log.warning("approval_router.thesis_fn_failed",
                             symbol=intent.symbol, error=str(e))
         prompt = self.store.publish(
             intent,
             mode=self.inner.mode,
-            broker=self.card_venue,
+            broker=venue,
             ttl_seconds=self.ttl_seconds,
             thesis=thesis,
             intel_ref=intel_ref,
@@ -637,6 +643,7 @@ class ApprovalRouter:
             equity=equity,
             existing_risk=existing_risk,
             open_positions=open_positions,
+            current_open_notional=current_open_notional,
         )
 
     def _record_verdict(self, intent: OrderIntent, prompt: Prompt, verdict: str) -> None:

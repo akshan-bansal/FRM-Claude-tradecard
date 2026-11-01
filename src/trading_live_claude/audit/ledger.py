@@ -59,6 +59,7 @@ LedgerEvent = Literal[
     "SESSION_STARTED", "SESSION_STOPPED",
     # signal -> gate
     "STRATEGY_SIGNAL", "SIGNAL_SUPPRESSED", "SIZED",
+    "FORCED_EXIT",             # the monitor closing a position on Router.check_forced_exits
     "RISK_CHECK", "RISK_TRIMMED", "RISK_REJECTED",
     "KILL_SWITCH_TRIPPED", "KILL_SWITCH_CLEARED",
     # card approval
