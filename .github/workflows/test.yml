@@ -21,6 +21,8 @@ on:
       - "src/trading_live_claude/intel/vs_engine.py"
       - "tests/test_approval_*.py"
       - "tests/test_vs_engine.py"
+      - "pyproject.toml"
+      - ".github/workflows/test.yml"
 
 concurrency:
   group: tradecard-tests-${{ github.ref }}
@@ -43,7 +45,8 @@ jobs:
           # We only need the shim + test deps for these four test files —
           # skip the ib/kraken/quant/plot extras to keep the CI slice small.
           pip install '.[shim]'
-          pip install pytest pandas cryptography structlog pydantic
+          # pytest-cov because pyproject's addopts pass --cov; --no-cov below needs it too.
+          pip install pytest pytest-cov pandas cryptography structlog pydantic
 
       - name: Run tradecard tests
         run: |
