@@ -7,8 +7,12 @@ For a long position in the underlying, the BSM spectral paper's own underlying-r
    standardised residuals;
 3. a semi-parametric law for those residuals: empirical body, generalised Pareto tails
    (``bsm_event.SemiParamGPD``), restandardised to mean 0 and variance 1;
-4. the h-day variance forecast (``bsm_event.horizon_variance``) and the law's lower quantile give
-   the h-day log-return quantile, so the loss fraction at ``level`` is ``1 - exp(mu*h + q*sd)``.
+4. the h-day log-return quantile. For one day it is ``mu + q*sd`` with ``q`` the law's lower
+   quantile. For h > 1 the fitted GJR recursion is run h days through draws from that law
+   (``bsm_event.horizon_quantiles``): the h-day return mixes over the variance path, and the path
+   rises with the path's own losses, so rescaling the 1-day law by ``sqrt(horizon_variance)``
+   would understate the tail the model itself implies. The loss fraction at ``level`` is
+   ``1 - exp(quantile)``.
 
 The gate then compares ``shares * entry * loss_fraction`` with ``cap_pct * equity``. When the
 intended size exceeds the cap it returns the largest whole quantity that fits, and the Router trims
@@ -108,8 +112,13 @@ def estimate_tail(closes: Sequence[float], *, level: float, horizon_days: int,
     if not math.isfinite(hvar) or hvar <= 0:
         raise ValueError(f"GJR horizon variance is not finite and positive ({hvar})")
     law = be.SemiParamGPD(z, tail_frac=tail_frac)
-    q = float(np.asarray(law.ppf(np.array([1.0 - level])))[0])
-    log_q = params.mu * horizon_days + q * math.sqrt(hvar)
+    if horizon_days == 1:
+        q = float(np.asarray(law.ppf(np.array([1.0 - level])))[0])
+        log_q = params.mu + q * math.sqrt(hvar)
+    else:
+        log_q = float(be.horizon_quantiles(params, float(s2[-1]), horizon_days, [1.0 - level],
+                                           law=law)[0])
+        q = (log_q - params.mu * horizon_days) / math.sqrt(hvar)   # the standardised equivalent
     loss = 1.0 - math.exp(log_q)
     if not math.isfinite(loss):
         raise ValueError("loss fraction is not finite")

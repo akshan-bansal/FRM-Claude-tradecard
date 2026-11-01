@@ -1512,3 +1512,88 @@ Do NOT commit any of this until the user says so — the standing rule in
 
 **Published brief for this build (link stays live across sessions):**
 <https://claude.ai/code/artifact/9567c2ac-b2bd-4797-adf5-2edbce2a4d90>
+
+## 12. Spectral VaR gate — tail index, then the post-GBM dynamics queue  🔴 NEXT (2026-10-31)
+
+**Context.** `risk/spectral_var.py` (opt-in via `--spectral-var-cap` on `paper_ib.py` /
+`paper_kraken.py`) caps an entry's tail loss with `BSM_Spectral/bsm_event.py`: walk-forward
+GJR-GARCH plus a semi-parametric GPD law on the standardised residuals. Scope item 1 (multi-day
+horizons) landed 2026-10-31 on `ci/pytest-cov`. The engine part is commit `ec50436`. The gate's
+h > 1 path branch, `tests/test_spectral_var.py`, the `-path` journal challengers, the
+`journal/config.json` amendments and the docs are in the commit that adds this section. Evidence
+is in `BSM_Spectral/RECONSTRUCTION.md` under "Multi-day horizons: GJR paths".
+
+### 12.1 Fix the gate's tail index  🔴 do first
+
+**Problem.** `estimate_tail` builds `SemiParamGPD(z, tail_frac=0.10)` with no `k`, so the tail
+index is a Hill estimate. Hill puts xi_lo at 0.36–0.45, hitting the 0.45 cap on BTC and ETH.
+Restandardising by the inflated sd then squeezes the body. BTC's 1-day 1% quantile is -2.04,
+less extreme than the Gaussian's -2.33. The engine's own reconstruction notes already flag Hill
+overstating xi.
+
+**Walk-forward breach rates at 1 day** (the gate's default horizon). Nominal is
+5.00% / 2.50% / 1.00% at 95% / 97.5% / 99%:
+
+| Underlying | Hill (current) | k = 10 |
+|---|---|---|
+| SPX | 10.51 / 6.08 / 1.94 | 6.37 / 2.44 / 1.00 |
+| BTC | 10.79 / 5.93 / 2.47 | 4.86 / 1.97 / 0.81 |
+| USDJPY | 11.25 / 6.88 / 2.80 | 5.52 / 2.71 / 1.00 |
+| ETH | 8.67 / 4.94 / 1.73 | 4.32 / 1.90 / 0.75 |
+| DJIA | 10.31 / 5.63 / 2.04 | 6.08 / 2.94 / 1.05 |
+
+All eight underlyings move to near nominal with k = 10.
+
+**Do:**
+1. Add `tail_k` to `SpectralVarGate` / `estimate_tail` / `attach_spectral_gate` and to
+   `thresholds()`, so it moves `risk_check_version`. Add a `--spectral-var-tail-k` flag on both
+   paper scripts.
+2. Choose the default by walk-forward on a tuning split only, over {3, 4, 6, 10, Hill}, the
+   engine's own grid. Then confirm on the held-out windows with
+   `bsm_event.run_horizon_backtest(..., tail_k=k)`, which already takes `tail_k`, using Kupiec,
+   Christoffersen and `paired_power` on the pinball difference. Do not pick k on the full sample.
+3. The fix must not weaken the gate. Check that the new default's VaR is at least the Hill VaR
+   at 99% on every underlying, or say plainly where it is not.
+4. Rerun the h = 5 and h = 10 horizon backtests with the chosen k. With the right tail law,
+   paths moved closer to nominal for SPX, DJIA, WTI, ETH and EURUSD, and further from it for
+   USDJPY and BTC; re-judge the h > 1 path branch on that basis.
+
+**Done when:** the gate's 1-day 99% breach rate is within its Kupiec band on held-out windows
+for the gate's markets (equities, BTC, ETH), the tests cover the new parameter, the full suite
+is green, and `RECONSTRUCTION.md` records the chosen k and the held-out evidence.
+
+### 12.2 Remaining post-GBM dynamics queue  🟡 QUEUED
+
+Scoped 2026-10-31 by testing each GBM assumption three ways: what GBM predicts, the current
+model's own simulated band (FHS-GJR), and the data, across all eight underlyings. Ranked:
+
+1. **Vol-index dynamics.** `var_snapshot` moves v as an arithmetic random walk with a floor.
+   The data disagree:
+   - Vol indices mean-revert, with half-lives of 13–53 days.
+   - The 21-day variance ratio of dV is 0.36–0.55, so v shocks at 21 days are overstated
+     about 2×.
+   - Vol-of-vol scales as level^1.06–1.97 (Heston gives 0, lognormal 1, the 3/2 model 2).
+
+   Candidates: log-OU for VXN and VXD, a 3/2-type model for VIX and OVX. Positivity comes from
+   the dynamics, so the floor goes away.
+2. **Clock.**
+   - Crypto weekend days carry 0.54 (BTC, CI 0.44–0.63) and 0.66 (ETH) of a weekday's variance,
+     but `year_frac` counts calendar days equally.
+   - Kalshi's 09:00 quotes imply 0.47–0.62× of the vol index for the same day.
+
+   Replace the learned vol scale with a measured operational-time clock.
+3. **Long memory in volatility.**
+   - GJR persistence is 0.97–0.998.
+   - The |r| autocorrelation at lag 126 sits above the model's median for 7 of 8 underlyings
+     (outside the band for BTC).
+   - Vol-index Hurst is 0.30–0.41, against 0.42–0.48 from mean reversion alone.
+
+   Candidates: a multi-timescale OU superposition, a multifractal random walk, rough vol. Daily
+   data cannot separate roughness from quote noise.
+4. **WTI.** The price went negative (-37.63), kurtosis is 85 and intermittency 0.28 (both
+   outside the band), and Kalshi settles on futures while the model uses spot. Use a two-factor
+   Schwartz–Smith model in arithmetic coordinates. **Data-blocked:** it needs daily front-month
+   futures, which FRED doesn't carry.
+
+Not supported by the data: momentum or inertia (price variance ratios sit inside the model
+bands), and daily jumps beyond FHS except WTI. Microstructure is deferred by user decision.

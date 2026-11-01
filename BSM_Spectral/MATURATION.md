@@ -56,9 +56,9 @@ Kalshi contracts but no FRED price series, so it is not registered.
 
 | Stream | Forecast | Matures | Label |
 |---|---|---|---|
-| `var` | Per underlying: 1- and 5-day VaR plus a 103-point quantile grid, 3 strikes × 5 models, rolling 21-day digital | 1 or 5 trading days later | Realised marked-to-model loss, breaches, PIT |
+| `var` | Per underlying: 1- and 5-day VaR plus a 103-point quantile grid, 3 strikes × 5 models, rolling 21-day digital. At 5 days, three `-path` challengers run the GJR recursion daily instead of rescaling a 1-day draw (amendment of 2026-10-31). | 1 or 5 trading days later | Realised marked-to-model loss, breaches, PIT |
 | `kalshi` | Every open daily contract of every enabled underlying: quote, sizes, model p_Q. Skipped if the model state is more than 3 business days old. | When Kalshi settles | `yes`/`no` and the settlement value |
-| `cross` | 5-day VaR of the cross-asset book (Gaussian, GPD, FHS) | 5 trading days later | Realised book loss |
+| `cross` | 5-day VaR of the cross-asset book (Gaussian, GPD, FHS, plus `gpd-path` and `fhs-path` challengers) | 5 trading days later | Realised book loss |
 
 ## Files
 
