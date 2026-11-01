@@ -749,6 +749,45 @@ def horizon_variance(sigma2_next, p, h):
     return h * lr + (sigma2_next - lr) * (1.0 - rho ** h) / (1.0 - rho)
 
 
+def gjr_paths(p, sigma2_next, z):
+    """h-day log returns from running the GJR recursion through standardised shocks z, shape (n, h).
+
+    The shortcut mu h + sqrt(horizon_variance) z keeps the 1-day law's shape at every horizon. The
+    h-day return is instead a mixture over the variance path, and that path is pushed up by the
+    path's own losses (the gamma term), so its lower tail is heavier than the rescaled 1-day law's.
+    horizon_variance is its exact second moment only for shocks with E[z^2; z < 0] = 1/2.
+    sigma2_next is the first day's variance; an (m,) array of origins gives (n, m) returns."""
+    z = np.asarray(z, dtype=float)
+    s2 = np.asarray(sigma2_next, dtype=float)
+    if s2.ndim:
+        z = z[..., None]
+    s = s2 * np.ones(z.shape[:1] + s2.shape)
+    R = np.zeros_like(s)
+    for k in range(z.shape[1]):
+        e = np.sqrt(s) * z[:, k]
+        R += p.mu + e
+        s = p.omega + (p.alpha + p.gamma * (e < 0)) * e * e + p.beta * s
+    return R
+
+
+def horizon_quantiles(p, sigma2_next, h, levels, law=None, residuals=None, n=50000, seed=0):
+    """Quantiles at `levels` of the h-day log return under the fitted GJR dynamics.
+
+    Shocks are `law.ppf` of uniforms, or bootstrapped from `residuals` (filtered historical
+    simulation). h = 1 with a law is the law's own quantile, exactly. The seed is fixed, so repeated
+    calls on the same inputs agree (common random numbers)."""
+    levels = np.atleast_1d(np.asarray(levels, dtype=float))
+    if h == 1 and law is not None and np.ndim(sigma2_next) == 0:
+        return p.mu + math.sqrt(float(sigma2_next)) * np.asarray(law.ppf(levels), dtype=float)
+    rng = np.random.default_rng(seed)
+    if law is not None:
+        z = np.asarray(law.ppf(np.clip(rng.random((n, h)), 1e-12, 1 - 1e-12)), dtype=float)
+    else:
+        res = np.asarray(residuals, dtype=float)
+        z = res[rng.integers(0, len(res), size=(n, h))]
+    return np.quantile(gjr_paths(p, sigma2_next, z), levels, axis=0)
+
+
 @dataclass
 class WalkForward:
     sigma2: np.ndarray      # sigma2[t]: variance forecast for r[t] using r[:t] only
@@ -1643,20 +1682,9 @@ def run_var_backtest(dates, S, V, cfg=None, signals=None, out_csv=None, log=prin
 
     def simulate(t, blk, name, rho_t, U, k):
         pS, pV = blk.pS, blk.pV
-        if cfg.paths:
-            s2S = np.full(U.shape[0], wfS.sigma2[t])
-            s2V = np.full(U.shape[0], wfV.sigma2[t])
-            cS = np.zeros(U.shape[0])
-            cV = np.zeros(U.shape[0])
-            for d in range(H):
-                x1, x2 = draw(blk, name, U[:, d, :], rho_t, k)
-                eS, eV = np.sqrt(s2S) * x1, np.sqrt(s2V) * x2
-                cS += pS.mu + eS
-                cV += pV.mu + eV
-                s2S = pS.omega + (pS.alpha + pS.gamma * (eS < 0)) * eS ** 2 + pS.beta * s2S
-                s2V = pV.omega + (pV.alpha + pV.gamma * (eV < 0)) * eV ** 2 + pV.beta * s2V
-            return cS, cV
         x1, x2 = draw(blk, name, U, rho_t, k)
+        if cfg.paths:
+            return gjr_paths(pS, wfS.sigma2[t], x1), gjr_paths(pV, wfV.sigma2[t], x2)
         hS = math.sqrt(horizon_variance(wfS.sigma2[t], pS, H))
         hV = math.sqrt(horizon_variance(wfV.sigma2[t], pV, H))
         return pS.mu * H + hS * x1, pV.mu * H + hV * x2
@@ -1791,6 +1819,49 @@ def run_var_backtest(dates, S, V, cfg=None, signals=None, out_csv=None, log=prin
                                     + [f'{x:.8g}' for x in res[name]['var'][w, mi]])
         log(f'Wrote {out_csv}')
     return summary
+
+
+def run_horizon_backtest(dates, S, H=5, levels=(0.95, 0.975, 0.99), block=63, min_train=504,
+                         tail_frac=0.10, tail_k=None, n_paths=20000, seed=0, log=print):
+    """Walk-forward h-day VaR of a long unit position in the underlying: rescaled 1-day law vs paths.
+
+    'scaled' is mu H + sqrt(horizon_variance) times the 1-day law's quantile, the shortcut the
+    spectral VaR gate used for h > 1. 'path' runs H daily GJR steps through the same law
+    (gjr_paths). Both use each block's walk-forward fit and SemiParamGPD on its in-sample residuals;
+    windows are non-overlapping. Loss is the fraction of notional, 1 - exp(R)."""
+    r = np.diff(np.log(np.asarray(S, dtype=float)))
+    wf = walk_forward_gjr(r, block, min_train)
+    ts = np.arange(min_train, len(r) - H + 1, H)
+    lv = np.asarray(levels, dtype=float)
+    real = np.array([1.0 - math.exp(r[t:t + H].sum()) for t in ts])
+    var = {m: np.zeros((len(ts), len(lv))) for m in ('scaled', 'path')}
+    blocks = wf.block_of[ts]
+    for b in np.unique(blocks):
+        w = np.where(blocks == b)[0]
+        p, law = wf.params[b], SemiParamGPD(wf.z_insample[b], tail_frac, tail_k)
+        s2 = wf.sigma2[ts[w]]
+        hv = np.array([horizon_variance(x, p, H) for x in s2])
+        q1 = np.asarray(law.ppf(1.0 - lv), dtype=float)
+        var['scaled'][w] = 1.0 - np.exp(p.mu * H + np.sqrt(hv)[:, None] * q1[None, :])
+        qp = horizon_quantiles(p, s2, H, 1.0 - lv, law=law, n=n_paths, seed=[seed, int(b)])
+        var['path'][w] = 1.0 - np.exp(qp.T)
+    log(f'{H}-day VaR, long unit position, {len(ts)} non-overlapping windows '
+        f'{dates[ts[0] + 1]} .. {dates[ts[-1] + H]}')
+    log('model    level  breach%  nominal  Kupiec p  Chr. cc p  pinball     d(path - scaled)  power  n for 80%')
+    out = {'n': len(ts), 'real': real, 'var': var, 'diff': {}}
+    for li, a in enumerate(lv):
+        pb = {m: pinball(real, var[m][:, li], a) for m in var}
+        d = pb['path'] - pb['scaled']
+        pw = paired_power(d, block=4)
+        out['diff'][float(a)] = d
+        for m in var:
+            hits = real > var[m][:, li]
+            extra = (f'  {pw["mean"]:+.2e} +- {pw["se"]:.1e}  {pw["power"]:.2f}  {pw["n_needed"]:9.0f}'
+                     if m == 'path' else '')
+            log(f'{m:8s} {a:5.3f}  {100 * hits.mean():6.2f}  {100 * (1 - a):6.2f}   {kupiec(hits, 1 - a)[1]:7.3f}'
+                f'   {christoffersen(hits, 1 - a)["p_cc"]:7.3f}   {pb[m].mean():.3e}{extra}')
+        out.setdefault('hits', {})[float(a)] = {m: real > var[m][:, li] for m in var}
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2115,6 +2186,19 @@ def selftest():
     err = abs(horizon_variance(s2n, p, h) - loop) / loop
     check('horizon variance closed form', err < 1e-12, f'relative error {err:.1e}')
 
+    hv = horizon_variance(s2n, p, h)
+    m2 = float(np.mean(gjr_paths(p, s2n, np.random.default_rng(9).standard_normal((200000, h))) ** 2))
+    flat = GJRParams(omega=1e-4, alpha=0.0, gamma=0.0, beta=0.0)
+    qf = horizon_quantiles(flat, 1e-4, h, [0.01], law=NormalLaw(), n=200000, seed=9)[0]
+    qf_rel = qf / (0.01 * math.sqrt(h) * ndtri(0.01))
+    q_std = horizon_quantiles(p, s2n, h, [0.01], law=NormalLaw(), n=200000, seed=9)[0] / math.sqrt(hv)
+    q_one = horizon_quantiles(p, s2n, 1, [0.01], law=NormalLaw())[0]
+    check('GJR paths vs the rescaled 1-day law',
+          abs(m2 / hv - 1) < 0.02 and abs(qf_rel - 1) < 0.02 and q_std < ndtri(0.01) - 0.15
+          and q_one == math.sqrt(s2n) * ndtri(0.01),
+          f'E[R^2] / horizon variance {m2 / hv:.4f}; flat variance quantile {qf_rel:.4f} x sqrt(h) Gaussian; '
+          f'standardised {h}-day 1% quantile {q_std:.3f} vs rescaled {ndtri(0.01):.3f}; h = 1 exact')
+
     rng = np.random.default_rng(42)
     n = 6000
     s2 = p.longrun
@@ -2252,15 +2336,41 @@ def main(argv=None):
     ap.add_argument('--out', default=None, help='write per-window backtest results to this CSV')
     ap.add_argument('--events', default=None, help='contracts CSV for the event-market backtest')
     ap.add_argument('--events-synthetic', action='store_true')
+    ap.add_argument('--horizon-backtest', default=None, metavar='KEYS',
+                    help="h-day VaR of the underlying, rescaled 1-day law vs GJR paths; comma-separated "
+                         "underlyings or 'all' (needs --data; uses --horizon)")
     args = ap.parse_args(argv)
 
-    if not any((args.selftest, args.demo, args.backtest, args.events, args.events_synthetic)):
+    if not any((args.selftest, args.demo, args.backtest, args.events, args.events_synthetic,
+                args.horizon_backtest)):
         ap.print_help()
         return 0
     if args.selftest and not selftest():
         return 1
     if args.demo:
         demo()
+    if args.horizon_backtest:
+        if not args.data:
+            ap.error('--horizon-backtest needs --data DIR')
+        keys = list(UNDERLYINGS) if args.horizon_backtest == 'all' else args.horizon_backtest.split(',')
+        runs = {}
+        for key in keys:
+            dates, S, _ = load_underlying(args.data, key)
+            print(f'\n=== {key} ({UNDERLYINGS[key]["name"]})')
+            runs[key] = run_horizon_backtest(dates, S, args.horizon)
+        if len(runs) > 1:
+            print(f'\nPooled over {", ".join(runs)} ({sum(o["n"] for o in runs.values())} windows; assets are '
+                  'correlated, so pooled p-values are optimistic)')
+            for a in next(iter(runs.values()))['diff']:
+                cells = []
+                for m in ('scaled', 'path'):
+                    hits = np.concatenate([o['hits'][a][m] for o in runs.values()])
+                    cells.append(f'{m} breach {100 * hits.mean():.2f}% (Kupiec p {kupiec(hits, 1 - a)[1]:.3f})')
+                rel = [o['diff'][a].mean() / pinball(o['real'], o['var']['scaled'][:, list(o['diff']).index(a)],
+                                                      a).mean() for o in runs.values()]
+                better = sum(x < 0 for x in rel)
+                print(f'  {a:.3f}: nominal {100 * (1 - a):.2f}%; ' + '; '.join(cells)
+                      + f'; pinball path vs scaled {100 * np.mean(rel):+.1f}% on average, lower in {better}/{len(rel)}')
     if args.backtest:
         if args.data:
             u = UNDERLYINGS[args.underlying]
