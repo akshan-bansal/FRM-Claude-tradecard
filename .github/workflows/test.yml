@@ -43,8 +43,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # We only need the shim + test deps for these four test files —
-          # skip the ib/kraken/quant/plot extras to keep the CI slice small.
-          pip install '.[shim]'
+          # skip the ib/kraken/plot extras to keep the CI slice small. quant
+          # stays: test_vs_engine imports intel, whose import chain reaches
+          # models.cointegration and statsmodels.
+          pip install '.[shim,quant]'
           # pytest-cov because pyproject's addopts pass --cov; --no-cov below needs it too.
           pip install pytest pytest-cov pandas cryptography structlog pydantic
 
