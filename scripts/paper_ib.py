@@ -346,6 +346,8 @@ def main() -> None:
         print(f"[ib-paper] monitoring {len(sym_list)} symbols with strategy '{args.strategy}': "
               f"{sym_list}", flush=True)
 
+    from trading_live_claude.intel.routing import PersistenceGate, futures_overrides
+
     # Optional OSINT overlay + interpret filter — same as QT paper's --intel-overlay path.
     overlay_for = None
     interpret_for = None
@@ -355,7 +357,7 @@ def main() -> None:
         import asyncio as _asyncio
 
         from trading_live_claude.intel.interpret import interpret as _interpret
-        from trading_live_claude.intel.routing import OverlayProvider, futures_overrides
+        from trading_live_claude.intel.routing import OverlayProvider
         from trading_live_claude.intel.worldmonitor import WorldMonitorClient
 
         def _snapshot():
@@ -496,6 +498,7 @@ def main() -> None:
         overlay_for=overlay_for,
         interpret_for=interpret_for,
         weight_bias_for=_weight_bias_for,
+        persistence_for=PersistenceGate(class_overrides=futures_overrides(futures_list)),
         **monitor_policy(settings),
     )
 

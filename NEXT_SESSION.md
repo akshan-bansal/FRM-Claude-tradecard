@@ -921,10 +921,10 @@ solutions; call out and prioritize. Full agent report lives in the session trans
 
 ### 🔴 Critical (act soon — live-path risk or silent correctness bugs)
 
-- 🔴 `cli.py:483,1422` — `trading live` AND `autonomous_run` build `LiveMonitor` without
-  `overlay_for`, `interpret_for`, `weight_bias_for`, `persistence_for`. The two CLI entry points
-  that can touch real money bypass EVERY intel/overlay/allocator/persistence gate that the
-  paper path uses. One-diff fix — copy the wiring block from `signal --paper` (cli.py ~189+).
+- ✅ FIXED 2026-11-01. `trading live` AND `autonomous_run` built `LiveMonitor` without
+  `overlay_for`, `interpret_for`, `weight_bias_for`, `persistence_for`, so the two CLI entry points
+  that can touch real money bypassed every intel/overlay/allocator/persistence gate the paper path
+  uses. See the Top-5 entry below for the decisions taken.
 - 🔴 `data/market.py:51` — `end = end or datetime.now(UTC)` is then part of the parquet cache
   key. `datetime.now()` changes every call, so `MarketData.history()`/`.recent()` NEVER hit
   the cache. Every `LiveMonitor.step()` symbol is a fresh live-broker fetch. Cache module
@@ -1054,8 +1054,14 @@ solutions; call out and prioritize. Full agent report lives in the session trans
 
 ### Top-5 recommended fixes (agent's ranking) — status as of 2026-09-08
 
-1. **Wire intel/overlay/allocator/persistence hooks into `trading live` and `autonomous_run`**
-   🔴 STILL OPEN. Single-diff copy from `signal --paper` wiring block (cli.py ~189+).
+1. ✅ **Wire intel/overlay/allocator/persistence hooks into `trading live` and `autonomous_run`**
+   LANDED 2026-11-01, with these decisions from the user. `tests/test_intel_hooks_wiring.py` pins the
+   wiring on every runner.
+   * Overlay: on when `WORLDMONITOR_API_KEY` is set; without one the runner starts and says it is
+     off. `live` has `--no-intel-overlay`. Fails open: an outage keeps the last good read.
+   * Allocator: the full 0.1×–3× range, same as paper, so one real order can be 3× larger with only
+     the Router's caps and the daemon's daily budget above it. The boost side has no validation.
+   * Persistence gate: every runner. It cannot fire until a poller writes `elevated_in` edges.
 2. ✅ **`MarketData` cache fix** — LANDED commit `638f8d3` (floor `end` to interval boundary).
 3. ✅ **Interval-name mismatch across brokers** — LANDED commit `638f8d3` (IB/Kraken lexicon
    canonical; Questrade translates on its own side).
@@ -1164,6 +1170,16 @@ _(Original spec pruned 2026-09-08 — recover from commit `2173d35` if needed.)_
 
 ## 6. GraphRAG / multi-agent overlay on the intel wing  🟡 SHIPPED + HELD
 
+**Validation 2026-11-01.** The logic works against a mocked API, end to end from graph to monitor bias
+(`tests/test_intel_hooks_wiring.py`). **No real call has ever been checked:** the real debate is written
+but `ANTHROPIC_API_KEY` is not in the app's settings, so nothing was sent. It remains unwired, and the
+journal holds no events for it to read. Fixed on the way:
+* The evidence had no headlines (ids, sources, categories and regions only). `meta.title` now carries them.
+* Direction was dropped, so a constructive read trimmed its own exemplars. Only adverse reads trim now.
+* `_domain_slice` matched hashed ids ("fed", "ecb"), and its no-text branch could never fire.
+* `max_tokens=700` had to cover thinking too, which is on by default on `claude-sonnet-5`. Now 4000.
+* The adversary prompt sent its JSON template with doubled braces, because it is never `.format`ted.
+
 **Current posture (decided this session): keep the pipeline informative on the rule + graph
 layers alone; iterate vertices/edges from journaled inputs as the record accrues; hold the
 specialist/adversary agent sim layer.** The agent layer is built and tested, but wiring it into
@@ -1245,11 +1261,20 @@ equity pairs (`RY.TO/BNS.TO` etc). To use it on FX:
 Status as of 2026-09-08:
 - ✅ **Tier 1:** OSINT scalar + interpret filter + allocator bias + Alerter (both QT + Kraken)
 - ✅ **Tier 2:** Fills → intel graph via `traded` predicate + `fill_edge()` helper
-- ✅ **Tier 3:** Graph persistence → entry gate via `PersistenceGate` (11 focused tests)
+- ✅ **Tier 3:** Graph persistence → entry gate via `PersistenceGate`. **Corrected 2026-11-01:** marked
+  done here on 2026-09-08, but no trading runner passed it (only a report column in `sweep_ib.py`).
+  Now wired into all six `LiveMonitor` calls. Also fixed: one fill reset every run to 0, because a
+  `traded` edge counted as a poll with no elevation; and a run with no age limit could halt entries
+  on a months-old reading, so a run older than `max_age_hours` (6h) now counts as none.
 - ⏳ **Tier 4:** Realized P&L → thesis calibration — **DATA-BLOCKED**, needs weeks of paper
-  fills matched against active theses. 7 days accrued / ~30 days minimum. Revisit ~2026-Oct.
+  fills matched against active theses, ~30 days minimum. The accrual clock restarted at zero: the
+  journals did not survive the repo reconstruction (as of 2026-11-01, `state/intel_graph.jsonl` is 27
+  `traded` edges, 26 of them dated 2026-10-30 and mostly test-fixture leftovers, with no `elevated_in`).
 - ⏳ **Tier 5:** Prediction evaluation — **DATA-BLOCKED**, needs 21-day forward-return windows
-  post-thesis fire. Current thesis history 10 days = zero 21-day windows. Revisit ~2026-Nov+.
+  post-thesis fire. Same restart: zero thesis history today.
+- **Not validated on real data:** tiers 1–3 are verified on stubs only. Nothing says the overlay, the
+  allocator or the persistence gate improves outcomes. `elevated_in` edges accrue only while an overlay
+  provider or `graph_journal.py` polls.
 
 _(Original spec pruned 2026-09-08 — the "missing wires" narrative was subsumed by the tier
 list above. Recover from git history if needed.)_

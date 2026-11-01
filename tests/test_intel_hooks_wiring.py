@@ -1,0 +1,253 @@
+"""The intel hooks reach every runner, and each hook does what its wiring promises.
+
+Nothing here builds a live router or sets a live execution mode: the runners are read as source, and
+the hooks run on a stub broker with a recording router.
+"""
+from __future__ import annotations
+
+import ast
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
+import pandas as pd
+import pytest
+import respx
+
+from tests.test_monitor import _Broker, _EntryStrategy, _Market, _Router
+from trading_live_claude import cli
+from trading_live_claude.intel.agents import _domain_slice, debate
+from trading_live_claude.intel.graph import (
+    append_edges,
+    edge_persistence,
+    event_records_to_edges,
+    fill_edge,
+    load_edges,
+    recent_events_from_graph,
+    snapshot_to_edges,
+)
+from trading_live_claude.intel.interpret import enrich_with_agents
+from trading_live_claude.intel.overlay import IntelSnapshot
+from trading_live_claude.intel.routing import PersistenceGate
+from trading_live_claude.monitor.live_loop import LiveMonitor, MonitorEvent
+from trading_live_claude.risk.sizing import PositionSizer
+
+REPO = Path(__file__).resolve().parents[1]
+ALL_HOOKS = {"overlay_for", "interpret_for", "weight_bias_for", "persistence_for"}
+
+
+def _monitor_kwargs(path: Path, function: str | None = None) -> set[str]:
+    """Keyword names on the LiveMonitor call in ``function`` (or the only one in the file)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    scope: ast.AST = tree
+    if function is not None:
+        scope = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == function)
+    calls = [n for n in ast.walk(scope) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "LiveMonitor"]
+    assert len(calls) == 1, f"{path.name}:{function}"
+    return {k.arg for k in calls[0].keywords if k.arg}
+
+
+@pytest.mark.parametrize("function", ["live", "autonomous_run", "signal"])
+def test_the_cli_runners_pass_every_intel_hook(function: str) -> None:
+    assert _monitor_kwargs(REPO / "src" / "trading_live_claude" / "cli.py", function) >= ALL_HOOKS
+
+
+@pytest.mark.parametrize("script", ["paper_ib.py", "paper_kraken.py"])
+def test_the_paper_scripts_pass_every_intel_hook(script: str) -> None:
+    assert _monitor_kwargs(REPO / "scripts" / script) >= ALL_HOOKS
+
+
+def test_trading_paper_reads_the_persistence_gate() -> None:
+    assert "persistence_for" in _monitor_kwargs(REPO / "src" / "trading_live_claude" / "cli.py", "paper")
+
+
+def test_no_key_leaves_the_overlay_off_and_the_runner_running() -> None:
+    assert cli._intel_overlay_hooks(SimpleNamespace(worldmonitor_api_key="")) == (None, None)
+
+
+# ---------------------------------------------------------------- allocator bias
+
+
+class _CloseMarket:
+    def recent(self, symbol: str, bars: int, interval: str = "1d") -> pd.DataFrame:
+        drift = {"AAA": 0.001, "BBB": 0.002}[symbol]
+        return pd.DataFrame({"close": [100.0 * (1 + drift * i + 0.01 * ((i * 7) % 5 - 2)) for i in range(bars)]})
+
+
+def test_a_symbol_outside_the_validated_list_stays_neutral(monkeypatch: pytest.MonkeyPatch) -> None:
+    validated = {"AAA": SimpleNamespace(oos_score=1.0), "BBB": SimpleNamespace(oos_score=1.0)}
+    monkeypatch.setattr("trading_live_claude.analysis.universe.WALK_FORWARD_VALIDATED", validated)
+    bias = cli._allocator_weight_bias(_CloseMarket(), ["AAA", "BBB", "UNVALIDATED"])
+    assert bias is not None
+    assert bias("UNVALIDATED") == 1.0
+    assert bias("AAA") > 0.0 and bias("BBB") > 0.0
+
+
+def test_no_validated_symbol_means_no_bias(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("trading_live_claude.analysis.universe.WALK_FORWARD_VALIDATED", {})
+    assert cli._allocator_weight_bias(_CloseMarket(), ["UNVALIDATED"]) is None
+
+
+# ---------------------------------------------------------------- hooks on the monitor
+
+
+def _monitor(router: _Router, events: list[MonitorEvent], **hooks: object) -> LiveMonitor:
+    return LiveMonitor(broker=_Broker(), market=_Market(), strategy=_EntryStrategy(),  # type: ignore[arg-type]
+                       sizer=PositionSizer(risk_pct=0.01), router=router,  # type: ignore[arg-type]
+                       account_number="X", symbols=["CCC"], on_event=events.append, **hooks)  # type: ignore[arg-type]
+
+
+def _shares(**hooks: object) -> list[int]:
+    router = _Router()
+    _monitor(router, [], **hooks).step()
+    return [i.shares for i in router.intents]  # type: ignore[attr-defined]
+
+
+def test_a_persistence_halt_blocks_the_order_but_not_the_alert() -> None:
+    router, events = _Router(), []
+    _monitor(router, events, persistence_for=lambda _s: (True, "equity: 'conflict' elevated 6 polls")).step()
+    assert router.intents == []
+    assert [e.kind for e in events] == ["entry"]
+
+
+def test_a_broken_persistence_gate_fails_open() -> None:
+    def broken(_s: str) -> tuple[bool, str]:
+        raise OSError("graph unreadable")
+    assert _shares(persistence_for=broken) == _shares()
+
+
+@pytest.mark.parametrize("bias, factor", [(2.0, 2.0), (0.5, 0.5), (9.0, 3.0), (0.0, 0.1)])
+def test_the_allocator_bias_scales_an_order_within_its_bounds(bias: float, factor: float) -> None:
+    assert _shares(weight_bias_for=lambda _s: bias) == [int(_shares()[0] * factor)]
+
+
+def test_a_broken_allocator_bias_is_neutral() -> None:
+    def broken(_s: str) -> float:
+        raise ValueError("no covariance")
+    assert _shares(weight_bias_for=broken) == _shares()
+
+
+# ---------------------------------------------------------------- the graph journal behind the gate
+
+
+def _polls(path: Path, n: int, start: datetime, domain: str = "conflict") -> datetime:
+    for i in range(n):
+        snap = IntelSnapshot(as_of=start + i * timedelta(minutes=30), event_acceleration={domain: 6.0})
+        append_edges(snapshot_to_edges(snap), path=path)
+    return start + n * timedelta(minutes=30)
+
+
+def _fill(path: Path, at: datetime) -> None:
+    append_edges([fill_edge(venue="kraken", symbol="SOL/USD", action="Buy", quantity=1.0, price=100.0,
+                            session_id="s", order_id=1, as_of=at.isoformat())], path=path)
+
+
+def _run(path: Path, **kw: object) -> int:
+    return edge_persistence(load_edges(path), predicate="elevated_in", object=("domain", "conflict"), **kw)  # type: ignore[arg-type]
+
+
+def test_a_fill_neither_resets_nor_splits_a_persistence_run(tmp_path: Path) -> None:
+    path = tmp_path / "graph.jsonl"
+    end = _polls(path, 6, datetime.now(UTC) - timedelta(hours=4))
+    _fill(path, end)
+    assert _run(path) == 6
+    _polls(path, 2, end + timedelta(minutes=1))
+    assert _run(path) == 8
+    assert PersistenceGate(min_polls=5, refresh_seconds=0.0, graph_path=path)("SPY")[0] is True
+
+
+def test_a_calm_poll_still_breaks_the_run(tmp_path: Path) -> None:
+    path = tmp_path / "graph.jsonl"
+    end = _polls(path, 6, datetime.now(UTC) - timedelta(hours=4))
+    append_edges(snapshot_to_edges(IntelSnapshot(as_of=end, event_acceleration={"conflict": 1.0},
+                                                 category_alert_counts={"conflict": 1})), path=path)
+    assert _run(path) == 0
+
+
+def test_a_market_bridge_still_counts_its_own_run(tmp_path: Path) -> None:
+    path = tmp_path / "graph.jsonl"
+    start = datetime.now(UTC) - timedelta(hours=2)
+    for i in range(3):
+        append_edges(snapshot_to_edges(IntelSnapshot(as_of=start + timedelta(minutes=i), energy_stress=0.7)), path=path)
+    assert edge_persistence(load_edges(path), predicate="stressed_by", object=("domain", "energy")) == 3
+
+
+def test_a_stale_run_does_not_halt_entries_today(tmp_path: Path) -> None:
+    path = tmp_path / "graph.jsonl"
+    _polls(path, 6, datetime.now(UTC) - timedelta(days=60))
+    assert _run(path) == 6                                         # the record is still there
+    assert _run(path, max_age_hours=6.0) == 0                      # it just says nothing about today
+    assert PersistenceGate(min_polls=5, refresh_seconds=0.0, graph_path=path)("SPY") == (False, "")
+    held = PersistenceGate(min_polls=5, refresh_seconds=0.0, max_age_hours=None, graph_path=path)
+    assert held("SPY")[0] is True
+
+
+# ---------------------------------------------------------------- the held agent layer, end to end
+
+
+@pytest.fixture()
+def _fake_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trading_live_claude.config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
+
+
+def _evidence(tmp_path: Path) -> list[dict[str, object]]:
+    records = [{"id": "ev-1", "title": "Refinery strike halts pipeline flows", "sources": ["reuters", "ap"],
+                "categories": ["energy"], "country": "SA"}]
+    now = datetime.now(UTC).isoformat()
+    path = tmp_path / "events.jsonl"
+    append_edges(event_records_to_edges(records, domain="news_signal", poll_id=now, as_of=now), path=path)
+    return recent_events_from_graph(load_edges(path))
+
+
+def test_the_headline_reaches_the_agents_evidence(tmp_path: Path) -> None:
+    assert _evidence(tmp_path)[0]["title"] == "Refinery strike halts pipeline flows"
+
+
+def test_a_hashed_event_id_does_not_put_a_record_in_a_domain() -> None:
+    rec = {"id": "a3fed12ecb", "title": "Refinery strike", "sources": [], "ingestedAt": "2026-11-01T00:00:00+00:00"}
+    assert _domain_slice([rec], "macro") == []
+    assert _domain_slice([rec], "energy") == [rec]
+
+
+def test_a_record_with_no_text_goes_to_every_domain() -> None:
+    rec = {"id": "a1", "sources": ["ap"], "categories": [], "regions": [], "ingestedAt": "2026-11-01T00:00:00+00:00"}
+    assert _domain_slice([rec], "macro") == [rec] and _domain_slice([rec], "disaster") == [rec]
+
+
+@pytest.mark.parametrize("direction, trimmed", [("adverse", True), ("constructive", False)])
+def test_only_an_adverse_agent_read_trims_its_exemplars(tmp_path: Path, _fake_key: None, direction: str,
+                                                        trimmed: bool) -> None:
+    prompts: list[dict[str, object]] = []
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        prompts.append(body)
+        if "adversary" in body["system"]:
+            text = json.dumps({"verdict": "UPHELD", "reason": "corroborated", "demote_by": 0})
+        else:
+            text = json.dumps({"thesis": "Energy supply", "direction": direction, "confidence": 0.8,
+                               "inference": "One line.", "evidence": ["ev-1"]})
+        return httpx.Response(200, json={"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"})
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post("https://api.anthropic.com/v1/messages").mock(side_effect=reply)
+        theses = enrich_with_agents([], evidence=_evidence(tmp_path), as_of="2026-11-01")
+
+    thesis = next(t for t in theses if "energy" in t.name)
+    assert thesis.direction == direction
+    assert any("Refinery strike" in str(p["messages"]) for p in prompts)
+    assert all("{{" not in str(p["system"]) for p in prompts)     # the prompt shows real JSON, not a template
+    monitor = _monitor(_Router(), [], interpret_for=lambda: [thesis])
+    bias, applied = monitor._interpret_bias("XLE")
+    assert (bias < 1.0) is trimmed and bool(applied) is trimmed
+
+
+def test_a_debate_with_no_key_fires_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from trading_live_claude.config import get_settings
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    get_settings.cache_clear()
+    assert debate(_evidence(tmp_path), domains=("energy",)) == []

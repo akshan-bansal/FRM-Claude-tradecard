@@ -201,7 +201,8 @@ class PersistenceGate:
 
     A gate that cannot read the graph (missing file, parse error) fails OPEN — treats every
     symbol as clear. This matches the framework's rule that a broken intel path never causes an
-    unexpected halt.
+    unexpected halt. So does a stale journal: a run whose newest poll is older than
+    ``max_age_hours`` counts as no run, because a stopped poller says nothing about today.
 
     Wire like :class:`OverlayProvider`::
 
@@ -210,10 +211,12 @@ class PersistenceGate:
     """
 
     def __init__(self, *, min_polls: int = 5, refresh_seconds: float = 60.0,
+                 max_age_hours: float | None = 6.0,
                  graph_path: str | Path | None = None,
                  class_overrides: Mapping[str, OverlayClass] | None = None) -> None:
         self.min_polls = int(min_polls)
         self._refresh = float(refresh_seconds)
+        self._max_age_hours = max_age_hours
         self._graph_path = Path(graph_path) if graph_path is not None else default_graph_journal()
         self._overrides = class_overrides
         # Precomputed per-domain persistence, refreshed on cadence. None → not yet read.
@@ -228,8 +231,8 @@ class PersistenceGate:
         try:
             edges = load_edges(self._graph_path)
             self._persistence_by_domain = {
-                dom: edge_persistence(edges, predicate="elevated_in",
-                                        object=("domain", dom))
+                dom: edge_persistence(edges, predicate="elevated_in", object=("domain", dom),
+                                      max_age_hours=self._max_age_hours)
                 for doms in _CLASS_TO_DOMAINS.values() for dom in doms
             }
             self._ts = time.monotonic()
