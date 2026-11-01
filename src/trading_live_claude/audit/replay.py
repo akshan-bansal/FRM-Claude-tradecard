@@ -123,7 +123,7 @@ def replay_row(row: Mapping[str, Any]) -> dict[str, Any]:
         return base | {"status": "code changed",
                        "why": "today's Router._gate is not the code that wrote this row"}
     routes = thr.get("brokers") or ["replay"]
-    held = observed.get("kill_switch_held")
+    held = observed.get("held_quantity")
     router = Router(mode="dry-run",
                     brokers={r: _NullBroker(str(p["symbol"]), held) for r in routes},  # type: ignore[misc]
                     default_broker=thr.get("default_broker") or routes[0],

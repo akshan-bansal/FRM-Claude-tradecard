@@ -20,6 +20,7 @@ from trading_live_claude.brokers.base import BrokerError
 from trading_live_claude.brokers.models import OrderAction, Position, Quote
 from trading_live_claude.brokers.paper import PaperBroker
 from trading_live_claude.config.settings import Settings
+from trading_live_claude.execution.daily_budget import DailyBudget
 from trading_live_claude.execution.router import OrderIntent, Router
 from trading_live_claude.monitor.live_loop import LiveMonitor
 from trading_live_claude.risk.equity_watch import COLUMNS, EquityWatch
@@ -116,7 +117,7 @@ def test_only_an_order_that_reduces_a_held_position_passes(tmp_path: Path, held:
                                                            shares: int, passes: bool) -> None:
     d = _halted(tmp_path, held)._gate(_intent(action, shares), **BOOK)
     assert ("kill-switch tripped" not in d.rejected_reasons) is passes
-    assert d.observed["kill_switch_held"] == held
+    assert d.observed["held_quantity"] == held
 
 
 def test_another_symbols_position_does_not_count(tmp_path: Path) -> None:
@@ -132,14 +133,7 @@ def test_unreadable_holding_is_refused(tmp_path: Path) -> None:
 
     r.broker.positions = boom  # type: ignore[method-assign]
     d = r._gate(_intent(OrderAction.SELL, 5), **BOOK)
-    assert "kill-switch tripped" in d.rejected_reasons and d.observed["kill_switch_held"] is None
-
-
-def test_no_read_of_the_broker_without_a_halt(tmp_path: Path) -> None:
-    pb = _paper(tmp_path)
-    pb.positions = lambda _a: pytest.fail("the gate must not read positions when not halted")  # type: ignore[method-assign]
-    d = Router.build_default(mode="paper", broker=pb, state_dir=tmp_path)._gate(_intent(OrderAction.BUY), **BOOK)
-    assert d.observed["kill_switch_halted"] is False and "kill_switch_held" not in d.observed
+    assert "kill-switch tripped" in d.rejected_reasons and d.observed["held_quantity"] is None
 
 
 def test_gate_decisions_under_a_halt_replay(tmp_path: Path) -> None:
@@ -152,11 +146,83 @@ def test_gate_decisions_under_a_halt_replay(tmp_path: Path) -> None:
     assert [x["status"] for x in results] == ["match", "match"], results
 
 
-def test_other_gates_still_apply_to_an_exit_under_a_halt(tmp_path: Path) -> None:
-    """Pins today's behaviour: the heat cap still refuses an exit from a book already over it."""
-    d = _halted(tmp_path, 10.0)._gate(_intent(OrderAction.SELL, 5), equity=100_000.0, existing_risk=9_000.0,
-                                      open_positions=1)
-    assert not d.accepted and "portfolio heat" in d.rejected_reasons[0]
+# ---------------------------------------------------------------- the other gates that could trap an exit
+
+OVER_HEAT = {"equity": 100_000.0, "existing_risk": 9_000.0, "open_positions": 1}
+
+
+def _holding(tmp: Path, held: float, ledger: Ledger | None = None, **kw: object) -> Router:
+    pb = _paper(tmp)
+    pb.positions = lambda _a: [Position(symbol="AAA", symbolId=1, openQuantity=held)] if held else []  # type: ignore[method-assign]
+    return Router.build_default(mode="paper", broker=pb, state_dir=tmp, ledger=ledger, **kw)  # type: ignore[arg-type]
+
+
+def test_reducing_order_passes_a_heat_cap_the_book_is_already_over(tmp_path: Path) -> None:
+    d = _holding(tmp_path, 10.0)._gate(_intent(OrderAction.SELL, 5), **OVER_HEAT)
+    assert d.accepted and d.observed["reduces_position"] is True
+    assert d.observed["heat_pct"] > 0.05                 # recorded, just not held against the exit
+
+
+def test_reducing_order_passes_the_minimum_ticket(tmp_path: Path) -> None:
+    d = _holding(tmp_path, 10.0, min_ticket_usd=5_000.0)._gate(_intent(OrderAction.SELL, 5), **BOOK)
+    assert d.accepted
+
+
+def test_reducing_order_passes_a_spent_daily_budget(tmp_path: Path) -> None:
+    r = _holding(tmp_path, 10.0)
+    r.daily_budget = DailyBudget(tmp_path, max_trades_per_day=0, max_notional_per_day_usd=0.0)
+    d = r._gate(_intent(OrderAction.SELL, 5), **BOOK)
+    assert d.accepted and "daily_budget" in d.observed
+
+
+@pytest.mark.parametrize(("held", "action", "shares"), [
+    (0.0, OrderAction.BUY, 5),                           # a new entry
+    (10.0, OrderAction.BUY, 5),                          # adding to the position
+    (10.0, OrderAction.SELL, 11),                        # would flip it short
+    (0.0, OrderAction.SELL, 5),                          # would open a short
+    (10.0, OrderAction.SELL_SHORT, 5),                   # never a closing order
+])
+def test_anything_else_still_meets_all_three_gates(tmp_path: Path, held: float, action: OrderAction,
+                                                   shares: int) -> None:
+    r = _holding(tmp_path, held, min_ticket_usd=5_000.0)
+    r.daily_budget = DailyBudget(tmp_path, max_trades_per_day=0, max_notional_per_day_usd=0.0)
+    d = r._gate(_intent(action, shares), **OVER_HEAT)
+    text = " | ".join(d.rejected_reasons)
+    assert "below min" in text and "portfolio heat" in text and "daily trade cap" in text
+    assert d.observed["reduces_position"] is False
+
+
+def test_unreadable_holding_gets_no_exemption(tmp_path: Path) -> None:
+    r = _holding(tmp_path, 10.0, min_ticket_usd=5_000.0)
+
+    def boom(_a: str) -> list[Position]:
+        raise BrokerError("positions unavailable")
+
+    r.broker.positions = boom  # type: ignore[method-assign]
+    text = " | ".join(r._gate(_intent(OrderAction.SELL, 5), **OVER_HEAT).rejected_reasons)
+    assert "below min" in text and "portfolio heat" in text
+
+
+def test_a_failed_read_does_not_stop_a_new_entry(tmp_path: Path) -> None:
+    """An entry was never exempt, so a positions outage must not change how it is gated."""
+    r = _holding(tmp_path, 0.0)
+
+    def boom(_a: str) -> list[Position]:
+        raise BrokerError("positions unavailable")
+
+    r.broker.positions = boom  # type: ignore[method-assign]
+    assert r._gate(_intent(OrderAction.BUY, 5), **BOOK).accepted
+
+
+def test_exempted_decisions_replay(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "ledger", stream="t", mode="paper", session_id="s")
+    r = _holding(tmp_path, 10.0, ledger, min_ticket_usd=5_000.0)
+    r.daily_budget = DailyBudget(tmp_path, max_trades_per_day=0, max_notional_per_day_usd=0.0)
+    r.submit(_intent(OrderAction.SELL, 5), **OVER_HEAT)  # exempt from all three
+    r.submit(_intent(OrderAction.BUY, 5), **OVER_HEAT)   # refused by all three
+    rows = [row for p in (tmp_path / "ledger").glob("*t.jsonl") for row in read_stream(p)]
+    results = replay(rows)
+    assert [x["status"] for x in results] == ["match", "match"], results
 
 
 # ---------------------------------------------------------------- EquityWatch

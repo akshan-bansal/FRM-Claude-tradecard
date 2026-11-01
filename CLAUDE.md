@@ -176,8 +176,9 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
 - The live runner mirrors the paper runners. Build a runner from `Router.limits_from(settings)`,
   `monitor_policy(settings)` and `preflight()`; `tests/test_live_parity.py` fails if one stops. A difference
   between paper and live needs a reason: real broker, typed confirmation, strict ledger.
-- A tripped kill-switch stops new risk; an order that only reduces a position the routed broker holds still
-  passes, checked against the broker in `Router._gate`. The LLM-trader commands still refuse while halted.
+- Gates that stop new risk must not trap the way out. An order that only reduces a position the routed
+  broker holds (`reduces` in `Router._gate`, read from the broker and recorded) passes the kill-switch, the
+  minimum ticket, the heat cap and the daily budget. The LLM-trader commands still refuse while halted.
 - Live and autonomous books auto-halt through `risk/equity_watch.py`, journaling to `state/live_equity.csv`.
   Never reset a peak by editing that file; a human `clear-kill` is what restarts the measure.
 - `analysis/symbol_atlas.py` is the cross-broker view of a symbol. It reads the adapters' own helpers:

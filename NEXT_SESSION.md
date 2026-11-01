@@ -590,9 +590,11 @@ Reading the wiring found what no journal could show:
 * **`trading.yaml` risk knobs were ignored.** No runner passed `max_gross_leverage`,
   `max_position_notional_pct`, `force_exit_atr_mult` or `on_size_cap_breach` to the Router, so only their
   defaults ever applied. FIXED: every runner passes `Router.limits_from(settings)`.
-* **OPEN, your decision: other gates still refuse exits.** The heat cap refuses an exit from a book
-  already over it, the min-ticket gate refuses closing a small remainder, and the autonomous daily
-  budget refuses exits once spent. Pinned by `test_other_gates_still_apply_to_an_exit_under_a_halt`.
+* **Other gates refused exits too.** DECIDED and FIXED 2026-11-01: the heat cap refused an exit from a
+  book already over it, the min-ticket gate refused closing a small remainder, and the autonomous
+  daily budget refused exits once spent. A reducing order now passes all three, by the same test the
+  kill-switch uses. Still applied to an exit: `equity <= 0` and the stop-side check. A plain BUY that
+  covers a short also still meets the entry-only gates (basket, open-positions, size caps, spectral).
 
 `trading live` now mirrors the paper runners (`tests/test_live_parity.py`): pre-flight, alerts,
 `--strategy-map`, `--require-card`, `--require-basket`, the spectral gate, and the same `trading.yaml`

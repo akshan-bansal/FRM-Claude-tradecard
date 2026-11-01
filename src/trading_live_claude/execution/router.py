@@ -305,19 +305,22 @@ class Router:
         if route not in self.brokers:
             reasons.append(f"unknown broker {route!r}: router holds {sorted(self.brokers)}")
 
-        # 1. kill switch. A halt stops new risk, not the way out of it: an order that only reduces
-        # a position the routed broker holds still passes. If the holding cannot be read, nothing
-        # shows the order reduces anything, so it is refused like any other.
+        # Whether this order only reduces a position the routed broker holds. The gates that stop new
+        # risk must not trap the way out of it, so the kill-switch, the minimum ticket, the heat cap
+        # and the daily budget all let such an order through. If the holding cannot be read, nothing
+        # shows the order reduces anything, and every gate applies.
+        held = self._held_quantity(intent, route)
+        reduces = held is not None and intent.shares > 0 and (
+            (intent.action == OrderAction.SELL and held >= intent.shares)
+            or (intent.action in (OrderAction.BUY, OrderAction.BUY_TO_COVER) and -held >= intent.shares))
+        observed["held_quantity"] = held
+        observed["reduces_position"] = reduces
+
+        # 1. kill switch
         halted = self.kill_switch.state().halted
         observed["kill_switch_halted"] = halted
-        if halted:
-            held = self._held_quantity(intent, route)
-            observed["kill_switch_held"] = held
-            closes = held is not None and intent.shares > 0 and (
-                (intent.action == OrderAction.SELL and held >= intent.shares)
-                or (intent.action in (OrderAction.BUY, OrderAction.BUY_TO_COVER) and -held >= intent.shares))
-            if not closes:
-                reasons.append("kill-switch tripped")
+        if halted and not reduces:
+            reasons.append("kill-switch tripped")
 
         # 2. equity available
         if equity <= 0:
@@ -329,7 +332,7 @@ class Router:
 
         # 4. min ticket
         notional = intent.shares * intent.entry
-        if notional < self.min_ticket_usd:
+        if notional < self.min_ticket_usd and not reduces:
             reasons.append(f"notional ${notional:,.2f} below min ${self.min_ticket_usd}")
 
         # 5. open positions cap (only for entries)
@@ -350,7 +353,7 @@ class Router:
         # 6. portfolio heat
         snap = self.heat.snapshot(equity=equity, open_risk_dollars=existing_risk + intent.risk_dollars)
         observed["heat_pct"] = snap.heat_pct
-        if snap.breached:
+        if snap.breached and not reduces:
             reasons.append(f"portfolio heat {snap.heat_pct:.2%} > cap {self.heat.cap_pct:.2%}")
 
         # 7. stop side sanity
@@ -365,7 +368,7 @@ class Router:
             observed["daily_budget"] = {"trades_today": snap_b.trades_today,
                                         "notional_today_usd": snap_b.notional_today_usd}
             ok, reason = snap_b.admits(additional_notional_usd=notional)
-            if not ok:
+            if not ok and not reduces:
                 reasons.append(reason)
 
         # 9 + 10. Size caps: per-symbol notional cap + portfolio gross-leverage cap

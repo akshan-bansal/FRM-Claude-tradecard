@@ -26,6 +26,7 @@ from typing import Any
 
 from trading_live_claude.audit.queries import all_rows
 from trading_live_claude.brokers.models import OrderAction, Position
+from trading_live_claude.execution.daily_budget import DailyBudget
 from trading_live_claude.execution.router import OrderIntent, Router
 
 MIN_DAYS = 7
@@ -90,8 +91,9 @@ def _reason_key(reason: str) -> str:
     return "other"
 
 
-def exits_pass_a_tripped_kill_switch() -> bool:
-    """Ask the real gate: can a position still be closed once the kill-switch has tripped?"""
+def exit_passes(*, halted: bool = False, existing_risk: float = 0.0, shares: int = 10,
+                spent_budget: bool = False) -> bool:
+    """Ask the real gate: can a position still be reduced in this state of the book?"""
     class _Null:
         name = venue = "probe"
 
@@ -100,10 +102,13 @@ def exits_pass_a_tripped_kill_switch() -> bool:
 
     with TemporaryDirectory() as d:
         router = Router.build_default(mode="dry-run", broker=_Null(), state_dir=Path(d))  # type: ignore[arg-type]
-        router.kill_switch.trip(reason="risk_guard_analysis probe")
-        intent = OrderIntent(symbol="PROBE", action=OrderAction.SELL, shares=10, entry=100.0, stop=110.0,
+        if halted:
+            router.kill_switch.trip(reason="risk_guard_analysis probe")
+        if spent_budget:
+            router.daily_budget = DailyBudget(Path(d), max_trades_per_day=0, max_notional_per_day_usd=0.0)
+        intent = OrderIntent(symbol="PROBE", action=OrderAction.SELL, shares=shares, entry=50.0, stop=60.0,
                              target=None, strategy="probe", risk_dollars=0.0, account_number="probe")
-        return router._gate(intent, equity=100_000.0, existing_risk=0.0, open_positions=1).accepted
+        return router._gate(intent, equity=100_000.0, existing_risk=existing_risk, open_positions=1).accepted
 
 
 def wiring_checks(src: Path) -> dict[str, bool]:
@@ -120,7 +125,10 @@ def wiring_checks(src: Path) -> dict[str, bool]:
         "place-order passes open notional": "current_open_notional=open_notional" in cli,
         "paper broker auto-trips the kill-switch (KillSwitch.evaluate)": "_kill_switch.evaluate(" in paper,
         "live books auto-trip the kill-switch (EquityWatch)": "EquityWatch(" in monitor,
-        "a tripped kill-switch still lets exits through": exits_pass_a_tripped_kill_switch(),
+        "a tripped kill-switch still lets exits through": exit_passes(halted=True),
+        "an exit passes a heat cap the book is already over": exit_passes(existing_risk=50_000.0),
+        "an exit passes the minimum ticket": exit_passes(shares=1),
+        "an exit passes a spent daily budget": exit_passes(spent_budget=True),
     }
 
 
