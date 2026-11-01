@@ -495,7 +495,15 @@ study on the intel graph — calibration signal-statistics honing (section above
 calibration recurrent-learning loop (item 9 tier 4), prediction evaluation (item 9 tier 5).
 All four studies wait on the same underlying corpus.
 
-## Symbol-mapping architecture — 2026-09-08  🟡 QUEUED
+## Symbol-mapping architecture — 2026-09-08  🟢 ALL THREE GAPS LANDED; sleeve migration deferred
+
+**Status 2026-11-01.** Gap 1: `analysis/symbol_validation.py`, wired into `signal` and `paper_kraken.py`,
+and now `paper_ib.py`. Gap 3: `brokers/ib.py::_infer_stock_venue`, landed 2026-09-09. Gap 2:
+`analysis/symbol_atlas.py` (canonical ids, per-broker wire forms, `desk_route`, `validate_atlas`). It
+reads the adapters and sleeve tables rather than copying them. Not done: moving sleeve entries onto
+`canonical_id` and absorbing the `asset_spec` registries, which can wait for a real cross-venue trade.
+Note `_infer_stock_venue` still falls back to SMART/USD for an unknown suffix (`.T`, `.HK`, `.DE`);
+fix that before exchange hopping level 2. Original scope follows.
 
 Surfaced from a mid-session audit of how the same asset is represented across brokerages.
 Each broker adapter normalizes independently (Questrade `_symbol_id()`, Kraken
@@ -559,7 +567,29 @@ independence but removes the mis-routing hazard. ~40 lines + tests.
 + migration — ~4-6 hr, only if cross-venue trades get proposed). Gap 1 alone would have
 prevented both this week's mid-session failures; do it first, atlas can wait.
 
-## Risk-guard validation analysis — 2026-09-09  🟡 QUEUED (needs ≥ 1 week post-gate data)
+## Risk-guard validation analysis — 2026-09-09  🟢 SCRIPT BUILT; 🟡 DATA-BLOCKED (needs ≥ 1 week post-gate data)
+
+**Status 2026-11-01.** `scripts/risk_guard_analysis.py` writes the report and refuses to recommend on
+too little record. Today's state holds one order and one fill from one four-hour session on 2026-10-31,
+because the journals did not survive the repo reconstruction, so no threshold can be judged. Rerun
+after a week of paper sessions on two venues. Reject strings alone undercount the size caps since trim
+mode: the script also counts ledger `RISK_TRIMMED` rows.
+
+Reading the wiring found what no journal could show:
+* **Gross-leverage cap was inert.** No runner passed `current_open_notional`, so the gate compared each
+  intent to equity alone. FIXED: the monitor, the card path and `place-order` pass it, and it counts
+  entries made earlier in the same poll, as do the heat and open-positions gates.
+* **`check_forced_exits` had no caller.** The "landed" item 3 could never fire. WIRED, opt-in:
+  `forced_exits: true`, off by default. Writes a `FORCED_EXIT` ledger row.
+* **OPEN, your decision: a tripped kill-switch rejects exits too.** A loss big enough to trip it leaves
+  the position open and unclosable by the monitor, and the forced exit cannot act exactly when it
+  matters most. Letting exits through loosens a gate. Pinned by
+  `test_tripped_kill_switch_also_blocks_the_forced_exit`.
+* **OPEN, your decision: no auto-halt on live brokers.** `KillSwitch.evaluate` is called only from
+  `PaperBroker._journal_equity`. On `trading live` and `autonomous_run` the drawdown and daily-loss
+  limits never trip; only the manual `trading kill` does.
+
+Original scope follows.
 
 Empirical audit of items 1/2/3/5 from the 2026-09-08 risk-architecture landing (commit
 `629594c`). Purpose: verify each new gate is actually firing as designed, calibrate
@@ -711,7 +741,12 @@ Old reject-mode tests preserved via explicit `on_size_cap_breach="reject"`.
 ### 7. Alerter dedup — OMITTED 2026-09-09 per user decision.
 Do NOT propose changes to the Telegram alerter. The Alerter stays as it currently is.
 
-### 9. Exchange hopping — trading beyond user's geographical timezone  🟡 QUEUED (2026-09-09)
+### 9. Exchange hopping — trading beyond user's geographical timezone  🟢 L1 LANDED 2026-11-01; L2-4 need decisions
+
+**Status 2026-11-01.** Level 1: `analysis/venue_calendar.py`, on in every runner through
+`monitor_policy` (`respect_market_hours`). Hours only, no holiday calendar: a holiday reads as open.
+A held position on a closed venue is still quoted once per poll for the heat figures. Level 2 needs a
+market-data spend decision and level 3 a numeraire choice; both are yours.
 
 **Levels approved but not built** (queued 2026-09-09). Applies the propagation-notes
 discipline: each level's cross-module impact is enumerated so we don't slip an
@@ -765,7 +800,15 @@ architectural change in as a small feature.
 (spend decision) AND on the L3 numeraire choice (architecture decision). L1 is
 bounded and independent — worth doing regardless of the higher levels.
 
-### 8. Event + level entry triggers (both, decoupled)  🟡 QUEUED (2026-09-09)
+### 8. Event + level entry triggers (both, decoupled)  ✅ LANDED 2026-11-01
+
+**Status 2026-11-01.** Columns: `entry_level` on ema_crossover, macd, rsi_meanrevert, zscore_ou, pairs,
+kalman_pairs, arima_garch, turn_of_month and month_of_year, with a lookahead test; a strategy whose
+`entry` already is a state has nothing to add. Default stays event; bollinger is the one family that
+acts on level unasked; `entry_triggers` in `trading.yaml` sets it per symbol. Tight guard: an order not
+yet visible as a position blocks a repeat entry, and a level-only entry routes once per bar, so a
+rejected or declined one retries next bar rather than every poll. No level setting is in use yet, and
+none has been walk-forward tested: the level path has no backtest. Original scope follows.
 User standing rule: we need BOTH event-based (fresh cross) AND level-based (state
 currently satisfied) entry triggers — neither one alone is reliable enough.
 
@@ -877,7 +920,7 @@ solutions; call out and prioritize. Full agent report lives in the session trans
   uses Questrade lexicon (`"HalfHour"`); Kraken uses `_INTERVAL_MINUTES` (numeric); IB uses
   `_INTERVAL_TO_BAR` (`"ThirtyMinutes"`). Non-QT 30-minute requests silently fall through to
   `OneDay`.
-- 🔴 `monitor/live_loop.py:245` — `float(last.get("atr", price * 0.02)) or price * 0.02` returns
+- ✅ FIXED 2026-11-01. `monitor/live_loop.py:245` — `float(last.get("atr", price * 0.02)) or price * 0.02` returns
   `NaN` when `last["atr"]` is `NaN` (NaN is truthy). Strategy with NaN ATR silently sizes off
   NaN, corrupting stop distance and downstream risk math.
 - 🔴 `monitor/live_loop.py:283-290` — `conviction *= weight_bias` is passed to `PositionSizer.size`
@@ -889,7 +932,7 @@ solutions; call out and prioritize. Full agent report lives in the session trans
 - 🔴 `brokers/ib_web.py:509-511` — `place_order` auto-confirms IB warning prompts in a while
   loop with NO CAP. In live mode this can accept margin/exchange warnings a human should
   approve; also potentially loops unbounded on a misbehaving API.
-- 🔴 `README.md:141` — Quick-start block includes `EXECUTION_MODE=live uv run trading live …`.
+- ✅ FIXED 2026-10-31. `README.md:141` — Quick-start block includes `EXECUTION_MODE=live uv run trading live …`.
   `CLAUDE.md:24` explicitly says "Never set `EXECUTION_MODE=live` in code, tests, or example
   snippets." README example directly contradicts the CLAUDE.md non-negotiable.
 - 🔴 `cli.py:1381-1383` — `os.environ["QUESTRADE_ENV"] = chosen_account` is written AFTER
@@ -1257,7 +1300,11 @@ The revised first-week migration plan (below) reflects this: no
   under `/v1/…`; legacy unversioned paths still resolve during the
   deprecation window but the shim logs a warning per hit and the OpenAPI
   spec advertises `/v1/…` only. `SPEC_VERSION` bumped to `1.0.0`.
-- ⏳ **Multi-broker routing inside a single Router** — QUEUED FOR NEXT SESSION
+- ✅ **Multi-broker routing inside a single Router** — LANDED 2026-11-01, Router level
+  (`tests/test_multi_broker_router.py`). `Router(brokers=..., default_broker=...)`; an unknown route
+  is rejected, not defaulted; the card signs the routed venue; autonomous stays single-broker. Still
+  single-broker: `LiveMonitor` (equity and positions from one broker, needs the numeraire decision)
+  and the basket gate (one venue; other routes take no new entries). Original note follows.
   (moved 2026-09-08). Today's `Router` holds one `Broker` instance and the
   card displays whatever `router.broker.name` is set to. Turn
   `intent.broker` into a real routing key:
@@ -1286,7 +1333,7 @@ FastAPI side):
    the single source of truth; hand-authored `approval_schemas.py`
    deleted. Legacy paths still resolve via middleware during the
    deprecation window.
-4. ⏳ **Multi-broker routing inside a single Router** — QUEUED FOR NEXT
+4. ✅ (landed 2026-11-01, see Sub-obj 4) **Multi-broker routing inside a single Router** — QUEUED FOR NEXT
    SESSION. `Router(brokers: dict[str, Broker], default: str)`; dispatch
    inside `submit()` selects by `intent.broker` (falls back to `default`).
    Watch for merge interaction with `629594c` (kill-switch / gross-
