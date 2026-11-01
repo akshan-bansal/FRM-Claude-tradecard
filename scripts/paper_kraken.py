@@ -46,7 +46,7 @@ from trading_live_claude.intel.overlay import IntelSnapshot
 from trading_live_claude.intel.routing import OverlayProvider
 from trading_live_claude.intel.vs_engine import MarketContext, VSInvestmentEngine
 from trading_live_claude.intel.worldmonitor import WorldMonitorClient
-from trading_live_claude.monitor.live_loop import LiveMonitor, MonitorEvent
+from trading_live_claude.monitor.live_loop import LiveMonitor, MonitorEvent, monitor_policy
 from trading_live_claude.portfolio.sleeve_bias import sleeve_conviction_bias
 from trading_live_claude.risk.sizing import PositionSizer
 from trading_live_claude.strategies import STRATEGIES
@@ -280,6 +280,7 @@ def main() -> None:
         weight_bias_for=_weight_bias_for,
         overlay_for=overlay_for,
         interpret_for=interpret_for,
+        **monitor_policy(settings),
     )
     monitor.run_forever(max_iterations=args.iterations or None)
 

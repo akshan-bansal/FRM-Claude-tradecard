@@ -10,6 +10,8 @@ class MacdSignalCross(Strategy):
     """MACD line / signal-line crossover. Long-only."""
 
     name = "macd"
+    # Emits ``entry_level`` for per-symbol opt-in; the monitor acts on ``entry`` alone by default.
+    supports_level_trigger: bool = True
     description = "MACD line crosses signal line"
 
     def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9, allow_short: bool = False, atr_window: int = 14) -> None:
@@ -31,6 +33,7 @@ class MacdSignalCross(Strategy):
         cross_up = (out["macd"] > out["signal"]) & (out["macd"].shift(1) <= out["signal"].shift(1))
         cross_dn = (out["macd"] < out["signal"]) & (out["macd"].shift(1) >= out["signal"].shift(1))
         out["entry"] = cross_up.astype(int)
+        out["entry_level"] = (out["macd"] > out["signal"]).astype(int)
         out["exit"] = cross_dn.astype(int)
         if self.allow_short:  # symmetric MACD short below the signal line
             out["short_entry"] = cross_dn.astype(int)

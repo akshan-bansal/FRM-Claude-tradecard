@@ -24,6 +24,8 @@ from ..base import Strategy, StrategyContext
 
 class PairsZScore(Strategy):
     name = "pairs"
+    # Emits ``entry_level`` for per-symbol opt-in; the monitor acts on ``entry`` alone by default.
+    supports_level_trigger: bool = True
     description = "Z-score spread reversion, static hedge (research-only; needs paired router)"
 
     def __init__(self, window: int = 30, entry_z: float = 2.0, exit_z: float = 0.5) -> None:
@@ -43,6 +45,7 @@ class PairsZScore(Strategy):
         out["spread_z"] = zscore(out["spread"], self.window)
         prev = out["spread_z"].shift(1)
         out["entry"] = ((prev <= -self.entry_z) & (out["spread_z"] > -self.entry_z)).astype(int)
+        out["entry_level"] = (out["spread_z"] <= -self.entry_z).astype(int)
         out["exit"] = (out["spread_z"].abs() <= self.exit_z).astype(int)
         out["size_hint"] = 1.0
         out["atr"] = (out["spread"].rolling(self.window).std() * out["close"]).fillna(out["close"] * 0.02)
@@ -59,6 +62,8 @@ class KalmanPairs(Strategy):
     """
 
     name = "kalman_pairs"
+    # Emits ``entry_level`` for per-symbol opt-in; the monitor acts on ``entry`` alone by default.
+    supports_level_trigger: bool = True
     description = "Kalman time-varying hedge ratio + Engle-Granger gate (research-only)"
 
     def __init__(self, delta: float = 1e-4, entry_z: float = 2.0, exit_z: float = 0.5,
@@ -103,6 +108,7 @@ class KalmanPairs(Strategy):
             gate = settled & bool(res.cointegrated)
 
         out["entry"] = (((prev <= -self.entry_z) & (z > -self.entry_z)) & gate).astype(int)
+        out["entry_level"] = ((z <= -self.entry_z) & gate).astype(int)
         out["exit"] = (z.abs() <= self.exit_z).astype(int)
         # Conviction grows with how stretched the spread was; capped to [0, 1].
         out["signal_strength"] = (prev.abs() / (2.0 * self.entry_z)).clip(0.0, 1.0).fillna(0.0)

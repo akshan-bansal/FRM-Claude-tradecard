@@ -9,7 +9,9 @@ Implementers override ``generate_signals(df)`` to add at least the columns:
     was already satisfied on the previous bar. Emit alongside ``entry`` for
     strategies where BOTH triggers are meaningful. See :class:`Strategy`
     class attribute ``supports_level_trigger`` and the LiveMonitor's
-    open-position guard, which prevents level-fired re-entries. 2026-09-09.)
+    open-position guard, which prevents level-fired re-entries. 2026-09-09.) A strategy
+    whose ``entry`` already is a state (``ts_momentum``, ``dual_ma``, ``vol_target``, ...)
+    has nothing to add and does not emit it.
   * optional ``signal_strength`` -> float in [0, 1]; a *graded* candidate strength
     used by the scoring/precision stage. Defaults to the binary ``entry`` value
     when absent (see ``candidate_strength`` in ``signals.generator``).
@@ -64,6 +66,10 @@ class Strategy(ABC):
     # open-position guard prevents re-entry from level-triggered re-fires. Default False
     # keeps every existing strategy on event-only (backward compatible).
     supports_level_trigger: bool = False
+    # Whether the monitor acts on that column when no per-symbol ``entry_triggers`` setting
+    # says otherwise. Emitting the column does not turn it on: acting on level is a family
+    # opt-in, and backtests read ``entry`` alone either way.
+    level_trigger_default: bool = False
 
     def __init__(self, **params: object) -> None:
         self.params = params

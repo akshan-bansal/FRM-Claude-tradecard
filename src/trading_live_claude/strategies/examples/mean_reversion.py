@@ -62,6 +62,8 @@ class ZScoreOU(Strategy):
     """
 
     name = "zscore_ou"
+    # Emits ``entry_level`` for per-symbol opt-in; the monitor acts on ``entry`` alone by default.
+    supports_level_trigger: bool = True
     description = "Rolling z-score mean reversion"
 
     def __init__(self, window: int = 20, entry_z: float = 2.0, exit_z: float = 0.0, atr_window: int = 14) -> None:
@@ -80,6 +82,7 @@ class ZScoreOU(Strategy):
         out["atr"] = atr(out, self.atr_window)
         # Confirmed reversal: z crosses back UP through -entry_z (was stretched, now turning).
         out["entry"] = ((z.shift(1) < -self.entry_z) & (z >= -self.entry_z)).astype(int)
+        out["entry_level"] = (z < -self.entry_z).astype(int)
         out["exit"] = (z > self.exit_z).astype(int)
         out["signal_strength"] = (-z / (self.entry_z * 1.5)).clip(0.0, 1.0).fillna(0.0)
         return out

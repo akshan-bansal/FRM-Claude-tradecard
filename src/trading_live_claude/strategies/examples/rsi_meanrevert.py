@@ -14,6 +14,8 @@ class RsiMeanRevert(Strategy):
     """
 
     name = "rsi_meanrevert"
+    # Emits ``entry_level`` for per-symbol opt-in; the monitor acts on ``entry`` alone by default.
+    supports_level_trigger: bool = True
     description = "Long when RSI exits oversold; flat when RSI reverts to mean"
 
     def __init__(self, window: int = 14, oversold: float = 30.0, neutral: float = 50.0, atr_window: int = 14) -> None:
@@ -32,6 +34,7 @@ class RsiMeanRevert(Strategy):
         out["atr"] = atr(out, self.atr_window)
         prev = out["rsi"].shift(1)
         out["entry"] = ((prev <= self.oversold) & (out["rsi"] > self.oversold)).astype(int)
+        out["entry_level"] = (out["rsi"] <= self.oversold).astype(int)
         out["exit"] = ((prev <= self.neutral) & (out["rsi"] > self.neutral)).astype(int)
         out["size_hint"] = 1.0
         # Graded conviction: how far below the neutral line RSI sits (more oversold = stronger).

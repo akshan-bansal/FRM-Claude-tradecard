@@ -30,6 +30,8 @@ class TurnOfMonth(Strategy):
     """
 
     name = "turn_of_month"
+    # Emits ``entry_level`` for per-symbol opt-in; the monitor acts on ``entry`` alone by default.
+    supports_level_trigger: bool = True
     description = "Turn-of-month seasonal window"
 
     def __init__(self, pre: int = 3, post: int = 3, atr_window: int = 14) -> None:
@@ -51,6 +53,7 @@ class TurnOfMonth(Strategy):
         prev = in_win.shift(1, fill_value=False)
         trend_ok = out["close"] > sma(out["close"], TREND_WINDOW)
         out["entry"] = (in_win & ~prev & trend_ok).astype(int)
+        out["entry_level"] = (in_win & trend_ok).astype(int)
         out["exit"] = (~in_win & prev).astype(int)
         out["signal_strength"] = in_win.astype(float)
         return out
@@ -90,6 +93,8 @@ class MonthOfYear(Strategy):
     """
 
     name = "month_of_year"
+    # Emits ``entry_level`` for per-symbol opt-in; the monitor acts on ``entry`` alone by default.
+    supports_level_trigger: bool = True
     description = "Favorable-months seasonal hold"
 
     def __init__(self, months: tuple[int, ...] = (11, 12, 1, 2, 3, 4), atr_window: int = 14) -> None:
@@ -108,6 +113,7 @@ class MonthOfYear(Strategy):
         prev = favorable.shift(1, fill_value=False)
         trend_ok = out["close"] > sma(out["close"], TREND_WINDOW)
         out["entry"] = (favorable & ~prev & trend_ok).astype(int)
+        out["entry_level"] = (favorable & trend_ok).astype(int)
         out["exit"] = (~favorable & prev).astype(int)
         out["signal_strength"] = favorable.astype(float)
         return out

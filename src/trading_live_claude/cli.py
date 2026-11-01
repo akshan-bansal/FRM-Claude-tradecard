@@ -43,6 +43,7 @@ from .integrations.lean_algorithm import (
 from .logging_setup import configure_logging, get_logger
 from .monitor import Alerter, LiveMonitor
 from .monitor.alerter import AlertConfig
+from .monitor.live_loop import monitor_policy
 from .optimize import PARAM_GRIDS, optimize_parameters
 from .risk import KillSwitch, PositionSizer
 from .scoring.objective import DEFAULT_METRIC_WEIGHTS, OBJECTIVES, make_dot_product
@@ -457,6 +458,7 @@ def signal(
         overlay_for=overlay_for,
         interpret_for=interpret_for if intel_overlay else None,
         weight_bias_for=weight_bias_for,
+        **monitor_policy(settings),
     )
     monitor.run_forever(max_iterations=iterations or None)
 
@@ -522,6 +524,7 @@ def paper(
         account_currency=settings.account_currency,
         risk_model=settings.risk_model,
         heat_aggregation=settings.heat_aggregation,
+        **monitor_policy(settings),
     )
     monitor.run_forever(max_iterations=iterations or None)
 
@@ -584,6 +587,7 @@ def live(
         account_currency=settings.account_currency,
         risk_model=settings.risk_model,
         heat_aggregation=settings.heat_aggregation,
+        **monitor_policy(settings),
     )
     monitor.run_forever(max_iterations=iterations or None)
 
@@ -1488,6 +1492,7 @@ def autonomous_run() -> None:
         account_currency=settings.account_currency,
         risk_model=settings.risk_model,
         heat_aggregation=settings.heat_aggregation,
+        **monitor_policy(settings),
     )
     log.info(
         "autonomous.loop.start",
@@ -1580,6 +1585,7 @@ def place_order(
     existing_positions = broker.positions(account_number)
     existing_risk = sum(abs(p.openQuantity) * p.currentPrice * 0.02 for p in existing_positions)
     open_positions_count = sum(1 for p in existing_positions if p.openQuantity != 0)
+    open_notional = sum(abs(p.openQuantity) * p.currentPrice for p in existing_positions)
 
     risk_dollars = abs(shares * (stop - 0.0)) if action == OrderAction.SELL else abs(shares * (0.0 - stop))
     # Better: risk = shares * |entry - stop|. We don't have entry; use latest quote.
@@ -1638,6 +1644,7 @@ def place_order(
         equity=equity,
         existing_risk=existing_risk,
         open_positions=open_positions_count,
+        current_open_notional=open_notional,
     )
     payload = {
         "submitted": placed is not None,

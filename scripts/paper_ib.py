@@ -61,7 +61,7 @@ from trading_live_claude.data.market import MarketData
 from trading_live_claude.execution.approval import wire_card_approval
 from trading_live_claude.execution.router import Router
 from trading_live_claude.intel.vs_engine import MarketContext, VSInvestmentEngine
-from trading_live_claude.monitor.live_loop import LiveMonitor, MonitorEvent
+from trading_live_claude.monitor.live_loop import LiveMonitor, MonitorEvent, monitor_policy
 from trading_live_claude.portfolio.allocator import PortfolioAllocator
 from trading_live_claude.risk.sizing import PositionSizer
 from trading_live_claude.strategies import STRATEGIES
@@ -316,6 +316,19 @@ def main() -> None:
         sym_list = list(dict.fromkeys(sym_list + futures_list))
         print(f"[ib-paper] {len(futures_list)} futures roots registered as FUT front-month: "
               f"{futures_list}", flush=True)
+
+    # Pre-flight symbol validation, as paper_kraken.py and `signal` do: refuse to start on a symbol
+    # that would fail on candles at runtime. After the FUT registration above, so a futures root
+    # resolves as the future. PaperBroker.candles delegates to this feed anyway.
+    from trading_live_claude.analysis.symbol_validation import (
+        format_validation_banner,
+        refuse_launch_on_hard_failures,
+        validate_sleeve,
+    )
+    _validations = validate_sleeve(feed, sym_list)
+    print(format_validation_banner(_validations), flush=True)
+    refuse_launch_on_hard_failures(_validations)
+
     strat = STRATEGIES[args.strategy]()
 
     smap: dict[str, object] = {}
@@ -493,6 +506,7 @@ def main() -> None:
         overlay_for=overlay_for,
         interpret_for=interpret_for,
         weight_bias_for=_weight_bias_for,
+        **monitor_policy(settings),
     )
 
     if tickle is not None:

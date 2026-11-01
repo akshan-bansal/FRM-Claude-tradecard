@@ -20,6 +20,7 @@ class BollingerMeanRevert(Strategy):
     # monitor starts while a symbol is already oversold and the event-triggered path
     # has no fresh cross to point at.
     supports_level_trigger: bool = True
+    level_trigger_default: bool = True
 
     def __init__(self, window: int = 20, n_std: float = 2.0, atr_window: int = 14) -> None:
         super().__init__(window=window, n_std=n_std, atr_window=atr_window)
