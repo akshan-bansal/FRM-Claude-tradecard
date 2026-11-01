@@ -305,11 +305,19 @@ class Router:
         if route not in self.brokers:
             reasons.append(f"unknown broker {route!r}: router holds {sorted(self.brokers)}")
 
-        # 1. kill switch
+        # 1. kill switch. A halt stops new risk, not the way out of it: an order that only reduces
+        # a position the routed broker holds still passes. If the holding cannot be read, nothing
+        # shows the order reduces anything, so it is refused like any other.
         halted = self.kill_switch.state().halted
         observed["kill_switch_halted"] = halted
         if halted:
-            reasons.append("kill-switch tripped")
+            held = self._held_quantity(intent, route)
+            observed["kill_switch_held"] = held
+            closes = held is not None and intent.shares > 0 and (
+                (intent.action == OrderAction.SELL and held >= intent.shares)
+                or (intent.action in (OrderAction.BUY, OrderAction.BUY_TO_COVER) and -held >= intent.shares))
+            if not closes:
+                reasons.append("kill-switch tripped")
 
         # 2. equity available
         if equity <= 0:
@@ -689,6 +697,18 @@ class Router:
 
     # ----- routing -------------------------------------------------------------
 
+    def _held_quantity(self, intent: OrderIntent, route: str) -> float | None:
+        """What the routed broker holds of the intent's symbol, signed; None if it cannot be read."""
+        broker = self.brokers.get(route)
+        if broker is None:
+            return None
+        try:
+            positions = broker.positions(intent.account_number)
+        except Exception as e:                  # a read failure must not look like a holding
+            log.error("router.held_quantity_failed", symbol=intent.symbol, error=str(e))
+            return None
+        return float(sum(p.openQuantity for p in positions if p.symbol == intent.symbol))
+
     def route(self, intent: OrderIntent) -> str:
         """The route an intent asks for. It may not be one this router holds; the gate checks."""
         return intent.broker or self.default_broker
@@ -767,6 +787,25 @@ class Router:
                            strategy_id=intent.strategy if intent is not None else None,
                            strategy_version=self._strategy_version(intent) if intent else None,
                            risk_check_version=self.risk_check_version())
+
+    @staticmethod
+    def limits_from(settings: Any) -> dict[str, Any]:
+        """``build_default`` keyword arguments for every risk knob in ``config/trading.yaml``.
+
+        Every runner passes this, so a knob means the same thing in paper and in live, and a new one
+        only has to be added here.
+        """
+        return {
+            "cap_pct": settings.portfolio_heat_cap,
+            "max_drawdown_pct": settings.max_drawdown_kill_switch,
+            "daily_loss_limit_pct": settings.daily_loss_limit_pct,
+            "max_open_positions": settings.max_open_positions,
+            "min_ticket_usd": settings.min_ticket_usd,
+            "max_gross_leverage": settings.max_gross_leverage,
+            "max_position_notional_pct": settings.max_position_notional_pct,
+            "force_exit_atr_mult": settings.force_exit_atr_mult,
+            "on_size_cap_breach": settings.on_size_cap_breach,
+        }
 
     @classmethod
     def build_default(

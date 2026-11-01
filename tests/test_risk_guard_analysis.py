@@ -129,7 +129,8 @@ def test_enough_record_needs_days_and_venues(tmp_path: Path) -> None:
 def test_wiring_check_sees_the_repo_as_it_is() -> None:
     w = rga.wiring_checks(Path(__file__).resolve().parents[1] / "src" / "trading_live_claude")
     assert w["monitor can call Router.check_forced_exits (needs `forced_exits: true`)"]
-    assert w["a tripped kill-switch still lets exits through"] is False    # pinned: see test_monitor_guards
+    assert w["a tripped kill-switch still lets exits through"]
+    assert w["live books auto-trip the kill-switch (EquityWatch)"]
     assert w["monitor passes open notional to the gross-leverage gate"]
     assert w["card path passes open notional through"]
     assert w["place-order passes open notional"]

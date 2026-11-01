@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -15,6 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .analysis import build_signal_matrix, render_matrix_markdown
+from .analysis.symbol_validation import preflight
 from .audit.ledger import Ledger
 from .backtest import BacktestEngine
 from .brokers import PaperBroker, QuestradeBroker
@@ -23,7 +25,9 @@ from .config import get_settings
 from .daemon import AutonomousDaemon
 from .data import CandleCache, MarketData
 from .execution import AUTONOMOUS_ENV_VAR, AutonomousNotEnabled, LiveModeNotConfirmed, Router
+from .execution.approval import wire_card_approval
 from .execution.asset_router import ASSET_CLASSES, AssetRouter
+from .execution.basket import attach_basket_gate
 from .execution.daily_budget import DailyBudget
 from .integrations import (
     QuantConnectClient,
@@ -40,12 +44,14 @@ from .integrations.lean_algorithm import (
     render_candlestick_lean_algorithm,
     render_lean_algorithm,
 )
+from .intel.vs_engine import MarketContext, VSInvestmentEngine
 from .logging_setup import configure_logging, get_logger
 from .monitor import Alerter, LiveMonitor
 from .monitor.alerter import AlertConfig
 from .monitor.live_loop import monitor_policy
 from .optimize import PARAM_GRIDS, optimize_parameters
 from .risk import KillSwitch, PositionSizer
+from .risk.spectral_var import attach_spectral_gate
 from .scoring.objective import DEFAULT_METRIC_WEIGHTS, OBJECTIVES, make_dot_product
 from .scoring.qc_bridge import rank_qc_library
 from .scoring.routing import (
@@ -262,16 +268,7 @@ def signal(
     strat = _strategy_or_die(strategy)
     sizer = PositionSizer(risk_pct=settings.risk_pct_per_trade)
 
-    smap: dict[str, Strategy] = {}
-    for pair in strategy_map.split(","):
-        pair = pair.strip()
-        if not pair:
-            continue
-        if "=" not in pair:
-            console.print(f"[red]Bad --strategy-map entry '{pair}'. Use SYMBOL=strategy.[/red]")
-            raise typer.Exit(code=2)
-        sym, sname = pair.split("=", 1)
-        smap[sym.strip().upper()] = _strategy_or_die(sname.strip())
+    smap = _strategy_map_or_die(strategy_map)
 
     sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     for sym in smap:  # include map-only symbols in what we monitor
@@ -302,15 +299,7 @@ def signal(
     # would 404 on candles at runtime (the ARX.TO / RIG.TO Questrade failure mode
     # seen 2026-09-08 / 2026-09-09). Uses the underlying Questrade feed rather than
     # the paper wrapper since PaperBroker.candles delegates anyway.
-    from .analysis.symbol_validation import (
-        format_validation_banner,
-        refuse_launch_on_hard_failures,
-        validate_sleeve as _validate_sleeve,
-    )
-    _sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
-    _validations = _validate_sleeve(broker, _sym_list)
-    console.print(format_validation_banner(_validations))
-    refuse_launch_on_hard_failures(_validations)
+    preflight(broker, [s.strip() for s in symbols.split(",") if s.strip()], emit=console.print)
 
     ledger = _session_ledger(settings, stream="qt", mode="paper" if paper else "dry-run",
                              session_id=getattr(exec_broker, "session_id", None),
@@ -319,54 +308,11 @@ def signal(
         mode="paper" if paper else "dry-run",
         broker=exec_broker,
         state_dir=settings.state_dir,
-        cap_pct=settings.portfolio_heat_cap,
-        max_drawdown_pct=settings.max_drawdown_kill_switch,
-        daily_loss_limit_pct=settings.daily_loss_limit_pct,
-        max_open_positions=settings.max_open_positions,
-        min_ticket_usd=settings.min_ticket_usd,
+        **Router.limits_from(settings),
         ledger=ledger,
     )
 
-    alerter = Alerter(
-        AlertConfig(
-            telegram_bot_token=settings.telegram_bot_token,
-            telegram_chat_id=settings.telegram_chat_id,
-            smtp_host=settings.smtp_host,
-            smtp_user=settings.smtp_user,
-            smtp_pass=settings.smtp_pass,
-            email_to=settings.alert_email_to,
-        )
-    )
-
-    from .analysis.universe import validated_for as _validated_for
-    from .intel.notification import (
-        format_entry as _fmt_entry,
-        format_exit as _fmt_exit,
-        format_hedge as _fmt_hedge,
-    )
-
-    def _emit(ev) -> None:
-        if ev.kind == "hedge":
-            title, body = _fmt_hedge(symbol=ev.symbol, detail=ev.detail)
-            alerter.send(title, body)
-        elif ev.kind == "entry":
-            sname = smap[ev.symbol].name if ev.symbol in smap else strat.name
-            # Statistical evidence for the selection — the walk-forward record, if this symbol
-            # cleared the gate. When it hasn't, format_entry emits the honest disclaimer instead.
-            wf_record = _validated_for(ev.symbol)
-            title, body = _fmt_entry(
-                strategy_name=sname, symbol=ev.symbol, price=ev.price, detail=ev.detail,
-                is_transition=getattr(ev, "is_transition", True),
-                poll_count=getattr(ev, "poll_count", 1),
-                wf_record=wf_record,
-            )
-            alerter.send(title, body)
-        elif ev.kind == "exit":
-            sname = smap[ev.symbol].name if ev.symbol in smap else strat.name
-            shares = int(ev.detail.get("shares", 0)) if isinstance(ev.detail, dict) else 0
-            title, body = _fmt_exit(strategy_name=sname, symbol=ev.symbol,
-                                     price=ev.price, shares=shares)
-            alerter.send(title, body)
+    _emit = _alert_emitter(_build_alerter(settings), strat, smap)
 
     overlay_for = None
     interpret_for = None
@@ -505,11 +451,7 @@ def paper(
         mode="paper",
         broker=pb,
         state_dir=settings.state_dir,
-        cap_pct=settings.portfolio_heat_cap,
-        max_drawdown_pct=settings.max_drawdown_kill_switch,
-        daily_loss_limit_pct=settings.daily_loss_limit_pct,
-        max_open_positions=settings.max_open_positions,
-        min_ticket_usd=settings.min_ticket_usd,
+        **Router.limits_from(settings),
         ledger=ledger,
     )
     monitor = LiveMonitor(
@@ -536,8 +478,34 @@ def live(
     interval: int = typer.Option(60, help="Poll interval (seconds)"),
     confirm: str = typer.Option(..., help='Confirmation phrase. Must equal: I UNDERSTAND THE RISK'),
     iterations: int = typer.Option(0, help="Run N iterations and stop. 0 = forever."),
+    strategy_map: str = typer.Option(
+        "", help="Per-symbol strategy overrides, e.g. 'XIC.TO=bollinger,BNS.TO=momentum_breakout'"
+    ),
+    level: bool = typer.Option(
+        False, "--level/--edge",
+        help="Alert on every poll a name is AT an entry/exit level, not only when it flips into one.",
+    ),
+    require_card: bool = typer.Option(
+        False, "--require-card",
+        help="Route every accepted intent through the ApprovalRouter: a TradeCard must ACCEPT it.",
+    ),
+    card_shim_port: int = typer.Option(8787, help="Port for the approval shim under --require-card."),
+    card_ttl: float = typer.Option(90.0, help="Seconds a card prompt stays open."),
+    require_basket: bool = typer.Option(
+        False, "--require-basket", help="Entries need a card-signed Questrade basket (scripts/basket.py).",
+    ),
+    spectral_var_cap: float = typer.Option(
+        None, help="Turn on the spectral VaR gate: cap an entry's tail loss at this fraction of equity.",
+    ),
+    spectral_var_level: float = typer.Option(0.99, help="Spectral VaR confidence level."),
+    spectral_var_horizon: int = typer.Option(1, help="Spectral VaR horizon in days."),
 ) -> None:
-    """LIVE trading against your real Questrade account. Reads `state/HALTED` for kill-switch."""
+    """LIVE trading against your real Questrade account. Reads `state/HALTED` for kill-switch.
+
+    Takes the same gates and approvals as the paper runners, and every limit from the same
+    `config/trading.yaml` knobs. What differs is what has to: the real broker, the typed
+    confirmation, and a ledger whose failed write stops the order.
+    """
     settings = get_settings()
     if settings.execution_mode != "live":
         console.print('[red]Set EXECUTION_MODE=live in .env before using `trading live`.[/red]')
@@ -552,6 +520,12 @@ def live(
         raise typer.Exit(code=1)
     account_number = settings.questrade_account_number or accounts[0].number
 
+    strat = _strategy_or_die(strategy)
+    smap = _strategy_map_or_die(strategy_map)
+    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    sym_list += [sym for sym in smap if sym not in sym_list]
+    preflight(broker, sym_list, emit=console.print)
+
     # Live trades must not go unrecorded: strict, so a failed ledger write stops the order.
     ledger = _session_ledger(settings, stream="qt-live", mode="live", strict=True)
     try:
@@ -559,11 +533,7 @@ def live(
             mode="live",
             broker=broker,
             state_dir=settings.state_dir,
-            cap_pct=settings.portfolio_heat_cap,
-            max_drawdown_pct=settings.max_drawdown_kill_switch,
-            daily_loss_limit_pct=settings.daily_loss_limit_pct,
-            max_open_positions=settings.max_open_positions,
-            min_ticket_usd=settings.min_ticket_usd,
+            **Router.limits_from(settings),
             live_confirmation=confirm,
             ledger=ledger,
         )
@@ -571,8 +541,25 @@ def live(
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(code=2) from e
 
+    if attach_basket_gate(router, "questrade", Path(settings.state_dir), enabled=require_basket):
+        console.print("[cyan]basket gate ON:[/cyan] entries need a card-signed questrade basket.")
+    spectral = attach_spectral_gate(router, broker, cap_pct=spectral_var_cap, level=spectral_var_level,
+                                    horizon_days=spectral_var_horizon)
+    if spectral is not None:
+        console.print(f"[cyan]spectral VaR gate ON:[/cyan] {spectral.thresholds()}")
+    if require_card:
+        engine = VSInvestmentEngine()
+        wiring = wire_card_approval(
+            router, shim_port=card_shim_port, ttl_seconds=card_ttl,
+            thesis_fn=lambda intent, venue: engine.explain(intent, broker=venue, market=MarketContext()),
+            db_path=Path(settings.state_dir) / "approval.db", state_dir=Path(settings.state_dir),
+            session_id=getattr(ledger, "session_id", None),
+        )
+        router = wiring.router
+        console.print(f"[cyan]--require-card ON:[/cyan] approval shim at {wiring.shim_url}. "
+                      f"Card auth token: {wiring.auth_token}")
+
     market = MarketData(broker, cache=CandleCache(settings.data_cache_dir))
-    strat = _strategy_or_die(strategy)
     sizer = PositionSizer(risk_pct=settings.risk_pct_per_trade)
 
     monitor = LiveMonitor(
@@ -582,8 +569,11 @@ def live(
         sizer=sizer,
         router=router,
         account_number=account_number,
-        symbols=[s.strip().upper() for s in symbols.split(",") if s.strip()],
+        symbols=sym_list,
         interval_seconds=interval,
+        on_event=_alert_emitter(_build_alerter(settings), strat, smap),
+        emit_on_change_only=not level,
+        strategy_map=smap or None,
         account_currency=settings.account_currency,
         risk_model=settings.risk_model,
         heat_aggregation=settings.heat_aggregation,
@@ -594,7 +584,7 @@ def live(
 
 @app.command()
 def kill(reason: str = typer.Option("manual", help="Reason recorded in state/HALTED")) -> None:
-    """Trip the kill-switch immediately. Live router refuses orders while tripped."""
+    """Trip the kill-switch immediately. While tripped the router takes nothing but closing orders."""
     settings = get_settings()
     KillSwitch(settings.state_dir).trip(reason=reason)
     console.print(f"[red]Kill-switch tripped: {reason}[/red]")
@@ -1325,6 +1315,60 @@ from .audit.cli import audit_app  # noqa: E402  (registered beside the other sub
 app.add_typer(audit_app, name="audit")
 
 
+def _strategy_map_or_die(text: str) -> dict[str, Strategy]:
+    """Parse ``SYM=strategy,SYM=strategy`` into per-symbol strategy instances."""
+    smap: dict[str, Strategy] = {}
+    for pair in text.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            console.print(f"[red]Bad --strategy-map entry '{pair}'. Use SYMBOL=strategy.[/red]")
+            raise typer.Exit(code=2)
+        sym, sname = pair.split("=", 1)
+        smap[sym.strip().upper()] = _strategy_or_die(sname.strip())
+    return smap
+
+
+def _alert_emitter(alerter: Alerter, strat: Strategy, smap: dict[str, Strategy]) -> Callable[..., None]:
+    """The ``on_event`` for a monitor: format each entry, exit and hedge event and send it."""
+    from .analysis.universe import validated_for as _validated_for
+    from .intel.notification import (
+        format_entry as _fmt_entry,
+    )
+    from .intel.notification import (
+        format_exit as _fmt_exit,
+    )
+    from .intel.notification import (
+        format_hedge as _fmt_hedge,
+    )
+
+    def _emit(ev) -> None:
+        if ev.kind == "hedge":
+            title, body = _fmt_hedge(symbol=ev.symbol, detail=ev.detail)
+            alerter.send(title, body)
+        elif ev.kind == "entry":
+            sname = smap[ev.symbol].name if ev.symbol in smap else strat.name
+            # Statistical evidence for the selection — the walk-forward record, if this symbol
+            # cleared the gate. When it hasn't, format_entry emits the honest disclaimer instead.
+            wf_record = _validated_for(ev.symbol)
+            title, body = _fmt_entry(
+                strategy_name=sname, symbol=ev.symbol, price=ev.price, detail=ev.detail,
+                is_transition=getattr(ev, "is_transition", True),
+                poll_count=getattr(ev, "poll_count", 1),
+                wf_record=wf_record,
+            )
+            alerter.send(title, body)
+        elif ev.kind == "exit":
+            sname = smap[ev.symbol].name if ev.symbol in smap else strat.name
+            shares = int(ev.detail.get("shares", 0)) if isinstance(ev.detail, dict) else 0
+            title, body = _fmt_exit(strategy_name=sname, symbol=ev.symbol,
+                                     price=ev.price, shares=shares)
+            alerter.send(title, body)
+
+    return _emit
+
+
 def _build_alerter(settings) -> Alerter:
     return Alerter(
         AlertConfig(
@@ -1446,6 +1490,8 @@ def autonomous_run() -> None:
         raise typer.Exit(code=1)
     account_number = settings.questrade_account_number or accounts[0].number
 
+    preflight(broker, settings.autonomous_symbols_list, emit=console.print)
+
     market = MarketData(broker, cache=CandleCache(settings.data_cache_dir))
     strat = _strategy_or_die(settings.autonomous_strategy)
     sizer = PositionSizer(risk_pct=settings.risk_pct_per_trade)
@@ -1457,11 +1503,7 @@ def autonomous_run() -> None:
             mode="autonomous",
             broker=broker,
             state_dir=settings.state_dir,
-            cap_pct=settings.portfolio_heat_cap,
-            max_drawdown_pct=settings.max_drawdown_kill_switch,
-            daily_loss_limit_pct=settings.daily_loss_limit_pct,
-            max_open_positions=settings.max_open_positions,
-            min_ticket_usd=settings.min_ticket_usd,
+            **Router.limits_from(settings),
             daily_max_trades=settings.autonomous_daily_max_trades,
             daily_max_notional_usd=settings.autonomous_daily_max_notional_usd,
             ledger=ledger,
@@ -1619,11 +1661,7 @@ def place_order(
         mode="paper" if chosen_mode == "paper" else ("dry-run" if chosen_mode == "dry-run" else "autonomous"),
         broker=broker,
         state_dir=settings.state_dir,
-        cap_pct=settings.portfolio_heat_cap,
-        max_drawdown_pct=settings.max_drawdown_kill_switch,
-        daily_loss_limit_pct=settings.daily_loss_limit_pct,
-        max_open_positions=settings.max_open_positions,
-        min_ticket_usd=settings.min_ticket_usd,
+        **Router.limits_from(settings),
         daily_max_trades=settings.autonomous_daily_max_trades,
         daily_max_notional_usd=settings.autonomous_daily_max_notional_usd,
         ledger=ledger,
@@ -1631,11 +1669,7 @@ def place_order(
         mode="paper" if chosen_mode == "paper" else "dry-run",
         broker=broker,
         state_dir=settings.state_dir,
-        cap_pct=settings.portfolio_heat_cap,
-        max_drawdown_pct=settings.max_drawdown_kill_switch,
-        daily_loss_limit_pct=settings.daily_loss_limit_pct,
-        max_open_positions=settings.max_open_positions,
-        min_ticket_usd=settings.min_ticket_usd,
+        **Router.limits_from(settings),
         ledger=ledger,
     )
 

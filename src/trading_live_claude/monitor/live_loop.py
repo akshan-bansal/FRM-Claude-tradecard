@@ -30,6 +30,7 @@ from ..intel.overlay import OverlayDecision
 from ..logging_setup import get_logger
 from ..models.risk_mitigation import combine
 from ..models.strategy_risk import scalar_from_signals
+from ..risk.equity_watch import EquityWatch
 from ..risk.hedge import HedgePolicy, hedge_shares, hedge_weight, rebalance_delta
 from ..risk.risk_model import HeatAggregation, RiskModel, per_trade_risk, portfolio_risk
 from ..risk.sizing import PositionSizer
@@ -200,6 +201,16 @@ class LiveMonitor:
         self.forced_exits = forced_exits
         self._atr_at_entry: dict[str, float] = {}
         self._entry_prices: dict[str, float] = {}
+        # A live book's equity journal and drawdown auto-halt: what PaperBroker._journal_equity does
+        # for a paper one on every mark. Not in dry-run, where a read-only look at a real account must
+        # not be able to halt whatever else is trading on it.
+        inner = getattr(router, "inner", router)
+        self._book: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._equity_watch = (
+            EquityWatch(inner.kill_switch, account=account_number, mode=inner.mode,
+                        currency=account_currency,
+                        session_id=getattr(getattr(inner, "ledger", None), "session_id", None))
+            if getattr(inner, "mode", None) in ("live", "autonomous") else None)
 
     def _strategy_for(self, symbol: str) -> Strategy:
         """The per-symbol strategy, falling back to the default ``strategy``."""
@@ -289,6 +300,9 @@ class LiveMonitor:
         positions = self.broker.positions(self.account_number)
         self._entry_prices = {p.symbol: float(getattr(p, "averageEntryPrice", 0.0) or 0.0)
                               for p in positions}
+        self._book = (sum(float(getattr(p, "currentMarketValue", 0.0) or 0.0) for p in positions),
+                      sum(float(getattr(p, "closedPnl", 0.0) or 0.0) for p in positions),
+                      sum(float(getattr(p, "openPnl", 0.0) or 0.0) for p in positions))
         return {p.symbol: p.openQuantity for p in positions if p.openQuantity != 0}
 
     def step(self) -> list[MonitorEvent]:
@@ -305,6 +319,14 @@ class LiveMonitor:
                 log.warning("monitor.mtm.failed", error=str(e))
         equity = self.broker.equity(self.account_number, currency=self.account_currency)
         open_positions = self._open_positions()
+        # Before any quote, so a quote failure on a held name cannot skip the check, and so the gate
+        # sees a trip on this same poll.
+        if self._equity_watch is not None:
+            try:
+                self._equity_watch.observe(equity, positions_value=self._book[0],
+                                           realized_pnl=self._book[1], unrealized_pnl=self._book[2])
+            except Exception as e:                     # pragma: no cover — never break the poll
+                log.error("monitor.equity_watch.failed", error=str(e))
         # Per-position risk (ATR-stop proxy by default, or a VaR/CVaR tail estimate of the
         # name's returns), then aggregated for the heat gate — a naive sum by default or a
         # covariance-aware combine that credits diversification.

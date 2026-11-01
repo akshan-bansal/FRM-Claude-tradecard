@@ -106,15 +106,8 @@ def main() -> None:
     # Pre-flight symbol validation (2026-09-09). Refuses to start if any sleeve pair
     # would 404 on candles at runtime (the MKR/USD / ARX.TO / RIG.TO failure mode).
     # Uses the Kraken feed directly since PaperBroker.candles delegates to it anyway.
-    from trading_live_claude.analysis.symbol_validation import (
-        format_validation_banner,
-        refuse_launch_on_hard_failures,
-        validate_sleeve as _validate_sleeve,
-    )
-    _sleeve_syms = [e.symbol for e in CRYPTO_SLEEVE.values()]
-    _validations = _validate_sleeve(feed, _sleeve_syms)
-    print(format_validation_banner(_validations), flush=True)
-    refuse_launch_on_hard_failures(_validations)
+    from trading_live_claude.analysis.symbol_validation import preflight
+    preflight(feed, [e.symbol for e in CRYPTO_SLEEVE.values()], emit=lambda s: print(s, flush=True))
 
     ledger = None
     if args.audit_ledger:
@@ -131,11 +124,7 @@ def main() -> None:
         mode="paper",
         broker=exec_broker,
         state_dir=settings.state_dir,
-        cap_pct=settings.portfolio_heat_cap,
-        max_drawdown_pct=settings.max_drawdown_kill_switch,
-        daily_loss_limit_pct=settings.daily_loss_limit_pct,
-        max_open_positions=settings.max_open_positions,
-        min_ticket_usd=settings.min_ticket_usd,
+        **Router.limits_from(settings),
         ledger=ledger,
     )
 

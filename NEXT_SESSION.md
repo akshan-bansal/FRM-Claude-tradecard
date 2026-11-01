@@ -581,13 +581,24 @@ Reading the wiring found what no journal could show:
   entries made earlier in the same poll, as do the heat and open-positions gates.
 * **`check_forced_exits` had no caller.** The "landed" item 3 could never fire. WIRED, opt-in:
   `forced_exits: true`, off by default. Writes a `FORCED_EXIT` ledger row.
-* **OPEN, your decision: a tripped kill-switch rejects exits too.** A loss big enough to trip it leaves
-  the position open and unclosable by the monitor, and the forced exit cannot act exactly when it
-  matters most. Letting exits through loosens a gate. Pinned by
-  `test_tripped_kill_switch_also_blocks_the_forced_exit`.
-* **OPEN, your decision: no auto-halt on live brokers.** `KillSwitch.evaluate` is called only from
-  `PaperBroker._journal_equity`. On `trading live` and `autonomous_run` the drawdown and daily-loss
-  limits never trip; only the manual `trading kill` does.
+* **A tripped kill-switch rejected exits too.** DECIDED and FIXED 2026-11-01: an order that only reduces
+  a position the routed broker holds now passes. A SELL with no position behind it stays refused, since
+  it could open a short, and so does anything when the holding cannot be read.
+* **No auto-halt on live brokers.** DECIDED and FIXED 2026-11-01: `risk/equity_watch.py` gives live and
+  autonomous what `PaperBroker._journal_equity` gives paper, journaling to `state/live_equity.csv`. The
+  peak comes back from the journal and restarts at a human clear. A withdrawal reads as a loss.
+* **`trading.yaml` risk knobs were ignored.** No runner passed `max_gross_leverage`,
+  `max_position_notional_pct`, `force_exit_atr_mult` or `on_size_cap_breach` to the Router, so only their
+  defaults ever applied. FIXED: every runner passes `Router.limits_from(settings)`.
+* **OPEN, your decision: other gates still refuse exits.** The heat cap refuses an exit from a book
+  already over it, the min-ticket gate refuses closing a small remainder, and the autonomous daily
+  budget refuses exits once spent. Pinned by `test_other_gates_still_apply_to_an_exit_under_a_halt`.
+
+`trading live` now mirrors the paper runners (`tests/test_live_parity.py`): pre-flight, alerts,
+`--strategy-map`, `--require-card`, `--require-basket`, the spectral gate, and the same `trading.yaml`
+limits. It differs where it has to: real broker, typed confirmation, strict ledger. Not carried over:
+`--hedge`, which only `signal` has and which would place real UUP orders. The intel hooks are being
+wired by another session.
 
 Original scope follows.
 

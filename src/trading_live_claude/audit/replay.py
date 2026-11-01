@@ -16,8 +16,10 @@ from __future__ import annotations
 import inspect
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
+from ..brokers.base import BrokerError
 from ..brokers.models import OrderAction
 from ..execution.daily_budget import DailyBudgetState
 from ..execution.router import OrderIntent, Router
@@ -39,6 +41,15 @@ class _NullJournal:
 
 class _NullBroker:
     name = "replay"
+
+    def __init__(self, symbol: str = "", held: float | None = None) -> None:
+        self._symbol, self._held = symbol, held
+
+    def positions(self, _account: str) -> list[Any]:
+        """The one read the gate makes of a broker, answered from the record."""
+        if self._held is None:
+            raise BrokerError("the holding could not be read when this row was written")
+        return [SimpleNamespace(symbol=self._symbol, openQuantity=self._held)]
 
     def __getattr__(self, name: str) -> Any:
         raise RuntimeError(f"replay never reaches a broker (called {name})")
@@ -112,7 +123,9 @@ def replay_row(row: Mapping[str, Any]) -> dict[str, Any]:
         return base | {"status": "code changed",
                        "why": "today's Router._gate is not the code that wrote this row"}
     routes = thr.get("brokers") or ["replay"]
-    router = Router(mode="dry-run", brokers={r: _NullBroker() for r in routes},  # type: ignore[misc]
+    held = observed.get("kill_switch_held")
+    router = Router(mode="dry-run",
+                    brokers={r: _NullBroker(str(p["symbol"]), held) for r in routes},  # type: ignore[misc]
                     default_broker=thr.get("default_broker") or routes[0],
                     journal=_NullJournal(),  # type: ignore[arg-type]
                     kill_switch=_KS(bool(observed.get("kill_switch_halted"))),  # type: ignore[arg-type]

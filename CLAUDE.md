@@ -173,6 +173,13 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
   guard (`analysis/venue_calendar.py`), per-symbol `entry_triggers` and `forced_exits` from `trading.yaml`.
 - `supports_level_trigger` means a strategy emits `entry_level`; `level_trigger_default` means the monitor
   acts on it unasked. Backtests read `entry` alone, so emitting the column must never change `entry`.
+- The live runner mirrors the paper runners. Build a runner from `Router.limits_from(settings)`,
+  `monitor_policy(settings)` and `preflight()`; `tests/test_live_parity.py` fails if one stops. A difference
+  between paper and live needs a reason: real broker, typed confirmation, strict ledger.
+- A tripped kill-switch stops new risk; an order that only reduces a position the routed broker holds still
+  passes, checked against the broker in `Router._gate`. The LLM-trader commands still refuse while halted.
+- Live and autonomous books auto-halt through `risk/equity_watch.py`, journaling to `state/live_equity.csv`.
+  Never reset a peak by editing that file; a human `clear-kill` is what restarts the measure.
 - `analysis/symbol_atlas.py` is the cross-broker view of a symbol. It reads the adapters' own helpers:
   change a wire form in the adapter, not in the atlas.
 - `scripts/risk_guard_analysis.py` is how to judge the guards. Under a week of paper data on two venues it

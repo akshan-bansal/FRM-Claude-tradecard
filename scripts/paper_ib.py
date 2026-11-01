@@ -250,11 +250,7 @@ def main() -> None:
         mode="paper",
         broker=exec_broker,
         state_dir=settings.state_dir,
-        cap_pct=settings.portfolio_heat_cap,
-        max_drawdown_pct=settings.max_drawdown_kill_switch,
-        daily_loss_limit_pct=settings.daily_loss_limit_pct,
-        max_open_positions=settings.max_open_positions,
-        min_ticket_usd=settings.min_ticket_usd,
+        **Router.limits_from(settings),
         ledger=ledger,
     )
 
@@ -320,14 +316,8 @@ def main() -> None:
     # Pre-flight symbol validation, as paper_kraken.py and `signal` do: refuse to start on a symbol
     # that would fail on candles at runtime. After the FUT registration above, so a futures root
     # resolves as the future. PaperBroker.candles delegates to this feed anyway.
-    from trading_live_claude.analysis.symbol_validation import (
-        format_validation_banner,
-        refuse_launch_on_hard_failures,
-        validate_sleeve,
-    )
-    _validations = validate_sleeve(feed, sym_list)
-    print(format_validation_banner(_validations), flush=True)
-    refuse_launch_on_hard_failures(_validations)
+    from trading_live_claude.analysis.symbol_validation import preflight
+    preflight(feed, sym_list, emit=lambda s: print(s, flush=True))
 
     strat = STRATEGIES[args.strategy]()
 

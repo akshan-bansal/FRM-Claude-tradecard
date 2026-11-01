@@ -28,6 +28,7 @@ Status semantics:
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -136,7 +137,16 @@ def refuse_launch_on_hard_failures(
         )
 
 
+def preflight(broker: Broker, symbols: list[str], *, emit: Callable[[str], object]) -> list[SymbolValidation]:
+    """The launch check every runner makes: validate, show the banner, refuse on a hard failure."""
+    results = validate_sleeve(broker, symbols)
+    emit(format_validation_banner(results))
+    refuse_launch_on_hard_failures(results)
+    return results
+
+
 __all__ = [
+    "preflight",
     "SymbolValidation",
     "ValidationStatus",
     "validate_sleeve",

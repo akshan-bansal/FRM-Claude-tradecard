@@ -25,7 +25,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from trading_live_claude.audit.queries import all_rows
-from trading_live_claude.brokers.models import OrderAction
+from trading_live_claude.brokers.models import OrderAction, Position
 from trading_live_claude.execution.router import OrderIntent, Router
 
 MIN_DAYS = 7
@@ -95,6 +95,9 @@ def exits_pass_a_tripped_kill_switch() -> bool:
     class _Null:
         name = venue = "probe"
 
+        def positions(self, _account: str) -> list[Position]:
+            return [Position(symbol="PROBE", symbolId=0, openQuantity=10.0)]
+
     with TemporaryDirectory() as d:
         router = Router.build_default(mode="dry-run", broker=_Null(), state_dir=Path(d))  # type: ignore[arg-type]
         router.kill_switch.trip(reason="risk_guard_analysis probe")
@@ -116,7 +119,7 @@ def wiring_checks(src: Path) -> dict[str, bool]:
         "card path passes open notional through": "current_open_notional=current_open_notional" in approval,
         "place-order passes open notional": "current_open_notional=open_notional" in cli,
         "paper broker auto-trips the kill-switch (KillSwitch.evaluate)": "_kill_switch.evaluate(" in paper,
-        "live brokers auto-trip the kill-switch": ".evaluate(" in monitor,
+        "live books auto-trip the kill-switch (EquityWatch)": "EquityWatch(" in monitor,
         "a tripped kill-switch still lets exits through": exits_pass_a_tripped_kill_switch(),
     }
 

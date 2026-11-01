@@ -302,17 +302,25 @@ def test_forced_exit_closes_on_a_loss_past_the_atr_multiple(tmp_path: Path) -> N
     assert forced["payload"]["atr_at_entry"] == 2.0 and forced["intent_id"]
 
 
-def test_tripped_kill_switch_also_blocks_the_forced_exit(tmp_path: Path) -> None:
-    """Pins today's behaviour: the kill-switch rejects every order, exits included, so a loss big
-    enough to trip it leaves the position open. Changing that would loosen a gate, which is the
-    operator's decision (reports/risk_guard_analysis_*.md), so it is a deliberate edit to this test.
-    """
+def test_forced_exit_still_closes_after_the_kill_switch_trips(tmp_path: Path) -> None:
+    """A loss big enough to trip the kill-switch is exactly when the way out has to work."""
     m, pb, feed, _ = _opened(tmp_path, forced_exits=True)
     m.router.kill_switch.trip(reason="test")
     feed.price = 90.0
     ev = m.step()
     assert ev[0].kind == "exit" and "forced_exit" in ev[0].detail
-    assert _qty(pb) > 0
+    assert _qty(pb) == 0.0
+
+
+def test_strategy_exit_closes_under_a_halt_but_an_entry_does_not_open(tmp_path: Path) -> None:
+    m, pb, _, strat = _opened(tmp_path)
+    m.router.kill_switch.trip(reason="test")
+    strat.exit_ = 1
+    m.step()
+    assert _qty(pb) == 0.0
+    strat.exit_, strat.entry = 0, 1
+    m.step()
+    assert _qty(pb) == 0.0
 
 
 def test_forced_exit_is_off_unless_asked_for(tmp_path: Path) -> None:

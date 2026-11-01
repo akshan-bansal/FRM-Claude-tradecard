@@ -1,7 +1,8 @@
-"""Kill-switch: a single sentinel file blocks every live order.
+"""Kill-switch: a single sentinel file stops all new risk.
 
 The sentinel is intentionally a file (not a DB row) so flipping it is
 trivial — `touch state/HALTED` from any shell terminates all entries.
+An order that only reduces a held position still passes (``Router._gate``).
 """
 from __future__ import annotations
 
@@ -23,6 +24,8 @@ class KillState:
 
 class KillSwitch:
     SENTINEL_NAME = "HALTED"
+    # When a human last cleared it. Drawdown is measured from here (risk/equity_watch.py).
+    CLEARED_NAME = "HALT_CLEARED"
 
     def __init__(
         self,
@@ -67,8 +70,16 @@ class KillSwitch:
         if self._path.exists():
             reason = self.state().reason
             self._path.unlink()
+            (self.state_dir / self.CLEARED_NAME).write_text(datetime.now(UTC).isoformat(), encoding="utf-8")
             log.warning("kill_switch.cleared")
             self._record("KILL_SWITCH_CLEARED", {"cleared_reason": reason, "ack": ack.strip()})
+
+    def last_cleared(self) -> datetime | None:
+        """When the switch was last cleared by a human, or None if it never has been."""
+        try:
+            return datetime.fromisoformat((self.state_dir / self.CLEARED_NAME).read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None
 
     def _record(self, event: str, payload: dict[str, object]) -> None:
         """Append to the shared ``control`` ledger stream. Never stops a trip or a clear.
