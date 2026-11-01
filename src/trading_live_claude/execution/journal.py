@@ -14,6 +14,7 @@ class OrderJournal:
         self.orders_path = state_dir / "orders.jsonl"
         self.rejected_path = state_dir / "rejected.jsonl"
         self.fills_path = state_dir / "fills.jsonl"
+        self.cancels_path = state_dir / "cancels.jsonl"
 
     @staticmethod
     def _now() -> str:
@@ -32,3 +33,6 @@ class OrderJournal:
 
     def fill(self, row: dict[str, Any]) -> None:
         self._append(self.fills_path, row)
+
+    def cancel(self, row: dict[str, Any]) -> None:
+        self._append(self.cancels_path, row)

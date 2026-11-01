@@ -329,14 +329,16 @@ def build(state: Path) -> dict[str, Any]:
 
 
 def integrity_model(state: Path, orders: list[dict[str, Any]]) -> dict[str, Any]:
-    """What the record holds from signal to fill, and whether any of it is hash-chained.
+    """What the record holds from signal to fill, and whether the audit ledger verifies.
 
-    This repo journals to plain appends (orders, rejections, fills, the approval store). There is no
-    hash-chained ledger under ``state/ledger/``, so the panel says that, rather than showing chain
-    checks or a tamper matrix measured on some other record.
+    Sessions write the hash-chained ledger under ``state/ledger/`` (audit/ledger.py). Each stream
+    is verified here, at build time, and every SIGNED row's card signature re-checked offline; the
+    panel shows those results and nothing else. A stream that fails is shown failing, with the
+    reason. Journals from before the ledger stay plain appends and are not claimed as intact.
     """
     ledger_dir = state / "ledger"
     ledger_files = sorted(p.name for p in ledger_dir.glob("*.jsonl")) if ledger_dir.is_dir() else []
+    chains = ledger_chains(ledger_dir) if ledger_files else []
     rejected = read_jsonl(state / "rejected.jsonl")
     fills = read_jsonl(state / "paper_fills.jsonl")
     prompts: list[dict[str, Any]] = []
@@ -377,10 +379,36 @@ def integrity_model(state: Path, orders: list[dict[str, Any]]) -> dict[str, Any]
                      f"{f.get('symbol')} {f.get('side')} {f.get('quantity')} @{float(f.get('price') or 0):,.4g}"))
     dated = sorted(((when, e, c, s) for t, e, c, s in tape if (when := _ts(t))),
                    key=lambda x: x[0], reverse=True)
-    return {"ledger": {"present": bool(ledger_files), "files": ledger_files},
+    return {"ledger": {"present": bool(ledger_files), "files": ledger_files, "chains": chains,
+                       "anchored_days": sorted(_anchored(state))},
             "funnel": funnel, "tape_total": len(dated),
             "tape": [[when.astimezone(UTC).strftime("%m-%d %H:%M"), e, c, s]
                      for when, e, c, s in dated[:TAPE_ROWS]]}
+
+
+def ledger_chains(ledger_dir: Path) -> list[dict[str, Any]]:
+    """Per stream: rows, files, chain verdict, and card signatures re-verified, measured now."""
+    from trading_live_claude.audit.ledger import read_stream, verify_chain
+    from trading_live_claude.audit.projection import streams
+    from trading_live_claude.execution.approval import verify_audit_record
+    out = []
+    for name, paths in sorted(streams(ledger_dir).items()):
+        rows = [r for p in paths for r in read_stream(p)]
+        ok, reason = verify_chain(rows)
+        sigs = [verify_audit_record({"canonical": (r.get("payload") or {}).get("canonical"),
+                                     "signature": r.get("signature"),
+                                     "pubkey_pem": (r.get("payload") or {}).get("pubkey_pem")})[0]
+                for r in rows if r.get("event") == "SIGNED"]
+        out.append({"stream": name, "rows": len(rows), "files": len(paths), "ok": ok,
+                    "reason": reason, "first": str(rows[0].get("ts", ""))[:19] if rows else "",
+                    "last": str(rows[-1].get("ts", ""))[:19] if rows else "",
+                    "signatures_ok": sum(sigs), "signatures_bad": len(sigs) - sum(sigs)})
+    return out
+
+
+def _anchored(state: Path) -> set[str]:
+    from trading_live_claude.audit.anchor import anchored_days
+    return anchored_days(state)
 
 
 def sim_runs(path: Path) -> list[dict[str, Any]]:

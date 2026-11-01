@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
-from typing import Any
+from hashlib import sha256
+from typing import Any, cast
 
 import httpx
 
@@ -38,6 +39,7 @@ from .kraken_auth import KRAKEN_REST, KrakenAuthError, private_post
 from .models import (
     Account,
     Candle,
+    Execution,
     Order,
     OrderAction,
     OrderType,
@@ -92,6 +94,7 @@ class KrakenBroker(Broker):
         )
         self._owns_client = client is None
         self._enable_live_orders = enable_live_orders
+        self._txids: dict[int, str] = {}       # integer order handle -> Kraken order txid
 
     def close(self) -> None:
         if self._owns_client:
@@ -262,8 +265,11 @@ class KrakenBroker(Broker):
 
         txids = result.get("txid") or []
         if txids:
-            # Kraken returns transaction ids as strings; stash the first for reference.
+            # Kraken order ids are strings; ``id`` is a stable integer fold for the journals and
+            # ``broker_ref`` keeps the real txid, which cancels and execution lookups need.
             order.id = _txid_to_int(txids[0])
+            order.broker_ref = str(txids[0])
+            self._txids[order.id] = str(txids[0])
         log.info(
             "kraken.order.submitted",
             symbol=order.symbol,
@@ -278,14 +284,52 @@ class KrakenBroker(Broker):
             raise BrokerError("KrakenBroker: live orders disabled; nothing to cancel.")
         if not (self._api_key and self._api_secret):
             raise BrokerError("KrakenBroker: no API credentials configured.")
+        txid = self._txids.get(int(order_id))
+        if txid is None:
+            # The integer handle is a one-way fold of the txid. Without the txid this process
+            # recorded at placement there is nothing Kraken would recognise; sending the integer
+            # (the pre-2026-10-31 behaviour) could never cancel anything.
+            raise BrokerError(f"KrakenBroker: no Kraken txid on record for order {order_id}; "
+                              "cancel it by txid on Kraken.")
         try:
             private_post(
                 "/0/private/CancelOrder",
                 key=self._api_key, secret=self._api_secret,
-                data={"txid": str(order_id)}, client=self._client,
+                data={"txid": txid}, client=self._client,
             )
         except KrakenAuthError as e:
             raise BrokerError(f"Kraken CancelOrder failed: {e}") from e
+
+    def executions(self, account_number: str, *, since: datetime | None = None) -> list[Execution]:
+        """Trades from the private ``TradesHistory`` endpoint (needs a Query Funds/Trades key).
+
+        ``order_id`` is the integer fold of the trade's order txid, matching what ``place_order``
+        returned, and the fee is in the pair's quote currency, as Kraken charges it by default.
+        """
+        if not (self._api_key and self._api_secret):
+            raise BrokerError("KrakenBroker: no API credentials configured.")
+        data: dict[str, object] = {}
+        if since is not None:
+            data["start"] = str(int(since.timestamp()))
+        try:
+            result = private_post("/0/private/TradesHistory", key=self._api_key,
+                                  secret=self._api_secret, data=data, client=self._client)
+        except KrakenAuthError as e:
+            raise BrokerError(f"Kraken TradesHistory failed: {e}") from e
+        trades = cast(dict[str, dict[str, Any]], result.get("trades") or {})
+        out: list[Execution] = []
+        for trade_id, t in trades.items():
+            symbol = _pair_to_symbol(str(t.get("pair", "")))
+            quote = symbol.split("/")[-1] if "/" in symbol else None
+            out.append(Execution(
+                exec_id=f"kraken:{trade_id}", order_id=str(_txid_to_int(str(t.get("ordertxid")))),
+                symbol=symbol, side="Buy" if t.get("type") == "buy" else "Sell",
+                quantity=float(t["vol"]), price=float(t["price"]), fee=float(t.get("fee") or 0.0),
+                fee_currency=quote, currency=quote,
+                currency_source="kraken pair quote" if quote else "unknown",
+                time=datetime.fromtimestamp(float(t["time"]), tz=UTC), venue="kraken",
+                account=account_number))
+        return out
 
     # ---- helpers -------------------------------------------------------------
 
@@ -380,8 +424,26 @@ def _order_type_wire(t: OrderType) -> str:
 
 
 def _txid_to_int(txid: str) -> int:
-    """Kraken txids are strings (``OZAA6H-FQI3S-DK6GHJ``). We hash-fold to an int so the router,
-    whose fill journal stores integer order ids, has a stable numeric handle. Not reversible; the
-    original txid stays in the log line.
+    """Kraken txids are strings (``OZAA6H-FQI3S-DK6GHJ``); fold to an int for the journals.
+
+    A SHA-256 fold, so the same txid gives the same integer in every process. Before 2026-10-31
+    this used ``hash()``, which Python randomises per process: an id written by one session could
+    never be matched by another, or against Kraken's own trade history. Not reversible; the txid
+    itself is kept as ``Order.broker_ref``.
     """
-    return abs(hash(txid)) % (2**31 - 1)
+    return int.from_bytes(sha256(txid.encode("utf-8")).digest()[:4], "big") % (2**31 - 1)
+
+
+def _pair_to_symbol(pair: str) -> str:
+    """Kraken's wire pair (``SOLUSD``, ``XXBTZUSD``) back to the routed ``BASE/QUOTE`` form."""
+    p = pair.upper()
+    for quote in ("ZUSD", "ZCAD", "ZEUR", "USDT", "USDC", "USD", "CAD", "EUR"):
+        if p.endswith(quote) and len(p) > len(quote):
+            base, q = p[: -len(quote)], quote
+            break
+    else:
+        return pair
+    base = {"XXBT": "BTC", "XBT": "BTC", "XETH": "ETH", "XXDG": "DOGE"}.get(base, base)
+    if len(base) == 4 and base[0] == "X":
+        base = base[1:]
+    return f"{base}/{q[1:] if len(q) == 4 and q[0] == 'Z' else q}"

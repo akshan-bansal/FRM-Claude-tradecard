@@ -50,7 +50,7 @@
   .kpi .l { font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.12em; color: var(--muted); }
   .kpi .v { font-family: var(--mono); font-size: 18px; font-variant-numeric: tabular-nums; margin-top: 1px; }
   .kpi .sub { font-family: var(--mono); font-size: 9px; color: var(--muted); }
-  .v.neg { color: var(--crit); } .v.pos { color: var(--good); }
+  .v.neg, .neg { color: var(--crit); } .v.pos { color: var(--good); }
 
   .cols2 { display: grid; gap: 9px; grid-template-columns: 1.5fr 1fr; align-items: start; }
   .cols2even { display: grid; gap: 9px; grid-template-columns: 1fr 1fr; align-items: start; }
@@ -901,12 +901,22 @@ $("prov").textContent = `paper_equity.csv · paper_fills.jsonl · orders.jsonl �
 const IG = DATA.integrity;
 (function ledger() {
   const L = IG.ledger;
-  $("ledger-n").textContent = L.present ? `${L.files.length} stream files` : "none";
-  $("chain-chip").innerHTML = L.present ? "chain <b>ledger files present, not verified here</b>"
-    : "chain <b>none — plain journals</b>";
+  const C = L.chains || [], bad = C.filter((c) => !c.ok || c.signatures_bad);
+  $("ledger-n").textContent = L.present ? `${C.length} streams · ${C.reduce((n, c) => n + c.rows, 0)} rows` : "none";
+  $("chain-chip").innerHTML = !L.present ? "chain <b>none — plain journals</b>"
+    : bad.length ? `chain <b class="neg">${bad.length} stream(s) FAIL</b>` : "chain <b>verified at build</b>";
   $("ledger").innerHTML = L.present
-    ? `<p class="note">state/ledger/ holds ${L.files.length} file(s): ${esc(L.files.join(", "))}. This build does
-       not verify a chain, so no integrity result is claimed for them.</p>`
+    ? `<div class="wrap"><table><thead><tr><th>STREAM</th><th class="num">ROWS</th><th>FIRST</th><th>LAST</th>
+        <th>CHAIN</th><th class="num">CARD SIGS</th></tr></thead><tbody>${C.map((c) => `<tr>
+        <td class="mono">${esc(c.stream)}</td><td class="num">${c.rows}</td><td class="mono">${esc(c.first)}</td>
+        <td class="mono">${esc(c.last)}</td><td>${c.ok ? "ok" : `<span class="neg">${esc(c.reason)}</span>`}</td>
+        <td class="num">${c.signatures_ok}${c.signatures_bad ? ` <span class="neg">/ ${c.signatures_bad} FAIL</span>` : ""}</td>
+        </tr>`).join("")}</tbody></table></div>
+       <p class="note">Verified when this page was built, by recomputing every hash chain under state/ledger/ and
+       re-checking each card signature against the key recorded with it. ${L.anchored_days.length
+         ? `Days anchored to a signed git tag: ${esc(L.anchored_days.join(", "))}.`
+         : "No day has been anchored yet (trading audit anchor), so a full rewrite of a day would still verify."}
+       Journals written before the ledger existed are plain appends and are not claimed as intact.</p>`
     : `<p class="note">No hash-chained ledger in this repo. Sessions journal to plain appends:
        <span class="mono">orders.jsonl</span>, <span class="mono">rejected.jsonl</span>,
        <span class="mono">paper_fills.jsonl</span>, <span class="mono">paper_equity.csv</span> and the approval

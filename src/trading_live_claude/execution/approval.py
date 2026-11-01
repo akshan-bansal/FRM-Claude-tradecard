@@ -30,7 +30,9 @@ import hashlib
 import secrets
 import threading
 import time
+from base64 import b64decode, b64encode
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -40,6 +42,7 @@ if TYPE_CHECKING:
     from .approval_sqlite import SqliteApprovalStore, SqliteCardRegistry
 
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
@@ -168,6 +171,8 @@ class _PendingEntry:
     event: threading.Event = field(default_factory=threading.Event)
     verdict: Verdict | None = None
     consumed: bool = False
+    signature: bytes | None = None
+    signer_card_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -235,6 +240,15 @@ class CardRegistry:
     def card_ids(self) -> list[str]:
         with self._lock:
             return sorted(self._keys.keys())
+
+    def pubkey_pem(self, card_id: str) -> str | None:
+        """The card's public key as PEM, for an audit record; None if the card is unknown."""
+        with self._lock:
+            key = self._keys.get(card_id)
+        if key is None:
+            return None
+        return key.public_bytes(serialization.Encoding.PEM,
+                                serialization.PublicFormat.SubjectPublicKeyInfo).decode("ascii")
 
     def verify(self, card_id: str, canonical: bytes, signature: bytes) -> bool:
         with self._lock:
@@ -340,7 +354,9 @@ class InMemoryApprovalStore:
         intel_ref: str = "",
     ) -> Prompt:
         now = datetime.now(UTC)
-        intent_id = self._mint_intent_id()
+        wanted = getattr(intent, "intent_id", "") or ""
+        with self._lock:     # reuse the router's id unless this intent was already prompted
+            intent_id = wanted if wanted and wanted not in self._entries else self._mint_intent_id()
         nonce = secrets.token_hex(16)
         notional = float(intent.shares) * float(intent.entry)
         canonical = canonical_bytes(
@@ -441,12 +457,30 @@ class InMemoryApprovalStore:
         with self._lock:
             entry.consumed = True
             entry.verdict = decision
+            entry.signature = signature
+            entry.signer_card_id = card_id
             self._passbook.append(
                 self._entry_to_passbook(entry, card_id=card_id, at=datetime.now(UTC))
             )
             entry.event.set()
         log.info("approval.response", intent_id=intent_id, decision=decision, card_id=card_id)
         return True
+
+    def audit_record(self, intent_id: str) -> dict[str, object] | None:
+        """The same evidence ``SqliteApprovalStore.audit_record`` returns, from memory."""
+        with self._lock:
+            entry = self._entries.get(intent_id)
+        if entry is None:
+            return None
+        sig = entry.signature
+        return {"intent_id": intent_id, "verdict": entry.verdict,
+                "issued_at": entry.prompt.issued_at.isoformat(), "resolved_at": None,
+                "canonical": entry.prompt.canonical,
+                "signature": b64encode(sig).decode("ascii") if sig else None,
+                "signature_alg": "ed25519" if sig else None,
+                "signer_card_id": entry.signer_card_id,
+                "pubkey_pem": self._registry.pubkey_pem(entry.signer_card_id)
+                if entry.signer_card_id else None, "revoked_at": None}
 
     def passbook(self, *, limit: int = 50, offset: int = 0) -> list[PassbookEntry]:
         """Newest-first view of resolved prompts. ``limit`` capped at 500."""
@@ -524,15 +558,23 @@ class ApprovalRouter:
         existing_risk: float,
         open_positions: int,
     ) -> Order | None:
+        self.inner.announce_intent(intent)
+        requested_shares = intent.shares
         decision = self.inner._gate(
             intent,
             equity=equity,
             existing_risk=existing_risk,
             open_positions=open_positions,
         )
+        # The pre-prompt gate is a decision in its own right: without this row the chain would
+        # begin at INTENT_SENT, and a rejection here would leave no gate record at all.
+        self.inner.record_gate(intent, decision, requested_shares=requested_shares, equity=equity,
+                               existing_risk=existing_risk, open_positions=open_positions,
+                               current_open_notional=0.0)
         if not decision.accepted:
             self.inner.journal.order_intent(
                 {
+                    "intent_id": intent.intent_id,
                     "mode": self.inner.mode,
                     "strategy": intent.strategy,
                     "symbol": intent.symbol,
@@ -548,7 +590,8 @@ class ApprovalRouter:
                 }
             )
             self.inner.journal.rejected(
-                {"symbol": intent.symbol, "reasons": decision.rejected_reasons}
+                {"intent_id": intent.intent_id, "symbol": intent.symbol,
+                 "reasons": decision.rejected_reasons}
             )
             log.warning("approval_router.rejected_pre_prompt",
                         symbol=intent.symbol, reasons=decision.rejected_reasons)
@@ -569,10 +612,18 @@ class ApprovalRouter:
             thesis=thesis,
             intel_ref=intel_ref,
         )
+        self.inner._ledger_event("INTENT_SENT", {
+            "prompt_id": prompt.intent_id, "broker": prompt.broker, "mode": prompt.mode,
+            "fingerprint": prompt.fingerprint, "canonical": prompt.canonical,
+            "ttl_seconds": self.ttl_seconds, "expires_at": prompt.expires_at.isoformat(),
+            "thesis": prompt.thesis, "intel_ref": prompt.intel_ref,
+        }, intent=intent)
         verdict = self.store.wait(prompt.intent_id)
+        self._record_verdict(intent, prompt, verdict)
         if verdict != "ACCEPT":
             self.inner.journal.rejected(
-                {"symbol": intent.symbol, "reasons": [f"card:{verdict.lower()}"]}
+                {"intent_id": intent.intent_id, "symbol": intent.symbol,
+                 "reasons": [f"card:{verdict.lower()}"]}
             )
             log.info("approval_router.not_accepted",
                      symbol=intent.symbol, verdict=verdict, intent_id=prompt.intent_id)
@@ -587,6 +638,61 @@ class ApprovalRouter:
             existing_risk=existing_risk,
             open_positions=open_positions,
         )
+
+    def _record_verdict(self, intent: OrderIntent, prompt: Prompt, verdict: str) -> None:
+        """APPROVED / REJECTED / EXPIRED, then SIGNED carrying the signature and signing key.
+
+        The signature goes into the ledger row itself, so an approval can be re-verified from the
+        ledger alone, without the shim or ``approval.db``.
+        """
+        ledger = self.inner.ledger
+        if ledger is None:
+            return
+        audit = getattr(self.store, "audit_record", None)
+        rec = audit(prompt.intent_id) if callable(audit) else None
+        rec = rec or {}
+        event = {"ACCEPT": "APPROVED", "DECLINE": "REJECTED"}.get(verdict, "EXPIRED")
+        self.inner._ledger_event(event, {
+            "verdict": verdict, "prompt_id": prompt.intent_id,
+            "signer_card_id": rec.get("signer_card_id"), "fingerprint": prompt.fingerprint,
+        }, intent=intent)
+        if rec.get("signature"):
+            ledger.append("SIGNED", {
+                "prompt_id": prompt.intent_id, "canonical": prompt.canonical,
+                "fingerprint": prompt.fingerprint, "verdict": verdict,
+                "signature_alg": rec.get("signature_alg"), "pubkey_pem": rec.get("pubkey_pem"),
+            }, intent_id=intent.intent_id, signature=str(rec["signature"]),
+                signing_key_id=str(rec.get("signer_card_id") or ""),
+                strategy_id=intent.strategy,
+                risk_check_version=self.inner.risk_check_version())
+
+
+def verify_audit_record(record: Mapping[str, object]) -> tuple[bool, str]:
+    """Re-verify an approval offline from an ``audit_record`` (or a SIGNED ledger row's payload).
+
+    Never reports missing evidence as a pass: no signature, no key or no canonical bytes is a
+    failure with the reason named.
+    """
+    canonical, sig, pem = record.get("canonical"), record.get("signature"), record.get("pubkey_pem")
+    if not sig:
+        return False, "no signature recorded"
+    if not pem:
+        return False, "signing card's public key not on record"
+    if not canonical:
+        return False, "canonical bytes not on record"
+    alg = record.get("signature_alg") or "ed25519"
+    if alg != "ed25519":
+        return False, f"unsupported signature algorithm {alg!r}"
+    try:
+        key = load_pem_public_key(str(pem).encode("utf-8"))
+        if not isinstance(key, Ed25519PublicKey):
+            return False, "signing key is not Ed25519"
+        key.verify(b64decode(str(sig)), str(canonical).encode("utf-8"))
+    except InvalidSignature:
+        return False, "signature does not verify over the canonical bytes"
+    except (ValueError, TypeError) as e:
+        return False, f"evidence does not parse: {e}"
+    return True, "ok"
 
 
 # --------------------------------------------------------------------------- #

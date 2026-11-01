@@ -137,8 +137,9 @@ uv run trading signal --strategy rsi_meanrevert --symbols AAPL,MSFT --interval 6
 # 6. Paper trade (default mode)
 uv run trading paper --strategy ema_crossover --symbols AAPL,XIC.TO
 
-# 7. Live trade (requires explicit confirmation)
-EXECUTION_MODE=live uv run trading live --strategy ema_crossover --symbols AAPL --confirm "I UNDERSTAND THE RISK"
+# 7. Live trade: not shown here on purpose. Live mode is the human's runtime decision.
+#    Run the /live-trade-confirm pre-flight (RISK_DISCLOSURE.md, .claude/commands/live-trade-confirm.md);
+#    it checks the practice history and prints the exact command for you to run yourself.
 
 # 8. Autonomous mode (Claude-managed daemon, NO typed confirm per order)
 #    First, set in .env:    AUTONOMOUS_ENABLED=true   AUTONOMOUS_ACCOUNT=practice
@@ -151,6 +152,19 @@ uv run trading autonomous stop
 # 9. Let Claude pick strategy + symbols automatically (writes config/trading.yaml)
 uv run trading tune                              # full grid (5 strategies x 18 symbols)
 uv run trading tune --dry-run                    # just show scoreboard, don't write
+
+# 10. Audit trail (docs/compliance/AUDIT_SCOPE.md). Every runner records to state/ledger by default.
+uv run trading audit verify                      # hash chains + every card signature
+uv run trading audit trace <intent_id>           # one order, signal to execution
+uv run trading audit replay                      # re-run every gate decision from the record
+uv run trading audit recon kraken                # pull executions back from the broker (read-only)
+uv run trading audit fx-fetch --currency USD --start 2026-01-01
+uv run trading audit export --year 2026          # CRA: ACB in CAD, gains, superficial-loss flags
+uv run trading audit anchor                      # each closed day's Merkle root -> signed git tag
+uv run trading audit archive D:/audit-vault      # retention copy with a verified manifest
+
+# 11. Spectral VaR gate (BSM_Spectral engine): off by default, entries only, trims or rejects.
+python scripts/paper_kraken.py --spectral-var-cap 0.005    # 99% 1-day VaR <= 0.5% of equity
 ```
 
 ## How configuration is split

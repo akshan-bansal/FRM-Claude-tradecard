@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .analysis import build_signal_matrix, render_matrix_markdown
+from .audit.ledger import Ledger
 from .backtest import BacktestEngine
 from .brokers import PaperBroker, QuestradeBroker
 from .brokers.base import Broker
@@ -60,6 +61,26 @@ from .scoring.selection import (
 )
 from .strategies import STRATEGIES, Strategy
 from .tune import DEFAULT_TUNE_STRATEGIES, DEFAULT_TUNE_UNIVERSE, apply_tune, run_tune
+
+
+def _session_ledger(settings: object, stream: str, *, mode: str, session_id: str | None = None,
+                    strict: bool = False, shared: bool = False, enabled: bool = True) -> Ledger | None:
+    """Open this process's audit-ledger stream under ``state/ledger`` and record the session start.
+
+    One stream per process (the chain is single-writer); ``shared`` is for one-shot commands that
+    can overlap. ``strict`` makes a failed ledger write stop the order instead of letting it
+    trade unrecorded: on for live and autonomous, off for paper.
+    """
+    if not enabled:
+        return None
+    import atexit
+
+    from .audit.versioning import session_provenance
+    led = Ledger(Path(settings.state_dir) / "ledger", stream=stream, mode=mode,  # type: ignore[attr-defined]
+                 session_id=session_id, strict=strict, shared=shared)
+    led.append("SESSION_STARTED", session_provenance(argv=sys.argv))
+    atexit.register(lambda: led.append("SESSION_STOPPED", {"argv0": sys.argv[0]}))
+    return led
 
 app = typer.Typer(help="Claude Code algorithmic trading CLI (paper-first; live behind explicit flag).")
 console = Console()
@@ -222,6 +243,11 @@ def signal(
              "the real account; it builds the fill history live mode requires.",
     ),
     paper_equity: float = typer.Option(100_000.0, help="Starting equity for the paper account."),
+    audit_ledger: bool = typer.Option(
+        True, "--audit-ledger/--no-audit-ledger",
+        help="Record every signal, gate decision and order to the hash-chained audit ledger "
+             "under state/ledger (stream qt). On by default.",
+    ),
 ) -> None:
     """Live-signal monitor. Never places real orders.
 
@@ -285,6 +311,9 @@ def signal(
     console.print(format_validation_banner(_validations))
     refuse_launch_on_hard_failures(_validations)
 
+    ledger = _session_ledger(settings, stream="qt", mode="paper" if paper else "dry-run",
+                             session_id=getattr(exec_broker, "session_id", None),
+                             enabled=audit_ledger)
     router = Router.build_default(
         mode="paper" if paper else "dry-run",
         broker=exec_broker,
@@ -294,6 +323,7 @@ def signal(
         daily_loss_limit_pct=settings.daily_loss_limit_pct,
         max_open_positions=settings.max_open_positions,
         min_ticket_usd=settings.min_ticket_usd,
+        ledger=ledger,
     )
 
     alerter = Alerter(
@@ -468,6 +498,7 @@ def paper(
     market = MarketData(feed, cache=CandleCache(settings.data_cache_dir))
     strat = _strategy_or_die(strategy)
     sizer = PositionSizer(risk_pct=settings.risk_pct_per_trade)
+    ledger = _session_ledger(settings, stream="qt-paper", mode="paper", session_id=pb.session_id)
     router = Router.build_default(
         mode="paper",
         broker=pb,
@@ -477,6 +508,7 @@ def paper(
         daily_loss_limit_pct=settings.daily_loss_limit_pct,
         max_open_positions=settings.max_open_positions,
         min_ticket_usd=settings.min_ticket_usd,
+        ledger=ledger,
     )
     monitor = LiveMonitor(
         broker=pb,
@@ -517,6 +549,8 @@ def live(
         raise typer.Exit(code=1)
     account_number = settings.questrade_account_number or accounts[0].number
 
+    # Live trades must not go unrecorded: strict, so a failed ledger write stops the order.
+    ledger = _session_ledger(settings, stream="qt-live", mode="live", strict=True)
     try:
         router = Router.build_default(
             mode="live",
@@ -528,6 +562,7 @@ def live(
             max_open_positions=settings.max_open_positions,
             min_ticket_usd=settings.min_ticket_usd,
             live_confirmation=confirm,
+            ledger=ledger,
         )
     except LiveModeNotConfirmed as e:
         console.print(f"[red]{e}[/red]")
@@ -1281,6 +1316,10 @@ def qc_deploy(
 autonomous_app = typer.Typer(help="Claude-driven autonomous trading loop. Background daemon process.")
 app.add_typer(autonomous_app, name="autonomous")
 
+from .audit.cli import audit_app  # noqa: E402  (registered beside the other sub-apps)
+
+app.add_typer(audit_app, name="audit")
+
 
 def _build_alerter(settings) -> Alerter:
     return Alerter(
@@ -1407,6 +1446,8 @@ def autonomous_run() -> None:
     strat = _strategy_or_die(settings.autonomous_strategy)
     sizer = PositionSizer(risk_pct=settings.risk_pct_per_trade)
 
+    # Autonomous trades have no human in the loop, so they must not go unrecorded either.
+    ledger = _session_ledger(settings, stream="autonomous", mode="autonomous", strict=True)
     try:
         router = Router.build_default(
             mode="autonomous",
@@ -1419,6 +1460,7 @@ def autonomous_run() -> None:
             min_ticket_usd=settings.min_ticket_usd,
             daily_max_trades=settings.autonomous_daily_max_trades,
             daily_max_notional_usd=settings.autonomous_daily_max_notional_usd,
+            ledger=ledger,
         )
     except (LiveModeNotConfirmed, AutonomousNotEnabled) as e:
         console.print(f"[red]{e}[/red]")
@@ -1564,6 +1606,9 @@ def place_order(
         account_number=account_number,
     )
 
+    # One-shot and possibly concurrent with another place-order: a shared stream, locked per row.
+    ledger = _session_ledger(settings, stream="manual", mode=chosen_mode, shared=True,
+                             strict=chosen_mode == "autonomous")
     router = Router.build_default(
         mode="paper" if chosen_mode == "paper" else ("dry-run" if chosen_mode == "dry-run" else "autonomous"),
         broker=broker,
@@ -1575,6 +1620,7 @@ def place_order(
         min_ticket_usd=settings.min_ticket_usd,
         daily_max_trades=settings.autonomous_daily_max_trades,
         daily_max_notional_usd=settings.autonomous_daily_max_notional_usd,
+        ledger=ledger,
     ) if chosen_mode == "autonomous" else Router.build_default(
         mode="paper" if chosen_mode == "paper" else "dry-run",
         broker=broker,
@@ -1584,6 +1630,7 @@ def place_order(
         daily_loss_limit_pct=settings.daily_loss_limit_pct,
         max_open_positions=settings.max_open_positions,
         min_ticket_usd=settings.min_ticket_usd,
+        ledger=ledger,
     )
 
     placed = router.submit(

@@ -28,6 +28,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from base64 import b64encode
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
@@ -78,7 +79,12 @@ CREATE TABLE IF NOT EXISTS intents (
     intel_ref       TEXT NOT NULL DEFAULT '',
     nonce           TEXT NOT NULL,
     canonical       TEXT NOT NULL,
-    signer_card_id  TEXT
+    signer_card_id  TEXT,
+    -- Audit evidence (2026-10-31). The card's signature used to be verified and then dropped, so
+    -- an approval could not be re-verified later. NULL for an EXPIRED prompt (nothing signed it)
+    -- and for every row written before this column existed: that evidence cannot be backfilled.
+    signature       TEXT,
+    signature_alg   TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_intents_resolved_at
@@ -100,7 +106,24 @@ def _open_db(path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
+
+
+_SIG_ALG = "ed25519"
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive column migrations for a database created before a column existed.
+
+    Only ever ADD COLUMN: no existing row is rewritten, and a NULL signature is the honest record
+    for an approval taken before signatures were stored.
+    """
+    have = {r[1] for r in conn.execute("PRAGMA table_info(intents)")}
+    for column, ddl in (("signature", "signature TEXT"), ("signature_alg", "signature_alg TEXT")):
+        if column not in have:
+            conn.execute(f"ALTER TABLE intents ADD COLUMN {ddl}")
+            log.info("approval.db.migrated", added=column)
 
 
 # --------------------------------------------------------------------------- #
@@ -174,6 +197,13 @@ class SqliteCardRegistry:
         if existed:
             log.info("approval.card_revoked", card_id=card_id)
         return existed
+
+    def pubkey_pem(self, card_id: str) -> str | None:
+        """The card's stored public key, revoked or not; None if it was never registered."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT pubkey_pem FROM cards WHERE card_id = ?", (card_id,)).fetchone()
+        return row[0] if row else None
 
     def card_ids(self) -> list[str]:
         with self._lock:
@@ -261,6 +291,21 @@ class SqliteApprovalStore:
     def _mint_intent_id() -> str:
         return f"{int(time.time_ns()):016x}-{secrets.token_hex(6)}"
 
+    def _intent_id_for(self, intent: OrderIntent) -> str:
+        """The router-minted intent id, so the prompt and every other record share one identity.
+
+        An intent published a second time (re-prompted after an expiry) gets a fresh id: the
+        table keys on it, and a second prompt is a second thing the card is asked to sign.
+        """
+        wanted = getattr(intent, "intent_id", "") or ""
+        if wanted:
+            with self._lock:
+                taken = self._conn.execute(
+                    "SELECT 1 FROM intents WHERE intent_id = ?", (wanted,)).fetchone()
+            if not taken:
+                return wanted
+        return self._mint_intent_id()
+
     def _sweep_expired(self) -> None:
         """Move any past-TTL, still-unresolved intents to EXPIRED."""
         now = datetime.now(UTC).isoformat()
@@ -289,7 +334,7 @@ class SqliteApprovalStore:
         intel_ref: str = "",
     ) -> Prompt:
         now = datetime.now(UTC)
-        intent_id = self._mint_intent_id()
+        intent_id = self._intent_id_for(intent)
         nonce = secrets.token_hex(16)
         notional = float(intent.shares) * float(intent.entry)
         canonical = canonical_bytes(
@@ -432,9 +477,10 @@ class SqliteApprovalStore:
             now = datetime.now(UTC).isoformat()
             self._conn.execute(
                 "UPDATE intents SET verdict = ?, consumed = 1, "
-                "resolved_at = ?, signer_card_id = ? "
+                "resolved_at = ?, signer_card_id = ?, signature = ?, signature_alg = ? "
                 "WHERE intent_id = ? AND verdict IS NULL",
-                (decision, now, card_id, intent_id),
+                (decision, now, card_id, b64encode(signature).decode("ascii"), _SIG_ALG,
+                 intent_id),
             )
             ev = self._events.pop(intent_id, None)
             if ev is not None:
@@ -442,6 +488,25 @@ class SqliteApprovalStore:
         log.info("approval.response", intent_id=intent_id, decision=decision,
                  card_id=card_id)
         return True
+
+    def audit_record(self, intent_id: str) -> dict[str, object] | None:
+        """Everything needed to re-verify one approval offline, with no shim running.
+
+        The canonical bytes that were signed, the signature, the signing card, and that card's
+        public key even if it has since been revoked (``revoked_at`` says so). ``signature`` is
+        None for an EXPIRED prompt and for approvals taken before signatures were stored.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT i.intent_id, i.verdict, i.issued_at, i.resolved_at, i.canonical,"
+                "       i.signature, i.signature_alg, i.signer_card_id, c.pubkey_pem, c.revoked_at "
+                "FROM intents i LEFT JOIN cards c ON c.card_id = i.signer_card_id "
+                "WHERE i.intent_id = ?", (intent_id,)).fetchone()
+        if row is None:
+            return None
+        keys = ("intent_id", "verdict", "issued_at", "resolved_at", "canonical", "signature",
+                "signature_alg", "signer_card_id", "pubkey_pem", "revoked_at")
+        return dict(zip(keys, row, strict=True))
 
     def passbook(self, *, limit: int = 50, offset: int = 0) -> list[PassbookEntry]:
         if limit <= 0:

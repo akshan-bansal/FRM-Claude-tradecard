@@ -1,0 +1,54 @@
+# Audit vocabulary, version 1. Committed and versioned: a term is never redefined. A change of
+# meaning adds a new term and bumps `vocab`, so a row derived under version 1 still reads the way it
+# was meant. See docs/compliance/AUDIT_SCOPE.md section 5.3 and src/trading_live_claude/audit/semantics.py.
+vocab: 1
+jurisdiction: Canada
+
+facts:
+  tax_event:
+    values: [acquisition, disposition]
+    meaning: CRA treats every disposition as reportable; acquisitions set the adjusted cost base.
+  property:
+    scheme: "<class>:<identifier>"
+    classes:
+      crypto: base asset of a BASE/QUOTE pair, whatever the venue (crypto:SOL)
+      ca-listed: ticker without its Canadian exchange suffix (ca-listed:XIC)
+      us-listed: ticker as listed (us-listed:VOO)
+      future: futures root (future:GC)
+    meaning: >-
+      Identical property for ACB averaging. One pool per security across every account this repo
+      trades; registered accounts and other people's accounts are never pooled in.
+  lot_effect:
+    meaning: quantity and ACB in CAD before and after the execution (average cost).
+  gain_cad:
+    meaning: proceeds minus ACB of the quantity sold minus outlays (fees), in CAD.
+  fx:
+    source: >-
+      Bank of Canada daily rate (Valet series FX<CCY>CAD); a non-business day takes the
+      latest prior business day, and the row records the date used.
+  superficial:
+    window_days_each_side: 30
+    test: >-
+      identical property acquired in the 61-day window and still held at its end, by the taxpayer
+      or an affiliated person. Denied share = min(qty sold, qty acquired in window, qty held at
+      window end) / qty sold. The denied loss is added to the substitute's ACB, or lost when the
+      substitute sits in a registered plan.
+    status: [final, "provisional: window still open"]
+  holding_days_fifo:
+    meaning: first-in holding period of the quantity closed; reporting only, ACB stays averaged.
+  conduct:
+    values: [cancel_before_fill, self_match_risk]
+  unknown:
+    meaning: >-
+      A fact that could not be determined is written as "unknown" with the reason, never filled
+      in (no FX rate for the day, a short sale the average-cost pool cannot represent).
+
+rules:
+  R1: "CRA books and records; ACB per identical property in CAD; six-year retention"
+  R2: "superficial-loss rule (61-day window, affiliated persons)"
+  R3: "business income vs capital gain characterisation (frequency, holding period, automation)"
+  R4: "market conduct (CIRO UMIR 2.2 and venue rules): wash trades, self-matching, spoofing"
+  R5: "dealer and venue API terms"
+  R6: "crypto trading platform registration (CSA) and the IB Canadian entity (CIRO)"
+  R7: "SEC EDGAR fair access (data-source rule)"
+  R8: "news source terms of use"

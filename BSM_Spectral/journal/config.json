@@ -1,0 +1,547 @@
+{
+  "var": {
+    "horizons": [
+      1,
+      5
+    ],
+    "tenor_days": 21,
+    "moneyness": [
+      0.97,
+      1.0,
+      1.03
+    ],
+    "position": 1.0,
+    "levels": [
+      0.9,
+      0.95,
+      0.99
+    ],
+    "n_sims": 4000,
+    "tail_frac": 0.1,
+    "tail_k": 10.0,
+    "xi_max": 0.45,
+    "gammas": [
+      1.0,
+      0.75,
+      0.5
+    ],
+    "rho_floor": 0.2,
+    "skew": -0.3,
+    "rate": 0.04,
+    "dividend": 0.015,
+    "vol_floor": 0.02,
+    "level_map": [
+      0.0,
+      1.0
+    ],
+    "models": [
+      "normal",
+      "gpd",
+      "skewt",
+      "fhs",
+      "spectral"
+    ]
+  },
+  "kalshi": {
+    "series": [
+      "KXINXU",
+      "KXINX"
+    ],
+    "event_suffix": "H1600",
+    "skew": -0.3,
+    "rate": 0.04,
+    "dividend": 0.015,
+    "snapshot_hour_ny": 9
+  },
+  "cross": {
+    "horizons": [
+      5
+    ],
+    "window": 504,
+    "tail_k": 4.0,
+    "n_sims": 5000
+  },
+  "frozen": {
+    "at": "2026-10-30T15:44:12+00:00",
+    "history": [
+      "2016-10-31",
+      "2026-10-29"
+    ],
+    "source": "tail index and tempering powers from the backtest tuning split",
+    "code_sha256_16": "dec4a60bcbe3e638"
+  },
+  "underlyings": {
+    "NDX": {
+      "var": {
+        "horizons": [
+          1,
+          5
+        ],
+        "tenor_days": 21,
+        "moneyness": [
+          0.97,
+          1.0,
+          1.03
+        ],
+        "position": 1.0,
+        "levels": [
+          0.9,
+          0.95,
+          0.99
+        ],
+        "n_sims": 4000,
+        "tail_frac": 0.1,
+        "tail_k": null,
+        "xi_max": 0.45,
+        "gammas": [
+          1.25,
+          1.25,
+          1.25
+        ],
+        "rho_floor": 0.2,
+        "skew": -0.3,
+        "rate": 0.04,
+        "dividend": 0.007,
+        "vol_floor": 0.02,
+        "level_map": [
+          0.0,
+          1.0
+        ],
+        "models": [
+          "normal",
+          "gpd",
+          "skewt",
+          "fhs",
+          "spectral"
+        ],
+        "days_per_year": 252
+      },
+      "kalshi": {
+        "series": [
+          "KXNASDAQ100U",
+          "KXNASDAQ100"
+        ],
+        "events": "H1600$",
+        "skew": -0.3,
+        "rate": 0.04,
+        "dividend": 0.007,
+        "snapshot_hour_ny": 9,
+        "max_state_lag": 3,
+        "days_per_year": 252
+      },
+      "frozen": {
+        "at": "2026-10-30T21:59:35+00:00",
+        "history": [
+          "2001-02-02",
+          "2026-10-29"
+        ],
+        "source": "tail index and tempering powers from the backtest tuning split",
+        "code_sha256_16": "f24234d70c8dc40b"
+      }
+    },
+    "DJIA": {
+      "var": {
+        "horizons": [
+          1,
+          5
+        ],
+        "tenor_days": 21,
+        "moneyness": [
+          0.97,
+          1.0,
+          1.03
+        ],
+        "position": 1.0,
+        "levels": [
+          0.9,
+          0.95,
+          0.99
+        ],
+        "n_sims": 4000,
+        "tail_frac": 0.1,
+        "tail_k": 10.0,
+        "xi_max": 0.45,
+        "gammas": [
+          1.0,
+          0.75,
+          0.5
+        ],
+        "rho_floor": 0.2,
+        "skew": -0.3,
+        "rate": 0.04,
+        "dividend": 0.02,
+        "vol_floor": 0.02,
+        "level_map": [
+          0.0,
+          1.0
+        ],
+        "models": [
+          "normal",
+          "gpd",
+          "skewt",
+          "fhs",
+          "spectral"
+        ],
+        "days_per_year": 252
+      },
+      "kalshi": {
+        "series": [],
+        "events": "",
+        "skew": -0.3,
+        "rate": 0.04,
+        "dividend": 0.02,
+        "snapshot_hour_ny": 9,
+        "max_state_lag": 3,
+        "days_per_year": 252
+      },
+      "frozen": {
+        "at": "2026-10-30T22:00:17+00:00",
+        "history": [
+          "2016-10-31",
+          "2026-10-29"
+        ],
+        "source": "tail index and tempering powers from the backtest tuning split",
+        "code_sha256_16": "f24234d70c8dc40b"
+      }
+    },
+    "BTC": {
+      "var": {
+        "horizons": [
+          1,
+          5
+        ],
+        "tenor_days": 21,
+        "moneyness": [
+          0.97,
+          1.0,
+          1.03
+        ],
+        "position": 1.0,
+        "levels": [
+          0.9,
+          0.95,
+          0.99
+        ],
+        "n_sims": 4000,
+        "tail_frac": 0.1,
+        "tail_k": 10.0,
+        "xi_max": 0.45,
+        "gammas": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "rho_floor": 0.2,
+        "skew": 0.0,
+        "rate": 0.0,
+        "dividend": 0.0,
+        "vol_floor": 0.02,
+        "level_map": [
+          0.0,
+          1.0
+        ],
+        "models": [
+          "normal",
+          "gpd",
+          "skewt",
+          "fhs",
+          "spectral"
+        ],
+        "days_per_year": 365
+      },
+      "kalshi": {
+        "series": [
+          "KXBTCD",
+          "KXBTC"
+        ],
+        "events": "\\d{2}[A-Z]{3}\\d{2}17$",
+        "skew": 0.0,
+        "rate": 0.0,
+        "dividend": 0.0,
+        "snapshot_hour_ny": 9,
+        "max_state_lag": 3,
+        "days_per_year": 365
+      },
+      "frozen": {
+        "at": "2026-10-30T22:01:55+00:00",
+        "history": [
+          "2015-09-13",
+          "2026-10-29"
+        ],
+        "source": "tail index and tempering powers from the backtest tuning split",
+        "code_sha256_16": "f24234d70c8dc40b"
+      }
+    },
+    "ETH": {
+      "var": {
+        "horizons": [
+          1,
+          5
+        ],
+        "tenor_days": 21,
+        "moneyness": [
+          0.97,
+          1.0,
+          1.03
+        ],
+        "position": 1.0,
+        "levels": [
+          0.9,
+          0.95,
+          0.99
+        ],
+        "n_sims": 4000,
+        "tail_frac": 0.1,
+        "tail_k": 10.0,
+        "xi_max": 0.45,
+        "gammas": [
+          1.25,
+          1.25,
+          1.25
+        ],
+        "rho_floor": 0.2,
+        "skew": 0.0,
+        "rate": 0.0,
+        "dividend": 0.0,
+        "vol_floor": 0.02,
+        "level_map": [
+          0.0,
+          1.0
+        ],
+        "models": [
+          "normal",
+          "gpd",
+          "skewt",
+          "fhs",
+          "spectral"
+        ],
+        "days_per_year": 365
+      },
+      "kalshi": {
+        "series": [
+          "KXETHD"
+        ],
+        "events": "\\d{2}[A-Z]{3}\\d{2}17$",
+        "skew": 0.0,
+        "rate": 0.0,
+        "dividend": 0.0,
+        "snapshot_hour_ny": 9,
+        "max_state_lag": 3,
+        "days_per_year": 365
+      },
+      "frozen": {
+        "at": "2026-10-30T22:02:45+00:00",
+        "history": [
+          "2017-01-27",
+          "2026-10-29"
+        ],
+        "source": "tail index and tempering powers from the backtest tuning split",
+        "code_sha256_16": "f24234d70c8dc40b"
+      }
+    },
+    "EURUSD": {
+      "var": {
+        "horizons": [
+          1,
+          5
+        ],
+        "tenor_days": 21,
+        "moneyness": [
+          0.97,
+          1.0,
+          1.03
+        ],
+        "position": 1.0,
+        "levels": [
+          0.9,
+          0.95,
+          0.99
+        ],
+        "n_sims": 4000,
+        "tail_frac": 0.1,
+        "tail_k": 10.0,
+        "xi_max": 0.45,
+        "gammas": [
+          1.25,
+          1.25,
+          1.25
+        ],
+        "rho_floor": 0.2,
+        "skew": 0.0,
+        "rate": 0.04,
+        "dividend": 0.02,
+        "vol_floor": 0.02,
+        "level_map": [
+          0.0,
+          1.0
+        ],
+        "models": [
+          "normal",
+          "gpd",
+          "skewt",
+          "fhs",
+          "spectral"
+        ],
+        "days_per_year": 252
+      },
+      "kalshi": {
+        "series": [
+          "KXEURUSD"
+        ],
+        "events": "10$",
+        "skew": 0.0,
+        "rate": 0.04,
+        "dividend": 0.02,
+        "snapshot_hour_ny": 9,
+        "max_state_lag": 3,
+        "days_per_year": 252
+      },
+      "frozen": {
+        "at": "2026-10-30T22:04:43+00:00",
+        "history": [
+          "2000-01-03",
+          "2026-10-23"
+        ],
+        "source": "tail index and tempering powers from the backtest tuning split",
+        "code_sha256_16": "f24234d70c8dc40b"
+      }
+    },
+    "USDJPY": {
+      "var": {
+        "horizons": [
+          1,
+          5
+        ],
+        "tenor_days": 21,
+        "moneyness": [
+          0.97,
+          1.0,
+          1.03
+        ],
+        "position": 1.0,
+        "levels": [
+          0.9,
+          0.95,
+          0.99
+        ],
+        "n_sims": 4000,
+        "tail_frac": 0.1,
+        "tail_k": 10.0,
+        "xi_max": 0.45,
+        "gammas": [
+          1.0,
+          0.75,
+          0.5
+        ],
+        "rho_floor": 0.2,
+        "skew": 0.0,
+        "rate": 0.005,
+        "dividend": 0.04,
+        "vol_floor": 0.02,
+        "level_map": [
+          0.0,
+          1.0
+        ],
+        "models": [
+          "normal",
+          "gpd",
+          "skewt",
+          "fhs",
+          "spectral"
+        ],
+        "days_per_year": 252
+      },
+      "kalshi": {
+        "series": [
+          "KXUSDJPY"
+        ],
+        "events": "10$",
+        "skew": 0.0,
+        "rate": 0.005,
+        "dividend": 0.04,
+        "snapshot_hour_ny": 9,
+        "max_state_lag": 3,
+        "days_per_year": 252
+      },
+      "frozen": {
+        "at": "2026-10-30T22:10:54+00:00",
+        "history": [
+          "1972-01-20",
+          "2026-10-23"
+        ],
+        "source": "tail index and tempering powers from the backtest tuning split",
+        "code_sha256_16": "f24234d70c8dc40b"
+      }
+    },
+    "WTI": {
+      "var": {
+        "horizons": [
+          1,
+          5
+        ],
+        "tenor_days": 21,
+        "moneyness": [
+          0.97,
+          1.0,
+          1.03
+        ],
+        "position": 1.0,
+        "levels": [
+          0.9,
+          0.95,
+          0.99
+        ],
+        "n_sims": 4000,
+        "tail_frac": 0.1,
+        "tail_k": 6.0,
+        "xi_max": 0.45,
+        "gammas": [
+          1.25,
+          1.25,
+          1.25
+        ],
+        "rho_floor": 0.2,
+        "skew": 0.0,
+        "rate": 0.04,
+        "dividend": 0.04,
+        "vol_floor": 0.02,
+        "level_map": [
+          0.0,
+          1.0
+        ],
+        "models": [
+          "normal",
+          "gpd",
+          "skewt",
+          "fhs",
+          "spectral"
+        ],
+        "days_per_year": 252
+      },
+      "kalshi": {
+        "series": [
+          "KXWTI"
+        ],
+        "events": "\\d{2}[A-Z]{3}\\d{2}14$",
+        "skew": 0.0,
+        "rate": 0.04,
+        "dividend": 0.04,
+        "snapshot_hour_ny": 9,
+        "max_state_lag": 3,
+        "days_per_year": 252
+      },
+      "frozen": {
+        "at": "2026-10-31T16:25:50+00:00",
+        "history": [
+          "2007-05-10",
+          "2026-10-27"
+        ],
+        "source": "tail index and tempering powers from the backtest tuning split",
+        "code_sha256_16": "382da27c47d06b46",
+        "amendments": [
+          "2026-10-31: kalshi.events '-\\\\d{2}[A-Z]{3}\\\\d{2}$' -> '\\\\d{2}[A-Z]{3}\\\\d{2}14$'; daily WTI events carry the 14 (2:30pm) settlement hour, the old pattern matched none. Contract selection only; tuned VaR parameters unchanged."
+        ]
+      }
+    }
+  }
+}

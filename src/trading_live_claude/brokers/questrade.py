@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from ..logging_setup import get_logger
 from .base import Broker, BrokerError, OrderRejected, TokenExpired
-from .models import Account, Candle, Order, Position, Quote
+from .models import Account, Candle, Execution, Order, Position, Quote
 from .token_store import TokenSet, TokenStore
 
 LOGIN_HOST = "https://login.questrade.com"
@@ -231,6 +231,43 @@ class QuestradeBroker(Broker):
             action=order.action.value,
         )
         return order
+
+    def executions(self, account_number: str, *, since: datetime | None = None,
+                   until: datetime | None = None) -> list[Execution]:
+        """Executions from ``GET accounts/{id}/executions`` (Questrade caps a window at 31 days).
+
+        The fee is every charge the report itemises: commission, order-placement commission,
+        execution fee, SEC fee and Canadian execution fee. The currency is the symbol record's.
+        """
+        end = until or datetime.now(UTC)
+        start = since or (end - timedelta(days=30))
+        resp = self._request("GET", f"accounts/{account_number}/executions",
+                             params={"startTime": start.isoformat(), "endTime": end.isoformat()})
+        out: list[Execution] = []
+        for e in resp.json().get("executions", []):
+            fee = sum(float(e.get(k) or 0.0) for k in (
+                "commission", "orderPlacementCommission", "executionFee", "secFee",
+                "canadianExecutionFee"))
+            ccy = self._symbol_currency(int(e["symbolId"])) if e.get("symbolId") else None
+            out.append(Execution(
+                exec_id=f"questrade:{e['id']}", order_id=str(e.get("orderId")),
+                symbol=str(e["symbol"]), side="Buy" if str(e.get("side")) == "Buy" else "Sell",
+                quantity=float(e["quantity"]), price=float(e["price"]), fee=fee,
+                fee_currency=ccy, currency=ccy,
+                currency_source="questrade symbol record" if ccy else "unknown",
+                time=datetime.fromisoformat(str(e["timestamp"])), venue="questrade",
+                account=account_number))
+        return out
+
+    def _symbol_currency(self, symbol_id: int) -> str | None:
+        cache: dict[int, str | None] = self.__dict__.setdefault("_currency_cache", {})
+        if symbol_id not in cache:
+            try:
+                syms = self._request("GET", f"symbols/{symbol_id}").json().get("symbols", [])
+                cache[symbol_id] = str(syms[0].get("currency")) if syms else None
+            except BrokerError:
+                cache[symbol_id] = None
+        return cache[symbol_id]
 
     def cancel_order(self, account_number: str, order_id: int) -> None:
         self._request("DELETE", f"accounts/{account_number}/orders/{order_id}")

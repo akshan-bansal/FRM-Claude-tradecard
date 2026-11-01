@@ -210,6 +210,18 @@ def main() -> None:
                          "QuantPort.io BASKET tab). Off by default; exits are never gated.")
     ap.add_argument("--card-ttl", type=float, default=90.0,
                     help="Seconds a card prompt stays live before it auto-EXPIRES.")
+    ap.add_argument("--audit-ledger", dest="audit_ledger", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="Record every signal, gate decision, card verdict and order to the "
+                         "hash-chained audit ledger under state/ledger (stream ib). On by "
+                         "default; --no-audit-ledger opts out.")
+    ap.add_argument("--spectral-var-cap", dest="spectral_var_cap", type=float, default=None,
+                    help="Turn on the spectral VaR gate (BSM_Spectral engine): an ENTRY whose "
+                         "VaR exceeds this fraction of equity is trimmed to fit, or rejected. "
+                         "e.g. 0.005 = 0.5%%. Off by default; exits are never gated.")
+    ap.add_argument("--spectral-var-level", dest="spectral_var_level", type=float, default=0.99)
+    ap.add_argument("--spectral-var-horizon", dest="spectral_var_horizon", type=int, default=1,
+                    help="VaR horizon in trading days.")
     args = ap.parse_args()
 
     settings = get_settings()
@@ -223,6 +235,17 @@ def main() -> None:
     print("[ib-paper] Real IB account untouched; fills are simulated against IB live quotes.",
           flush=True)
 
+    ledger = None
+    if args.audit_ledger:
+        import atexit
+
+        from trading_live_claude.audit.ledger import Ledger
+        from trading_live_claude.audit.versioning import session_provenance
+        ledger = Ledger(Path(settings.state_dir) / "ledger", stream="ib", mode="paper",
+                        session_id=exec_broker.session_id)
+        ledger.append("SESSION_STARTED", session_provenance(argv=sys.argv))
+        atexit.register(lambda: ledger.append("SESSION_STOPPED", {"argv0": sys.argv[0]}))
+        print(f"[ib-paper] audit ledger ON: {ledger.dir} stream ib", flush=True)
     router = Router.build_default(
         mode="paper",
         broker=exec_broker,
@@ -232,12 +255,20 @@ def main() -> None:
         daily_loss_limit_pct=settings.daily_loss_limit_pct,
         max_open_positions=settings.max_open_positions,
         min_ticket_usd=settings.min_ticket_usd,
+        ledger=ledger,
     )
 
     from trading_live_claude.execution.basket import attach_basket_gate
     if attach_basket_gate(router, "ib", Path(settings.state_dir), enabled=args.require_basket):
         print("[ib-paper] basket gate ON: entries need a card-signed ib basket "
               "(python scripts/basket.py status).", flush=True)
+
+    from trading_live_claude.risk.spectral_var import attach_spectral_gate
+    _spectral = attach_spectral_gate(router, feed, cap_pct=args.spectral_var_cap,
+                                     level=args.spectral_var_level,
+                                     horizon_days=args.spectral_var_horizon)
+    if _spectral is not None:
+        print(f"[ib-paper] spectral VaR gate ON: {_spectral.thresholds()}", flush=True)
 
     if args.require_card:
         _engine = VSInvestmentEngine()
