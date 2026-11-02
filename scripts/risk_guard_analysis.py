@@ -120,7 +120,7 @@ def wiring_checks(src: Path) -> dict[str, bool]:
     paper = (src / "brokers" / "paper.py").read_text(encoding="utf-8")
     return {
         "monitor can call Router.check_forced_exits (needs `forced_exits: true`)": "check_forced_exits(" in monitor,
-        "monitor passes open notional to the gross-leverage gate": "current_open_notional=open_notional" in monitor,
+        "monitor passes open notional to the gross-leverage gate": "current_open_notional=book[" in monitor,
         "card path passes open notional through": "current_open_notional=current_open_notional" in approval,
         "place-order passes open notional": "current_open_notional=open_notional" in cli,
         "paper broker auto-trips the kill-switch (KillSwitch.evaluate)": "_kill_switch.evaluate(" in paper,

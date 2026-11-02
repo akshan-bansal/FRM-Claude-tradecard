@@ -35,6 +35,7 @@ not simulation.
 from __future__ import annotations
 
 import json
+import time as _time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,10 +64,20 @@ def default_graph_journal() -> Path:
 # saw the vendor's already-aggregated fields. ``venue`` and ``symbol`` were added when the paper
 # brokers started closing the fills→graph loop, giving downstream queries like "which venues
 # traded X" or "did fills cluster around a stressed_by market bridge" first-class node targets.
+#
+# ``society`` and ``factor`` (2026-10-03, HOMOGENEOUS_GRAPH_SCOPE.md): a ``society`` node is one
+# OASIS simulation run (id = the run_id the seed was issued under); a ``factor`` node is a
+# systematic return driver a symbol loads on (``meta.kind`` says which sort). Both join the existing
+# graph through ``symbol`` so a fill, the intel behind it and the simulated society's view are one
+# connected component rather than a third island.
+#
+# ``agent`` (2026-10-04): one simulated agent of a ``society``; id is ``<run_id>:<agent_id>`` so two
+# runs never share a node. Added once ``sim/oasis_graph.py`` could read per-agent structure out of
+# an OASIS run's database (the result file only ever carried per-symbol aggregates).
 NodeType = Literal[
     "poll", "domain", "region", "source", "market", "event", "venue", "symbol",
-    "society", "agent",  # an OASIS run and one of its simulated agents (sim/ingest.py, 2026-10-30)
-    "analysis",
+    "analysis", "factor",
+    "society", "agent",  # an OASIS run and one of its simulated agents
 ]
 
 # Edge predicates.
@@ -80,6 +91,18 @@ NodeType = Literal[
 #   ``traded`` — a venue executed a fill on a symbol; weight is the notional, meta carries
 #                action / qty / price / session_id / order_id / ts_fill (a per-fill decomposition,
 #                paired with venue and symbol nodes to keep the record queryable)
+#   ``holds_stance`` — a simulated society's aggregate view of a symbol: weight is the mean stance in
+#                      [-1, +1] (-1 adverse), meta carries dispersion / agent count / run id. It is
+#                      what the simulation REPORTED; nothing says the stance was right.
+#   ``loads_on`` — a symbol's loading on a factor; weight is the loading, meta the estimator.
+#   ``member_of`` — an agent belongs to a society run (structural, weight 1).
+#   ``follows`` — one simulated agent follows another (weight 1).
+#   ``engaged`` — one agent liked / disliked / commented on / reposted another's items; weight is
+#                 the number of interactions, meta the breakdown. Counts only, never the text.
+#   ``attends`` — an agent's posts or comments mentioned a symbol; weight is the number of items.
+#                 A count of what the agent wrote about, not a view of it: no sentiment is read.
+#   ``seeded`` — a poll briefed a society (poll -> society): the snapshot the simulated agents were
+#                shown. This is what makes "which intelligence did this society read" a walk, not a guess.
 #   ``mentions`` — a news headline (event id ``news:<source>:<content_hash>``) refers to a symbol
 #                  (2026-10-12). Weight 1, ``as_of`` is when the collector SAW it, never the published
 #                  time; ``meta.via`` says whether the title named it or a per-ticker feed tagged it.
@@ -87,7 +110,7 @@ NodeType = Literal[
 Predicate = Literal[
     "observed", "elevated_in", "co_occurs", "stressed_by",
     "mentioned_by", "about_domain", "affects_region", "traded", "ranked_by",
-    "mentions",
+    "mentions", "scaled", "loads_on",
     # OASIS (2026-10-30): what a simulated society REPORTED. Nothing says the stance was right.
     "holds_stance", "member_of", "follows", "engaged", "attends", "seeded",
 ]
@@ -112,9 +135,15 @@ class Edge:
     weight: float = 1.0
     as_of: str = ""        # ISO-8601 UTC; set by the writer from snapshot.as_of
     meta: dict[str, float | str] = field(default_factory=dict)
+    # Second, SEPARATE channel from ``weight`` (2026-09-29). ``weight`` is the native record in its
+    # own per-predicate unit — signed notional dollars for ``traded``, a decayed observation score
+    # for ``observed``, a signed rank for ``ranked_by`` — three things that cannot be pooled. A model
+    # needs one commensurable input, so ``influence`` is a dimensionless multiplier in (0, 1].
+    # ``None`` means "carries no view", NOT a multiplier of zero. Nothing sums the two channels.
+    influence: float | None = None
 
     def to_row(self) -> dict[str, object]:
-        return {
+        row: dict[str, object] = {
             "subject": [self.subject[0], self.subject[1]],
             "predicate": self.predicate,
             "object": [self.object[0], self.object[1]],
@@ -122,6 +151,11 @@ class Edge:
             "as_of": self.as_of,
             "meta": dict(self.meta),
         }
+        # Emitted only when set, so every journal row written before 2026-09-29 stays byte-identical
+        # and a reader that does not know the field is unaffected.
+        if self.influence is not None:
+            row["influence"] = self.influence
+        return row
 
     @classmethod
     def from_row(cls, row: dict[str, object]) -> "Edge":
@@ -135,6 +169,8 @@ class Edge:
             weight=float(row.get("weight", 1.0)),      # type: ignore[arg-type]
             as_of=str(row.get("as_of", "")),
             meta=dict(row.get("meta") or {}),      # type: ignore[arg-type]
+            influence=(None if row.get("influence") is None
+                       else float(row["influence"])),      # type: ignore[arg-type]
         )
 
 
@@ -318,6 +354,8 @@ DEFAULT_POLICIES: dict[Predicate, DecayPolicy] = {
     # A simulated run describes one moment; its structure is as perishable as the stance it came with.
     # The durable record of every run is state/oasis_runs.jsonl, which nothing washes.
     "holds_stance":   DecayPolicy(mode="exp", half_life_h=24.0, ttl_h=7 * 24),
+    "loads_on":       DecayPolicy(mode="exp", half_life_h=72.0, ttl_h=14 * 24),
+    # The structure of one simulated run: as perishable as the stance it came with.
     "member_of":      DecayPolicy(mode="exp", half_life_h=24.0, ttl_h=7 * 24),
     "follows":        DecayPolicy(mode="exp", half_life_h=24.0, ttl_h=7 * 24),
     "engaged":        DecayPolicy(mode="exp", half_life_h=24.0, ttl_h=7 * 24),
@@ -385,13 +423,58 @@ def wash_edges(
         if pol.ttl_h is not None and age_h > pol.ttl_h:
             continue                    # pruned by hard TTL
         new_w = _decayed_weight(e.weight, age_h, pol)
-        if new_w < pol.min_weight:
+        # Magnitude, not sign: ``holds_stance`` is signed (-1 adverse .. +1 constructive). A signed
+        # compare dropped EVERY negative-weight edge on the first wash, i.e. it would have deleted
+        # exactly the adverse views the influence adapter acts on while keeping the constructive
+        # ones. Every pre-existing decaying predicate has a non-negative weight, so this changes
+        # nothing for them; ``traded`` / ``ranked_by`` are signed but have no policy at all.
+        if abs(new_w) < pol.min_weight:
             continue                    # decayed below the noise floor
         if abs(new_w - e.weight) < 1e-12:
             out.append(e)
         else:
             out.append(_dc_replace(e, weight=new_w))
     return out
+
+
+def wash_due(*, max_prune_fraction: float | None, last_wash_ts: float | None, now: float,
+             min_seconds: float) -> bool:
+    """Whether a wash should run now.
+
+    ``max_prune_fraction`` of 0.0 (or less) disables pruning entirely: no wash, no ``.bak`` rewrite.
+    Before 2026-09-18 the CLI mapped 0.0 to ``None``, which :func:`wash_journal_file` reads as
+    *uncapped*, so the "off" value pruned the most. ``None`` still means uncapped here.
+    Otherwise a wash is due when none has run yet or ``min_seconds`` have passed since the last one.
+    """
+    if max_prune_fraction is not None and max_prune_fraction <= 0:
+        return False
+    return last_wash_ts is None or (now - last_wash_ts) >= min_seconds
+
+
+def _wash_marker(path: str | Path) -> Path:
+    return Path(f"{path}.last_wash")
+
+
+def last_wash_time(path: str | Path = DEFAULT_GRAPH_JOURNAL) -> float | None:
+    """Epoch seconds of the last wash of ``path``, persisted across process restarts.
+
+    Reads the ``<path>.last_wash`` marker written by :func:`record_wash_time`. Falls back to the
+    ``<path>.bak`` mtime, because every wash rewrites that backup, so journals washed before the
+    marker existed still count. Returns None if neither exists (no wash on record).
+    """
+    marker = _wash_marker(path)
+    try:
+        return float(marker.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pass
+    bak = Path(f"{path}.bak")
+    return bak.stat().st_mtime if bak.exists() else None
+
+
+def record_wash_time(path: str | Path = DEFAULT_GRAPH_JOURNAL, ts: float | None = None) -> None:
+    """Persist the time of a completed wash so the cadence survives restarts."""
+    stamp = ts if ts is not None else _time.time()
+    _wash_marker(path).write_text(f"{stamp:.3f}\n", encoding="utf-8")
 
 
 def wash_journal_file(
@@ -486,8 +569,11 @@ def append_edges(edges: Iterable[Edge], path: str | Path | None = None) -> None:
         with p.open("a", encoding="utf-8") as fh:
             for e in edges:
                 fh.write(json.dumps(e.to_row(), default=str) + chr(10))
-    except Exception:
-        log.warning("intel.graph.append_failed", path=str(path))
+    except Exception as exc:
+        # Never raises (a journal write must not break a trading loop), but say why, so a full disk
+        # or a permissions problem is diagnosable from the log (audit gap, 2026-09-18).
+        log.warning("intel.graph.append_failed", path=str(path),
+                    error_type=type(exc).__name__, error=str(exc))
 
 
 def append_snapshot_edges(snap: IntelSnapshot, path: str | Path | None = None) -> None:
@@ -516,6 +602,132 @@ def fill_edge(*, venue: str, symbol: str, action: str, quantity: float, price: f
             "action": action, "qty": float(quantity), "price": float(price),
             "session_id": session_id, "order_id": str(order_id),
         },
+    )
+
+
+# --------------------------------------------------------------------------------------------- #
+# influence channel                                                                              #
+# --------------------------------------------------------------------------------------------- #
+
+INFLUENCE_MIN = 0.0        # exclusive: a 0 multiplier is "silenced", which is not the same as None
+INFLUENCE_MAX = 1.0        # inclusive
+
+
+def clamp_influence(value: float | None) -> float | None:
+    """Coerce a raw multiplier into the channel's contract, or ``None`` for "carries no view".
+
+    The upper clamp is the load-bearing part. ``tests/test_intel_overlay.py`` already asserts of the
+    overlay that ``0.0 < scalar <= 1.0`` — intelligence may de-risk and may never lever up. Putting
+    the same bound on the channel means that property survives a future caller passing something
+    larger, rather than depending on every call site remembering it.
+    """
+    if value is None:
+        return None
+    v = float(value)
+    if v != v:                       # NaN
+        return None
+    if v <= INFLUENCE_MIN:
+        return None                  # not a multiplier of zero — the edge simply carries no view
+    return min(v, INFLUENCE_MAX)
+
+
+# Per-predicate influence in the model's channel. Dimensionless, never dollars, never a score.
+#
+# ``traded`` is damped to 0.65 by explicit instruction (2026-09-29). Note what this does and does
+# not do: it is a cap in the DIMENSIONLESS channel, so a venue edge contributes 0.65 where an intel
+# edge contributes 1.0. It is NOT 65% of the edge's ``weight`` — that weight is signed notional up
+# to +/-100,046, and 65% of it would still be ~65,000x an ``about_domain`` edge (max 1.0), i.e. it
+# would still dominate every intel edge in the graph. Damping a magnitude that is five orders of
+# magnitude too large does not limit it; capping the channel does.
+#
+# ``ranked_by`` abstains. Half its edges are negative (23 of 45, range -61.2 to +17.6) and those
+# negatives are real expertise. Mapping a signed rank onto a (0, 1] multiplier is a modelling
+# decision, not plumbing, so the sign stays in ``weight`` and the edge carries no influence yet.
+#
+# ``scaled`` is absent on purpose: its influence is the measured scalar carried per-edge, not a
+# constant. See :func:`scaled_edge`.
+INFLUENCE_BY_PREDICATE: dict[Predicate, float | None] = {
+    "observed":       1.0,
+    "about_domain":   1.0,
+    "stressed_by":    1.0,
+    "elevated_in":    1.0,
+    "co_occurs":      1.0,
+    "mentioned_by":   1.0,
+    "affects_region": 1.0,
+    "traded":         0.65,
+    "ranked_by":      None,
+}
+
+
+def node_power(edges: Iterable[Edge]) -> dict[tuple[str, str], dict[str, float]]:
+    """Redistribute the graph's influence over its nodes as a bounded SHARE, not a magnitude.
+
+    Each edge that carries influence contributes it to the node it leaves (``emitted``) and the node
+    it reaches (``received``). A node's raw power is the sum of both; ``power`` is that raw figure
+    normalised so every node's share sums to 1.0 across the graph.
+
+    Normalising is the point. An unnormalised sum is denominated in "influence units" that mean
+    nothing on their own and grow without bound as the journal accrues, so yesterday's power is not
+    comparable to today's. A share is comparable across time and across graphs, and it makes the
+    redistribution explicit: raising one predicate's influence necessarily lowers every other node's
+    share rather than inflating the total.
+
+    Edges whose influence is ``None`` are skipped entirely — they are not zero-weight participants,
+    they are not in this calculation at all.
+    """
+    emitted: dict[tuple[str, str], float] = {}
+    received: dict[tuple[str, str], float] = {}
+    for e in edges:
+        infl = e.influence if e.influence is not None else INFLUENCE_BY_PREDICATE.get(e.predicate)
+        infl = clamp_influence(infl)
+        if infl is None:
+            continue
+        emitted[e.subject] = emitted.get(e.subject, 0.0) + infl
+        received[e.object] = received.get(e.object, 0.0) + infl
+    nodes = set(emitted) | set(received)
+    raw = {n: emitted.get(n, 0.0) + received.get(n, 0.0) for n in nodes}
+    total = sum(raw.values())
+    return {
+        n: {
+            "emitted": round(emitted.get(n, 0.0), 6),
+            "received": round(received.get(n, 0.0), 6),
+            "raw": round(raw[n], 6),
+            "power": round(raw[n] / total, 8) if total > 0 else 0.0,
+        }
+        for n in nodes
+    }
+
+
+def scaled_edge(*, poll_id: str, symbol: str, scalar: float, asset_class: str,
+                intent_id: str, strategy: str, reasons: Sequence[str] = (),
+                as_of: str = "") -> Edge:
+    """One ``scaled`` edge: an overlay read resized an intent for this symbol.
+
+    This is the edge that joins the graph's two previously disconnected components. Before it, the
+    intel side (``source``/``poll``/``event``/``region``/``domain``/``market``) and the execution
+    side (``venue``/``symbol``/``analysis``) shared no edge at all, so a fill could not be traced
+    back to the intelligence that shaped it at any weighting — a topology gap, not a tuning one.
+
+    ``poll`` is the subject because the scalar is produced by one overlay read of one snapshot, and
+    that read is already a node connected to the events, regions and sources behind it. Hanging the
+    edge off the poll makes the provenance chain traversable (symbol -> poll -> observed events ->
+    sources) instead of inventing an asset-class node that nothing else references.
+
+    ``meta.intent_id`` is the join key. Without it this edge is decorative: it is what lets a fill
+    be matched to the intelligence that resized it.
+    """
+    infl = clamp_influence(scalar)
+    return Edge(
+        subject=("poll", poll_id),
+        predicate="scaled",
+        object=("symbol", symbol),
+        weight=round(float(scalar), 6),
+        as_of=as_of,
+        meta={
+            "intent_id": str(intent_id), "asset_class": str(asset_class),
+            "strategy": str(strategy), "reasons": "; ".join(reasons)[:200],
+        },
+        influence=infl,
     )
 
 

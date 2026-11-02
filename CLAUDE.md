@@ -115,7 +115,7 @@ opt-in per-run via `--require-card` on any runner but the daemon, or `require_ca
 - **Autonomous mode cannot be wrapped.** `AUTONOMOUS_ENABLED=true` + card approval are
   mutually exclusive; the wrapper raises at construction. Pick one loop.
 - **WYSIWYS canonical bytes.** The card signs a `|`-joined string that includes the
-  broker (`ib` / `kraken` / `questrade`), action, symbol, shares, entry, notional,
+  broker venue (`ib` / `ib_web` / `kraken` / `questrade` / `paper` / `global`), action, symbol, shares, entry, notional,
   account, intent id, and nonce. A MITM cannot silently swap the broker or resize the
   intent — the signature won't verify.
 - **Thesis from the VS engine.** `intel/vs_engine.py` composes a `<=140` char thesis
@@ -139,12 +139,30 @@ Layout:
   end-to-end (register / poll / sign / respond). Real firmware in `firmware/tradecard/`
   is a separate ESP-IDF project; the Python wheel does not ship it.
 
-To exercise without silicon:
+To exercise without silicon (verified end to end 2026-09-18, Kraken is 24/7):
 ```
-python scripts/approval_shim.py --port 8787
-python scripts/approval_card_sim.py --auto accept
-python -m trading_live_claude.cli signal --paper --require-card ...
+# 1. The paper script boots the shim itself on --card-shim-port and prints the card's bearer token.
+python scripts/paper_kraken.py --interval 20 --iterations 2 --require-card --card-shim-port 8787 --card-ttl 120
+# 2. In a second shell, pair the simulated card with that token.
+python scripts/approval_card_sim.py --shim http://127.0.0.1:8787 --auto accept --poll 1 --auth-token <token>
 ```
+`--require-card` exists on `scripts/paper_kraken.py`, `scripts/paper_ib.py` and `cli signal --paper`
+(the QT path, added 2026-09-28 with `--card-shim-host/--card-shim-port/--card-ttl`).
+`scripts/approval_shim.py` runs the shim standalone, for a loop that doesn't boot its own.
+Note: with the card on, the flatten-on-exit sells also need an ACCEPT.
+
+**The desk panel rides on the same shim.** Whatever boots the shim also serves the built panel:
+
+- `GET /desk` — public unlock shell, carries no journal data and never the token.
+- `GET /v1/desk/page` — the built page, behind the same auth as every other `/v1` route.
+
+Serving it there is what makes it live: the page's fetches are same-origin, so no CORS hole is
+opened and no token travels in a URL (the viewer pastes it into the shell once, per tab). The panel
+polls `/v1/intents/pending` and `/v1/stats` and is **read-only by construction** — it displays the
+prompt and its fingerprint for comparison against the card's screen; the ACCEPT that decides it is a
+signature made on the device. Without a link it shows no queue at all rather than a specimen one.
+Rebuild the page with `python scripts/build_desk_dash.py` (writes `pwa/desk.html` and the copy in
+`OS-InvestmentIntelligenceDashboard/`).
 
 Gap-closure objectives live in `NEXT_SESSION.md` section 11.
 
@@ -176,6 +194,8 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
   `docs/ENGINE_WIRING.md`. `trading doctor` shows what each layer has, without showing a secret.
 - **No removals without the user's express permission** (symbols, strategies, gates, flags, data). Move or
   extend instead; if a test and a table disagree, ask rather than shrink the table.
+- `tests/test_runbook.py` pins the desk's actual commands. `docs/PORT_FRM_CLAUDE.md` records what the merge with
+  `FRM-Claude` decided, and what was kept beside rather than merged.
 - `QUESTRADE_ENV` and `AUTONOMOUS_ACCOUNT=practice` route nothing: the token alone decides the account, and a
   money session refuses to start when the token's environment does not match. Practise on paper.
 - `supports_level_trigger` means a strategy emits `entry_level`; `level_trigger_default` means the monitor
@@ -199,9 +219,13 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
 - `risk-management` — sizing, VaR, heat, kill switch
 - `live-signal-monitor` — polling loop, alerts only, never orders
 - `questrade-execution` — signal → risk gate → live order (own skill)
+- `claude-trader` — LLM-driven trading decisions (`/trade-check`); algorithms are helpers
 
 `.claude/commands/`:
 - `/autonomous status|start|stop|tail` — manage the autonomous daemon
+- `/trade-check`, `/trade-now` — LLM-driven trading (Mode A)
+- `/backtest`, `/tune`, `/signal-check`, `/paper-trade`, `/positions`, `/risk-report`, `/kill`,
+  `/live-trade-confirm`
 
 `.claude/agents/`:
 - `autonomous-monitor` — periodic health audit of the daemon

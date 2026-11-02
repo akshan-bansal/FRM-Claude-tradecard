@@ -191,7 +191,7 @@ def test_a_paper_fill_is_reported_as_an_execution_with_price_and_fee(tmp_path: P
     ex = [r for r in led.rows() if r["event"] == "EXECUTION_REPORTED"]
     assert len(ex) == 1 and ex[0]["intent_id"] == intent.intent_id
     p = ex[0]["payload"]
-    assert p["matched"] and p["quantity"] == 10 and p["price"] > 100.0 and p["fee"] == 4.95
+    assert p["matched"] and p["quantity"] == 10 and p["price"] > 100.0 and p["fee"] == pytest.approx(10 * p["price"] * 0.0026)
     assert p["currency"] == "USD" and p["currency_source"].startswith("listing")
     again = reconcile(led, broker, "PAPER-001", grace_s=0.0)       # nothing is written twice
     assert again.reported == 0 and again.breaks == []
@@ -521,7 +521,7 @@ def test_the_spectral_gate_trims_an_entry_to_its_var_cap_and_replays(tmp_path: P
     trim = next(r for r in led.rows() if r["event"] == "RISK_TRIMMED")
     assert trim["payload"]["cap"] == "spectral_var" and intent.shares < 100
     obs = next(r for r in led.rows() if r["event"] == "RISK_CHECK")["payload"]["observed"]["spectral_var"]
-    assert obs["var_usd"] > obs["cap_usd"] and obs["max_shares"] == intent.shares
+    assert obs["var_usd"] > obs["cap_usd"] and int(obs["max_shares"]) == intent.shares
     assert intent.shares * 100.0 * obs["loss_fraction"] <= 0.002 * 100_000.0
     assert [r["status"] for r in replay(led.rows())] == ["match"]
 

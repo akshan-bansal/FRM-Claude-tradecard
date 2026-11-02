@@ -112,13 +112,13 @@ class _Recorder:
 # ---------------------------------------------------------------- market-hours guard
 
 def test_closed_venue_is_skipped_entries_and_exits_alike(tmp_path: Path) -> None:
-    m, pb, _ = _monitor(tmp_path, _Script(entry=1), session_open_for=lambda _s: False)
+    m, pb, _ = _monitor(tmp_path, _Script(entry=1), market_open_for=lambda _s: False)
     assert m.step() == []
     assert _qty(pb) == 0.0
 
 
 def test_open_venue_trades_as_before(tmp_path: Path) -> None:
-    m, pb, _ = _monitor(tmp_path, _Script(entry=1), session_open_for=lambda _s: True)
+    m, pb, _ = _monitor(tmp_path, _Script(entry=1), market_open_for=lambda _s: True)
     assert [e.kind for e in m.step()] == ["entry"]
     assert _qty(pb) > 0
 
@@ -127,25 +127,26 @@ def test_guard_error_reads_as_open(tmp_path: Path) -> None:
     def boom(_s: str) -> bool:
         raise RuntimeError("calendar broke")
 
-    m, pb, _ = _monitor(tmp_path, _Script(entry=1), session_open_for=boom)
+    m, pb, _ = _monitor(tmp_path, _Script(entry=1), market_open_for=boom)
     m.step()
     assert _qty(pb) > 0
 
 
 def test_only_the_closed_symbol_is_skipped(tmp_path: Path) -> None:
     m, _, _ = _monitor(tmp_path, _Script(), ["BTC/USD", "VOO"],
-                       session_open_for=lambda s: s == "BTC/USD")
+                       market_open_for=lambda s: s == "BTC/USD")
     assert [e.symbol for e in m.step()] == ["BTC/USD"]
 
 
 def test_policy_reads_the_yaml_knobs() -> None:
     from trading_live_claude.analysis.venue_calendar import symbol_is_open
     risk = {"risk_model": "atr", "heat_aggregation": "sum"}
-    on = monitor_policy(SimpleNamespace(respect_market_hours=True, entry_triggers={"A": "both"},
+    on = monitor_policy(SimpleNamespace(respect_market_hours=True, skip_closed_venues=True, entry_triggers={"A": "both"},
                                         forced_exits=True, **risk))
-    assert on == {"session_open_for": symbol_is_open, "entry_triggers": {"A": "both"}, "forced_exits": True, **risk}
-    off = monitor_policy(SimpleNamespace(respect_market_hours=False, entry_triggers={}, forced_exits=False, **risk))
-    assert off["session_open_for"] is None and off["forced_exits"] is False
+    assert on == {"market_open_for": symbol_is_open, "entry_triggers": {"A": "both"}, "forced_exits": True, **risk}
+    off = monitor_policy(SimpleNamespace(respect_market_hours=False, skip_closed_venues=True, entry_triggers={},
+                                         forced_exits=False, **risk))
+    assert off["market_open_for"] is None and off["forced_exits"] is False
 
 
 # ---------------------------------------------------------------- entry channels

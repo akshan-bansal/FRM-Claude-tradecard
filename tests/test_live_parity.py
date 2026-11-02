@@ -58,7 +58,8 @@ def test_live_takes_exactly_what_paper_takes() -> None:
     live = set(inspect.signature(cli.live).parameters)
     paper = set(inspect.signature(cli.paper).parameters)
     assert live - paper == {"confirm", "allow_screened"}
-    assert paper - live == {"starting_equity"}
+    # A simulated book's own: its balance, closing itself on stop, resuming, and the one-shots.
+    assert paper - live == {"starting_equity", "flatten_on_exit", "resume_session", "close_symbols", "trim_to_slots"}
 
 
 # ---------------------------------------------------------------- a halt lets exits out
@@ -198,14 +199,16 @@ def test_unreadable_holding_gets_no_exemption(tmp_path: Path) -> None:
 
 
 def test_a_failed_read_does_not_stop_a_new_entry(tmp_path: Path) -> None:
-    """An entry was never exempt, so a positions outage must not change how it is gated."""
+    """An entry was never exempt, so a positions outage must not change how it is gated: the caller's
+    figure for the book stands in. With neither, the leverage cap has nothing to read, so it refuses."""
     r = _holding(tmp_path, 0.0)
 
     def boom(_a: str) -> list[Position]:
         raise BrokerError("positions unavailable")
 
     r.broker.positions = boom  # type: ignore[method-assign]
-    assert r._gate(_intent(OrderAction.BUY, 5), **BOOK).accepted
+    assert r._gate(_intent(OrderAction.BUY, 5), **BOOK, current_open_notional=0.0).accepted
+    assert "open notional unavailable" in r._gate(_intent(OrderAction.BUY, 5), **BOOK).rejected_reasons[0]
 
 
 def test_exempted_decisions_replay(tmp_path: Path) -> None:

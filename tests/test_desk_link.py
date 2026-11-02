@@ -104,7 +104,7 @@ def test_the_card_simulator_shows_the_same_fingerprint() -> None:
     sim = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
     spec.loader.exec_module(sim)  # type: ignore[union-attr]
     p = InMemoryApprovalStore(CardRegistry()).publish(intent(), broker="kraken", mode="paper", ttl_seconds=90.0)
-    assert f"HASH {p.fingerprint}" in sim.render_prompt(p.to_dict())
+    assert f"HASH {p.fingerprint}" in sim.render_prompt(p.to_dict(), sim.parse_canonical(p.to_dict()))
 
 
 # --------------------------------------------------------------------------- the live strip

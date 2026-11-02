@@ -16,7 +16,7 @@ matrix, each with its own permutation test).
 
 Contract, same as the rest of ``analysis``: this is a ruler. Outcomes are forward-looking and are
 used only as targets, never as features, and nothing here is imported by execution, risk, brokers,
-strategies, monitor or the daemon.
+strategies, monitor or the daemon. ``tests/test_lens_audit.py`` enforces the import boundary.
 
 Label maturity is the one thing that must not be skipped. A forward return over ``h`` bars is not
 known until ``h`` bars after its event, so a past event is a legal neighbour for the future lens
@@ -293,12 +293,24 @@ def _future_setup(
 
 
 def reliability_lens(
-    features: object, outcome: object, groups: object, *,
-    time: object | None = None, label_horizon: float = 0.0, tau: float = DEFAULT_TAU,
-    alpha: float = DEFAULT_ALPHA, n_perm: int = DEFAULT_PERMUTATIONS, seed: int = 7,
+    features: object,
+    outcome: object,
+    groups: object,
+    *,
+    time: object | None = None,
+    label_horizon: float = 0.0,
+    tau: float = DEFAULT_TAU,
+    alpha: float = DEFAULT_ALPHA,
+    n_perm: int = DEFAULT_PERMUTATIONS,
+    seed: int = 7,
     max_events: int = MAX_EVENTS,
 ) -> LensResult:
-    """Leave-one-group-out: read each event from other groups' events, weighted by similarity."""
+    """Leave-one-group-out: read each event from other groups' events, weighted by similarity.
+
+    Pass ``time`` and ``label_horizon`` when groups are symbols observed over the same dates:
+    neighbours whose label windows overlap the event's are then excluded, which removes the shared
+    market move that would otherwise make cross-symbol transfer look better than it is.
+    """
     a, allowed, y, g, _ = _reliability_setup(
         features, outcome, groups, time=time, label_horizon=label_horizon, tau=tau,
         max_events=max_events)
@@ -306,12 +318,23 @@ def reliability_lens(
 
 
 def reliability_by_group(
-    features: object, outcome: object, groups: object, *,
-    time: object | None = None, label_horizon: float = 0.0, tau: float = DEFAULT_TAU,
-    alpha: float = DEFAULT_ALPHA, n_perm: int = DEFAULT_PERMUTATIONS, seed: int = 7,
-    max_events: int = MAX_EVENTS, min_scored: int = MIN_EVENTS,
+    features: object,
+    outcome: object,
+    groups: object,
+    *,
+    time: object | None = None,
+    label_horizon: float = 0.0,
+    tau: float = DEFAULT_TAU,
+    alpha: float = DEFAULT_ALPHA,
+    n_perm: int = DEFAULT_PERMUTATIONS,
+    seed: int = 7,
+    max_events: int = MAX_EVENTS,
+    min_scored: int = MIN_EVENTS,
 ) -> dict[object, LensResult]:
-    """One reliability verdict per group, each read only from the other groups."""
+    """One reliability verdict per group, each read only from the other groups.
+
+    Groups with fewer than ``min_scored`` scoreable events are omitted, not reported.
+    """
     a, allowed, y, g, labels = _reliability_setup(
         features, outcome, groups, time=time, label_horizon=label_horizon, tau=tau,
         max_events=max_events)
@@ -320,12 +343,24 @@ def reliability_by_group(
 
 
 def future_lens(
-    features: object, outcome: object, groups: object, *,
-    time: object, label_horizon: float, tau: float = DEFAULT_TAU, recency: float = DEFAULT_RECENCY,
-    alpha: float = DEFAULT_ALPHA, n_perm: int = DEFAULT_PERMUTATIONS, seed: int = 7,
+    features: object,
+    outcome: object,
+    groups: object,
+    *,
+    time: object,
+    label_horizon: float,
+    tau: float = DEFAULT_TAU,
+    recency: float = DEFAULT_RECENCY,
+    alpha: float = DEFAULT_ALPHA,
+    n_perm: int = DEFAULT_PERMUTATIONS,
+    seed: int = 7,
     max_events: int = MAX_EVENTS,
 ) -> LensResult:
-    """Causal read: each event from its own group's earlier events whose labels had matured."""
+    """Causal read: each event from its own group's earlier events whose labels had matured.
+
+    ``label_horizon`` is required, not defaulted. Set it to the forward-return horizon in the same
+    units as ``time`` (bars). Using a smaller value lets overlapping windows leak into the read.
+    """
     a, allowed, y, g, _ = _future_setup(
         features, outcome, groups, time=time, label_horizon=label_horizon, tau=tau,
         recency=recency, max_events=max_events)
@@ -333,10 +368,19 @@ def future_lens(
 
 
 def future_by_group(
-    features: object, outcome: object, groups: object, *,
-    time: object, label_horizon: float, tau: float = DEFAULT_TAU, recency: float = DEFAULT_RECENCY,
-    alpha: float = DEFAULT_ALPHA, n_perm: int = DEFAULT_PERMUTATIONS, seed: int = 7,
-    max_events: int = MAX_EVENTS, min_scored: int = MIN_EVENTS,
+    features: object,
+    outcome: object,
+    groups: object,
+    *,
+    time: object,
+    label_horizon: float,
+    tau: float = DEFAULT_TAU,
+    recency: float = DEFAULT_RECENCY,
+    alpha: float = DEFAULT_ALPHA,
+    n_perm: int = DEFAULT_PERMUTATIONS,
+    seed: int = 7,
+    max_events: int = MAX_EVENTS,
+    min_scored: int = MIN_EVENTS,
 ) -> dict[object, LensResult]:
     """One future verdict per group; groups with too few scoreable events are omitted."""
     a, allowed, y, g, labels = _future_setup(
@@ -347,9 +391,17 @@ def future_by_group(
 
 
 def audit_lenses(
-    features: object, outcome: object, groups: object, *,
-    time: object, label_horizon: float, tau: float = DEFAULT_TAU, recency: float = DEFAULT_RECENCY,
-    alpha: float = DEFAULT_ALPHA, n_perm: int = DEFAULT_PERMUTATIONS, seed: int = 7,
+    features: object,
+    outcome: object,
+    groups: object,
+    *,
+    time: object,
+    label_horizon: float,
+    tau: float = DEFAULT_TAU,
+    recency: float = DEFAULT_RECENCY,
+    alpha: float = DEFAULT_ALPHA,
+    n_perm: int = DEFAULT_PERMUTATIONS,
+    seed: int = 7,
     max_events: int = MAX_EVENTS,
 ) -> LensAudit:
     """Run both lenses on the same events. ``time`` and ``label_horizon`` apply to both."""

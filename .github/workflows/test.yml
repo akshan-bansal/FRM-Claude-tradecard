@@ -68,6 +68,7 @@ jobs:
             tests/test_multi_broker_router.py \
             tests/test_risk.py \
             tests/test_session.py \
+            tests/test_runbook.py \
             tests/test_live_parity.py \
             tests/test_broker_parity.py \
             tests/test_monitor.py \

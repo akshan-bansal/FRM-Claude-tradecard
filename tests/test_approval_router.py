@@ -238,6 +238,40 @@ def test_response_replay_rejected(paper_router: Router, store, card_keypair):
     t.join(timeout=2)
 
 
+def test_response_landing_during_verify_cannot_overwrite_verdict(
+    store, card_keypair, monkeypatch: pytest.MonkeyPatch
+):
+    """The lock is released while a signature verifies; a DECLINE resolved in that
+    window must not be overwritten by the ACCEPT that was already mid-flight."""
+    key, _ = card_keypair
+    inner_store, registry = store
+    prompt = inner_store.publish(_intent(), mode="paper", broker="stub", ttl_seconds=10)
+    sig = key.sign(prompt.canonical.encode("utf-8"))
+
+    real_verify = registry.verify
+    racer: dict[str, bool] = {}
+
+    def verify_then_race(card_id: str, canonical: bytes, signature: bytes) -> bool:
+        ok = real_verify(card_id, canonical, signature)
+        if not racer:
+            racer["started"] = True
+            racer["decline_ok"] = inner_store.respond(
+                prompt.intent_id, decision="DECLINE", card_id="card-001", signature=sig
+            )
+        return ok
+
+    monkeypatch.setattr(registry, "verify", verify_then_race)
+    accept_ok = inner_store.respond(
+        prompt.intent_id, decision="ACCEPT", card_id="card-001", signature=sig
+    )
+
+    assert racer["decline_ok"] is True
+    assert accept_ok is False
+    assert inner_store.wait(prompt.intent_id, timeout=0) == "DECLINE"
+    pb = inner_store.passbook()
+    assert [e.verdict for e in pb] == ["DECLINE"]
+
+
 def test_autonomous_router_cannot_be_wrapped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("AUTONOMOUS_ENABLED", "true")
     inner = Router.build_default(
@@ -262,6 +296,22 @@ def test_canonical_bytes_stable():
     assert canonical_bytes(**{**kw, "shares": 13}) != canonical_bytes(**kw)
     # broker swap (ib -> kraken) MUST change the signed bytes
     assert canonical_bytes(**{**kw, "broker": "kraken"}) != canonical_bytes(**kw)
+    # Whole-share wire form is frozen: deployed cards have signed this exact layout.
+    assert canonical_bytes(**kw) == b"ib|Buy|XIC.TO|12|31.0500|372.60|acct-1|abc|nnn"
+
+
+def test_canonical_bytes_preserves_fractional_crypto_quantity():
+    kw = dict(
+        broker="kraken", action="Buy", symbol="BTC/USD", entry=42000.0,
+        notional_usd=2100.0, account="k1", intent_id="abc", nonce="nnn",
+    )
+    assert canonical_bytes(shares=0.05, **kw).split(b"|")[3] == b"0.05"
+    assert canonical_bytes(shares=0.00012345, **kw).split(b"|")[3] == b"0.00012345"
+    assert canonical_bytes(shares=0.00000005, **kw).split(b"|")[3] == b"0.00000005"
+    # Sub-satoshi must neither round up nor collapse to zero on the signed bytes.
+    assert canonical_bytes(shares=0.000000005, **kw).split(b"|")[3] == b"0.000000005"
+    assert canonical_bytes(shares=0.05, **kw) != canonical_bytes(shares=0.06, **kw)
+    assert canonical_bytes(shares=3.0, **kw).split(b"|")[3] == b"3"
 
 
 def test_publish_carries_broker_and_thesis(paper_router: Router, store):
@@ -321,9 +371,74 @@ def test_card_broker_maps_every_feed_venue_onto_the_card_protocol(venue: str, ex
 
 def test_a_broker_the_card_cannot_name_fails_at_construction(tmp_path: Path, store) -> None:
     class _Nameless(_StubBroker):
-        name = venue = "paper"
+        name = venue = "no-such-venue"
 
     inner_store, _ = store
     router = Router.build_default(mode="paper", broker=_Nameless(), state_dir=tmp_path)
     with pytest.raises(ValueError, match="cannot name broker"):
         ApprovalRouter(router, store=inner_store)
+# --- broker tag sourcing (2026-09-17) --------------------------------------
+# ApprovalRouter published ``broker.name``, but the wire vocabulary is ``broker.venue``:
+# IBBroker.name is "interactive-brokers" and IBWebBroker.name is "interactive-brokers-web",
+# neither of which the shim's Broker literal accepts. Prompts from those adapters would fail
+# response validation the same way "paper" did.
+
+class _VenueBroker(_StubBroker):
+    """Shaped like IBBroker: a venue tag that differs from the adapter's name."""
+    name = "interactive-brokers"
+    venue = "ib"
+
+
+class _PaperShapedBroker(_StubBroker):
+    """Shaped like PaperBroker wrapping a feed."""
+    name = "paper"
+    venue = "paper"
+
+
+class _NamedOnlyBroker(_StubBroker):
+    """No ``.venue`` at all, and a name outside the wire vocabulary."""
+    name = "static-feed"
+    venue = None
+
+
+def _published_broker_tag(router_broker, tmp_path: Path, store) -> str:
+    inner_store, _ = store
+    inner = Router.build_default(mode="paper", broker=router_broker, state_dir=tmp_path)
+    approval = ApprovalRouter(inner, store=inner_store, ttl_seconds=10)
+    t = threading.Thread(
+        target=lambda: approval.submit(
+            _intent(), equity=100_000, existing_risk=0, open_positions=0
+        ),
+        daemon=True,
+    )
+    t.start()
+    pending: list = []
+    for _ in range(200):
+        pending = inner_store.pending()
+        if pending:
+            break
+        threading.Event().wait(0.01)
+    assert pending, "no prompt published"
+    return pending[0].broker
+
+
+def test_publish_uses_broker_venue_not_name(tmp_path: Path, store):
+    tag = _published_broker_tag(_VenueBroker(), tmp_path, store)
+    assert tag == "ib"                 # not "interactive-brokers"
+
+
+def test_a_broker_the_wire_cannot_name_fails_at_start(tmp_path: Path, store):
+    """Publishing a name the shim's response model refuses made every pending read a 500."""
+    with pytest.raises(ValueError, match="cannot name broker"):
+        _published_broker_tag(_NamedOnlyBroker(), tmp_path, store)
+
+
+def test_published_tag_is_accepted_by_the_wire_schema(tmp_path: Path, store):
+    """The tag a real paper session publishes must survive the shim's response model."""
+    from typing import get_args
+
+    from trading_live_claude.execution.approval_asgi import Broker
+
+    accepted = set(get_args(Broker))
+    assert _published_broker_tag(_VenueBroker(), tmp_path, store) in accepted
+    assert _published_broker_tag(_PaperShapedBroker(), tmp_path, store) in accepted

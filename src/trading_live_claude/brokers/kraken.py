@@ -34,6 +34,7 @@ from typing import Any, cast
 import httpx
 
 from ..logging_setup import get_logger
+from ..risk.quantity import QuantityRule
 from .base import Broker, BrokerError, OrderRejected
 from .kraken_auth import KRAKEN_REST, KrakenAuthError, private_post
 from .models import (
@@ -45,6 +46,7 @@ from .models import (
     OrderType,
     Position,
     Quote,
+    plain_decimal,
 )
 
 log = get_logger(__name__)
@@ -64,8 +66,12 @@ _KRAKEN_PAIRS: dict[str, str] = {
 
 
 def to_kraken_pair(symbol: str) -> str:
-    """Routed symbol (``BTC/USD``) → Kraken wire pair (``XBTUSD``). Pass through for unknowns."""
-    return _KRAKEN_PAIRS.get(symbol, symbol)
+    """Routed symbol (``BTC/USD``) → Kraken wire pair (``XBTUSD``).
+
+    Unlisted pairs drop the slash (``SOL/USD`` → ``SOLUSD``): Kraken's REST pair codes carry no
+    separator, and the slashed form made AssetPairs lookups for SOL/ADA/POL/UNI/AAVE/ZEC miss.
+    """
+    return _KRAKEN_PAIRS.get(symbol, symbol.replace("/", ""))
 
 
 class KrakenBroker(Broker):
@@ -102,7 +108,7 @@ class KrakenBroker(Broker):
         if self._owns_client:
             self._client.close()
 
-    def __enter__(self) -> "KrakenBroker":
+    def __enter__(self) -> KrakenBroker:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -281,12 +287,12 @@ class KrakenBroker(Broker):
             "pair": to_kraken_pair(order.symbol),
             "type": "buy" if order.action == OrderAction.BUY else "sell",
             "ordertype": _order_type_wire(order.orderType),
-            "volume": str(order.totalQuantity),
+            "volume": plain_decimal(order.totalQuantity),
         }
         if order.orderType in (OrderType.LIMIT, OrderType.STOP_LIMIT) and order.limitPrice is not None:
-            body["price"] = str(order.limitPrice)
+            body["price"] = plain_decimal(order.limitPrice)
         if order.orderType in (OrderType.STOP, OrderType.STOP_LIMIT) and order.stopPrice is not None:
-            body["price2"] = str(order.stopPrice)
+            body["price2"] = plain_decimal(order.stopPrice)
 
         try:
             result = private_post(
@@ -363,6 +369,23 @@ class KrakenBroker(Broker):
                 time=datetime.fromtimestamp(float(t["time"]), tz=UTC), venue="kraken",
                 account=account_number))
         return out
+    def lot_rules(self, symbols: list[str]) -> dict[str, QuantityRule]:
+        """Tradeable quantity rules per routed symbol from Kraken's public AssetPairs.
+
+        ``lot_decimals`` sets the step, ``ordermin`` the minimum size and ``costmin`` the minimum
+        order value. Symbols Kraken does not answer for are left out, so callers keep their default.
+        """
+        rules: dict[str, QuantityRule] = {}
+        for sym in symbols:
+            try:
+                result = self._get_public("/0/public/AssetPairs", {"pair": to_kraken_pair(sym)})["result"]
+            except (httpx.HTTPError, BrokerError, KeyError) as e:
+                log.warning("kraken.lot_rules.miss", symbol=sym, error=str(e))
+                continue
+            row = _find_ticker(result, to_kraken_pair(sym)) or (next(iter(result.values())) if len(result) == 1 else None)
+            if row is not None:
+                rules[sym] = lot_rule_from_asset_pair(row)
+        return rules
 
     # ---- helpers -------------------------------------------------------------
 
@@ -423,6 +446,12 @@ def _holdings(balances: dict[str, Any]) -> dict[str, float]:
         if qty and not _is_fiat_asset(asset) and "." not in asset:
             out[_asset_to_routed_symbol(asset)] = qty
     return out
+
+
+def lot_rule_from_asset_pair(row: dict[str, Any]) -> QuantityRule:
+    decimals = int(row.get("lot_decimals", 8))
+    return QuantityRule(step=10.0 ** -decimals, min_qty=float(row.get("ordermin") or 0.0),
+                        min_notional=float(row.get("costmin") or 0.0))
 
 
 def _find_ticker(result: dict[str, Any], wire_pair: str) -> dict[str, Any] | None:

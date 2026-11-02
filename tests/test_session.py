@@ -77,6 +77,12 @@ def test_a_money_plan_differs_from_paper_only_where_it_must(venue: str) -> None:
     {"poll_interval_seconds": 60}, {"intel_overlay": False}, {"intel_refresh_seconds": 120.0},
     {"require_card": True}, {"card_ttl_seconds": 30.0}, {"require_basket": True}, {"spectral_var_cap": 0.005},
     {"spectral_var_level": 0.95}, {"spectral_var_horizon": 5}, {"hedge_symbol": "UUP"},
+    {"profit_lock": True}, {"profit_lock_exempt": ""}, {"candle_exit": True}, {"candle_exit_exempt": "bollinger"},
+    {"overbought_exit": True}, {"overbought_exit_exempt": "bollinger"}, {"oversold_entry": True},
+    {"oversold_entry_only": "bollinger"}, {"parallel_sizing": False}, {"sizing_v2": False}, {"mute_alerts": "AAA"},
+    {"max_round_trip_cost_ratio": 0.02}, {"warmup_interval_seconds": 60}, {"warmup_minutes": 30.0},
+    {"card_shim_host": "10.0.0.2"}, {"card_attach": True}, {"position_cap_mode": "static"},
+    {"position_cap_ref_vol": 0.3}, {"stale_quote_frozen_s": 60.0}, {"on_stale_quote": "warn"}, {"params": "wf"},
 ])
 def test_every_knob_reaches_paper_and_money_alike(knob: dict[str, Any]) -> None:
     """A practised setting has to be the setting that runs. Moving one must move both plans, and equally."""
@@ -122,10 +128,10 @@ def test_streams_stay_separate() -> None:
 
 
 def test_paper_costs_are_per_venue_and_can_be_overridden() -> None:
-    assert _plan(_settings(), "kraken").paper_costs["commission_bps"] == 40.0
-    assert _plan(_settings(), "questrade").paper_costs["commission_per_trade"] == 4.95
-    p = _plan(_settings(paper_costs={"kraken": {"commission_bps": 26.0}}), "kraken")
-    assert p.paper_costs["commission_bps"] == 26.0 and p.paper_costs["slippage_bps"] == 5.0
+    assert _plan(_settings(), "kraken").paper_costs["commission_bps"] == 26.0
+    assert _plan(_settings(), "questrade").paper_costs["flat_per_fill"] == 4.95
+    p = _plan(_settings(paper_costs={"kraken": {"commission_bps": 40.0}}), "kraken")
+    assert p.paper_costs["commission_bps"] == 40.0 and p.paper_costs["slippage_bps"] == 5.0
     assert _plan(_settings(), "kraken", "live").paper_costs == {}
 
 
@@ -275,8 +281,8 @@ def test_a_paper_session_is_built_and_runs_with_every_layer_wired(tmp_path: Path
     plan = _plan(settings, options=SessionOptions(interval=5))
     session = build_session(settings, plan, feed=_Feed(), book=_book(), label="[t]", emit=print)  # type: ignore[arg-type]
     m = session.monitor
-    assert isinstance(session.exec_broker, PaperBroker) and session.exec_broker._cross_spread is True
-    assert m.persistence_for is not None and m.session_open_for is not None
+    assert isinstance(session.exec_broker, PaperBroker) and session.exec_broker._fill_model == "touch"
+    assert m.persistence_for is not None and m.market_open_for is not None
     assert m.risk_model == "cvar" and m.heat_aggregation == "corr"
     assert session.router.mode == "paper" and session.router.max_gross_leverage == 1.0
     session.run(1)

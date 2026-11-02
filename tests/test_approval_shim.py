@@ -365,6 +365,8 @@ def test_openapi_covers_every_live_route(shim):
         ("POST",   "/v1/intents/{intent_id}/response"),
         ("GET",    "/v1/intel/{ref}"),
         ("GET",    "/v1/passbook"),
+        ("GET",    "/v1/stats"),
+        ("GET",    "/v1/conviction-matrix"),
     }
     spec_routes = {(m.upper(), p) for p, ops in spec["paths"].items() for m in ops}
     missing = live_routes - spec_routes
@@ -448,3 +450,163 @@ def test_publish_rejects_unknown_broker(shim):
     # handler returned {"error": "..."}. Both contain the offending broker.
     payload = json.dumps(body)
     assert "robinhood" in payload or "broker" in payload
+
+
+# --------------------------------------------------------------------------- #
+# Metrics endpoints                                                           #
+# --------------------------------------------------------------------------- #
+
+def test_stats_endpoint_returns_valid_shape(shim):
+    """GET /v1/stats returns equity, approval, and gate metrics."""
+    status, body = _get(f"{shim['url']}/v1/stats")
+    assert status == 200
+    # Check required fields
+    assert "session_id" in body
+    assert "starting_equity" in body
+    assert "session_equity" in body
+    assert "peak_equity" in body
+    assert "max_drawdown_pct" in body
+    assert "acceptance_rate" in body
+    assert "intents_total" in body
+    assert "intents_approved" in body
+    assert "intents_declined" in body
+    assert "avg_ttl_response" in body
+    assert "gate_rejections" in body
+    assert "last_gate_reason" in body
+    assert "overlay_scalar" in body
+    assert "overlay_risk_zone" in body
+    # Validate types
+    assert body["starting_equity"] is None or isinstance(body["starting_equity"], (int, float))
+    assert body["session_equity"] is None or isinstance(body["session_equity"], (int, float))
+    assert isinstance(body["acceptance_rate"], (int, float))
+    assert 0.0 <= body["acceptance_rate"] <= 1.0
+    assert isinstance(body["intents_total"], int)
+
+
+def test_stats_reports_no_equity_when_it_has_no_journal(shim):
+    """A shim with no journal has no equity to report, so it must not invent one.
+
+    This test used to assert starting_equity == 100_000: a plausible default that a dashboard could
+    not distinguish from a measurement. The endpoint reports those fields as null and names them in
+    `placeholders`, while the verdict counts, which the store really does know, stay real.
+    """
+    status, body = _get(f"{shim['url']}/v1/stats")
+    assert status == 200
+    assert body["starting_equity"] is None and body["session_equity"] is None
+    assert body["overlay_scalar"] is None and body["session_id"] is None
+    for field in ("starting_equity", "session_equity", "max_drawdown_pct", "overlay_scalar"):
+        assert field in body["placeholders"], field
+    assert body["intents_total"] == 0        # measured, not placeheld
+
+
+def test_conviction_matrix_returns_valid_shape(shim):
+    """Sparse grid of walk-forward scores: one value per validated pair, null elsewhere."""
+    status, body = _get(f"{shim['url']}/v1/conviction-matrix")
+    assert status == 200
+    assert "symbols" in body
+    assert "strategies" in body
+    assert "matrix" in body
+    assert "updated_at" in body
+    # Validate structure
+    symbols = body["symbols"]
+    strategies = body["strategies"]
+    matrix = body["matrix"]
+    assert isinstance(symbols, list)
+    assert isinstance(strategies, list)
+    assert isinstance(matrix, list)
+    # Validate dimensions match
+    assert len(matrix) == len(symbols), "Matrix rows must match symbol count"
+    for row in matrix:
+        assert len(row) == len(strategies), "Matrix columns must match strategy count"
+    # Values are out-of-sample scores — an unbounded ratio, not a 0-1 conviction. They were
+    # previously clamped into [0, 1], which hid that every validated symbol saturated at 1.0.
+    for row in matrix:
+        assert any(v is not None for v in row), "a listed symbol must have one measured pair"
+        for score in row:
+            assert score is None or score > 0.0, f"unexpected score: {score}"
+    assert body["available"] is True
+    assert "unbounded" in body["metric"]
+
+
+def test_conviction_matrix_lists_only_walk_forward_validated_symbols(shim):
+    """It used to list SPY and BTC/USD, neither of which has ever been walk-forward validated."""
+    from trading_live_claude.analysis.universe import WALK_FORWARD_VALIDATED
+
+    status, body = _get(f"{shim['url']}/v1/conviction-matrix")
+    assert status == 200
+    symbols = body["symbols"]
+    assert symbols, "the registry ships validated names, so this should not be empty"
+    assert set(symbols) <= set(WALK_FORWARD_VALIDATED)
+    assert "XIC.TO" in symbols          # measured
+    assert "SPY" not in symbols         # never validated; was previously fabricated
+    assert "BTC/USD" not in symbols
+
+
+def test_stats_metrics_reflect_passbook(shim):
+    """Stats endpoint should reflect decisions in passbook."""
+    key = Ed25519PrivateKey.generate()
+    pem = key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    _post(f"{shim['url']}/v1/card/register",
+          {"card_id": "cm", "pubkey_pem": pem.decode()})
+
+    # Publish and accept 2 intents
+    for _ in range(2):
+        _publish_and_respond(shim, key, "cm", "ACCEPT")
+
+    # Publish and decline 1 intent
+    _publish_and_respond(shim, key, "cm", "DECLINE")
+
+    # Check stats reflect the decisions
+    status, body = _get(f"{shim['url']}/v1/stats")
+    assert status == 200
+    assert body["intents_total"] == 3
+    assert body["intents_approved"] == 2
+    assert body["intents_declined"] == 1
+    assert body["acceptance_rate"] == 2.0 / 3.0  # 2 out of 3 decided (non-expired)
+
+
+# --- venue-vocabulary regression (2026-09-17) -------------------------------
+# The response schema's ``Broker`` Literal listed only ib / kraken / questrade, so every prompt
+# from a PaperBroker-wrapped feed — i.e. every paper session, the only mode we run — failed
+# RESPONSE validation on GET /v1/intents/pending with a 500. The card never saw the prompt and it
+# expired unapproved. These tests fail if a venue tag is dropped from the Literal again.
+
+@pytest.mark.parametrize("venue", ["ib", "ib_web", "kraken", "questrade", "paper", "global"])
+def test_pending_serializes_every_venue_tag(shim, venue):
+    body = {
+        "symbol": "XIC.TO", "action": "Buy", "shares": 12, "entry": 31.05,
+        "stop": 30.40, "target": 32.10, "strategy": "test",
+        "risk_dollars": 7.80, "account_number": "paper-001",
+        "broker": venue, "ttl_seconds": 30,
+    }
+    status, prompt = _post(f"{shim['url']}/v1/intents", body)
+    assert status == 201, prompt
+    assert prompt["broker"] == venue
+    # The 500 was on the *read* side, so the publish passing is not enough.
+    status, pending = _get(f"{shim['url']}/v1/intents/pending")
+    assert status == 200, pending
+    assert venue in [p["broker"] for p in pending["prompts"]]
+    # ...and the canonical the card signs carries the same tag in field 0.
+    signed = next(p for p in pending["prompts"] if p["broker"] == venue)
+    assert signed["canonical"].split("|")[0] == venue
+
+
+def test_broker_literal_covers_every_declared_broker_venue() -> None:
+    """Drift guard: every adapter's ``.venue`` must be accepted by the wire schema."""
+    from typing import get_args
+
+    from trading_live_claude.brokers.ib import IBBroker
+    from trading_live_claude.brokers.ib_web import IBWebBroker
+    from trading_live_claude.brokers.kraken import KrakenBroker
+    from trading_live_claude.brokers.paper import PaperBroker
+    from trading_live_claude.brokers.questrade import QuestradeBroker
+    from trading_live_claude.brokers.routed import VenueRoutedFeed
+    from trading_live_claude.execution.approval_asgi import Broker
+
+    accepted = set(get_args(Broker))
+    for cls in (IBBroker, IBWebBroker, KrakenBroker, QuestradeBroker, PaperBroker,
+                VenueRoutedFeed):
+        assert cls.venue in accepted, f"{cls.__name__}.venue={cls.venue!r} not in Broker literal"

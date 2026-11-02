@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from trading_live_claude.intel.interpret import implicated_symbols, interpret
+from trading_live_claude.intel.interpret import (
+    CONFLICT_EVENTS_ELEVATED,
+    STRATEGIC_RISK_STRESSED,
+    implicated_symbols,
+    interpret,
+)
 from trading_live_claude.intel.overlay import IntelSnapshot
 
 
@@ -45,7 +50,9 @@ def test_energy_concentration_is_flagged_and_scaled_by_magnitude() -> None:
 
 
 def test_conflict_watch_is_tentative_without_corroborating_flow() -> None:
-    th = interpret(IntelSnapshot(conflict_events_active=4, market={"equity_vol": 25.0},
+    # 4 is the elevated-count gate (2026-09-18); 7 is the moderate cutoff, so a bare 6 with flat
+    # flow sits in the tentative band.
+    th = interpret(IntelSnapshot(conflict_events_active=6, market={"equity_vol": 25.0},
                                  event_acceleration={"conflict": 1.0}))
     c = [t for t in th if t.name == "Conflict escalation watch"]
     assert c and c[0].confidence == "tentative"
@@ -288,3 +295,103 @@ def test_none_of_the_new_theses_phrase_actions_as_entry_signals() -> None:
     for s in snaps:
         for t in interpret(s):
             assert not any(b in t.action.lower() for b in banned), t.action
+
+
+# ---------------------------------------------------------------------------
+# Threshold regression — calibrated 2026-09-16, lowered 2026-09-18 by user decision
+#
+# The 09-16 calibration moved both gates to the corpus p90; on 09-18 the user lowered them to
+# 67 / 4 (~81% / ~70% base rate on real snapshots, see the interpret.py module header). These
+# tests pin the chosen values and the boundary behaviour so an accidental edit fails loudly.
+#
+# Boundary-based on purpose: the corpus (state/intel_overlay.jsonl) is gitignored, so a
+# test that replayed it would pass locally and skip in CI. Asserting the edges of each
+# gate is equivalent for regression purposes and runs anywhere.
+# ---------------------------------------------------------------------------
+
+
+def test_calibrated_thresholds_have_not_drifted() -> None:
+    """Pin the constants. If a recalibration moves them, it must move this test too —
+    which forces the new base rates to be measured rather than guessed."""
+    assert STRATEGIC_RISK_STRESSED == 67.0
+    assert CONFLICT_EVENTS_ELEVATED == 4
+
+
+def _calm_snap(**kw) -> IntelSnapshot:
+    """A calm market with no other stressor, so only the gate under test can fire."""
+    base = dict(market={"equity_vol": 15.0}, fear_greed=55.0,
+                event_acceleration={"energy": 1.0, "conflict": 1.0, "military": 1.0})
+    base.update(kw)
+    return IntelSnapshot(**base)
+
+
+def test_strategic_risk_gate_boundary() -> None:
+    """Just below the calibrated gate must NOT fire; at the gate must fire."""
+    below = interpret(_calm_snap(strategic_risk=STRATEGIC_RISK_STRESSED - 0.1))
+    assert "Complacency divergence" not in _names(below)
+    assert "No notable configuration" in _names(below)
+
+    at = interpret(_calm_snap(strategic_risk=STRATEGIC_RISK_STRESSED))
+    assert "Complacency divergence" in _names(at)
+
+
+def test_strategic_risk_gate_rejects_the_original_threshold() -> None:
+    """The original gate (60) fired on ~96% of real reads. Readings below 67 stay silent;
+    the corpus median (70) and the 09-16 gate (73) now fire."""
+    for sr in (60.0, 65.0, 66.9):
+        th = interpret(_calm_snap(strategic_risk=sr))
+        assert "Complacency divergence" not in _names(th), f"sr={sr} should not fire"
+    for sr in (70.0, 73.0):
+        assert "Complacency divergence" in _names(interpret(_calm_snap(strategic_risk=sr)))
+
+
+def test_conflict_events_gate_boundary() -> None:
+    """3 (the original gate, ~90% of real reads) is silent; 4 fires."""
+    below = interpret(_calm_snap(conflict_events_active=CONFLICT_EVENTS_ELEVATED - 1))
+    assert "Conflict escalation watch" not in _names(below)
+
+    at = interpret(_calm_snap(conflict_events_active=CONFLICT_EVENTS_ELEVATED))
+    assert "Conflict escalation watch" in _names(at)
+
+
+def test_conflict_events_gate_rejects_the_original_threshold() -> None:
+    """The original gate was >=3 (~90% of real reads). Counts up to 3 stay silent."""
+    for cea in (0, 1, 2, 3):
+        th = interpret(_calm_snap(conflict_events_active=cea))
+        assert "Conflict escalation watch" not in _names(th), f"cea={cea} should not fire"
+
+
+def test_conflict_confidence_band_is_not_degenerate() -> None:
+    """The moderate cutoff stays at 7, so fires at 4-6 are tentative (no live-loop trim) and
+    7+ are moderate. Both bands must stay reachable."""
+    for cea in (4, 6):
+        c = [t for t in interpret(_calm_snap(conflict_events_active=cea))
+             if t.name == "Conflict escalation watch"]
+        assert c and c[0].confidence == "tentative", f"cea={cea}"
+    tentative = interpret(_calm_snap(conflict_events_active=6))
+    c = [t for t in tentative if t.name == "Conflict escalation watch"]
+    assert c and c[0].confidence == "tentative"
+
+    moderate = interpret(_calm_snap(conflict_events_active=7))
+    c = [t for t in moderate if t.name == "Conflict escalation watch"]
+    assert c and c[0].confidence == "moderate"
+
+
+def test_complacency_high_confidence_is_reachable() -> None:
+    """The old ``sr >= 65 and ea >= 3.0`` conjunct produced 0 of 59 fires at high
+    confidence once the main gate moved to 73 — sr and energy flow never spiked together.
+    Keying ``high`` on energy acceleration alone keeps the band reachable."""
+    high = interpret(_calm_snap(strategic_risk=73.0, event_acceleration={"energy": 3.5}))
+    c = [t for t in high if t.name == "Complacency divergence"]
+    assert c and c[0].confidence == "high"
+
+    moderate = interpret(_calm_snap(strategic_risk=73.0, event_acceleration={"energy": 1.0}))
+    c = [t for t in moderate if t.name == "Complacency divergence"]
+    assert c and c[0].confidence == "moderate"
+
+
+def test_energy_leg_still_fires_complacency_independently_of_strategic_risk() -> None:
+    """``stressed_world`` is a disjunction: raising the strategic-risk gate must not break
+    the energy-acceleration path into the thesis."""
+    th = interpret(_calm_snap(strategic_risk=0.0, event_acceleration={"energy": 2.5}))
+    assert "Complacency divergence" in _names(th)

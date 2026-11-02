@@ -111,8 +111,9 @@ def test_pair_translation_covers_the_sleeve_and_falls_through_unknowns() -> None
     assert to_kraken_pair("BTC/USD") == "XBTUSD"
     assert to_kraken_pair("ETH/USD") == "ETHUSD"
     assert to_kraken_pair("PAXG/USD") == "PAXGUSD"
-    # Anything not in the small mapping is passed through unchanged.
-    assert to_kraken_pair("DOGE/USD") == "DOGE/USD"
+    # Anything not in the small mapping drops the slash — Kraken REST pair codes have none.
+    assert to_kraken_pair("DOGE/USD") == "DOGEUSD"
+    assert to_kraken_pair("AAVE/USD") == "AAVEUSD"
 
 
 def test_accounts_synthesizes_a_stable_account_row() -> None:
@@ -146,8 +147,55 @@ def test_place_order_still_refuses_without_credentials_even_when_enabled() -> No
         b.place_order(order)
 
 
+@pytest.mark.parametrize(("qty", "wire"), [
+    (0.00000005, "0.00000005"),   # 5 sats — str(float) would send "5e-08"
+    (0.000000005, "0.000000005"),
+    (0.05, "0.05"),
+    (2.0, "2"),
+])
+def test_place_order_sends_plain_decimal_volume(
+    qty: float, wire: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import trading_live_claude.brokers.kraken as kraken_mod
+
+    sent: dict = {}
+
+    def fake_private_post(path, *, key, secret, data, client):
+        sent.update(data)
+        return {"txid": []}
+
+    monkeypatch.setattr(kraken_mod, "private_post", fake_private_post)
+    order = Order(symbol="BTC/USD", symbolId=0, action=OrderAction.BUY,
+                  orderType=OrderType.LIMIT, totalQuantity=qty, limitPrice=0.00004)
+    with KrakenBroker(api_key="k", api_secret="s", enable_live_orders=True) as b:
+        b.place_order(order)
+    assert sent["volume"] == wire
+    assert sent["price"] == "0.00004"
+
+
 def test_cancel_order_is_also_gated_off_by_default() -> None:
     """Cancels are only meaningful when there is something to cancel; the gate applies to both."""
     from trading_live_claude.brokers.base import BrokerError
     with KrakenBroker() as b, pytest.raises(BrokerError, match="disabled"):
         b.cancel_order("KRAKEN", 1)
+
+
+def test_txid_to_int_is_stable_across_processes() -> None:
+    """hash() is salted per process, so ids used to change after a restart (fixed 2026-09-18)."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from trading_live_claude.brokers.kraken import _txid_to_int
+    txid = "OZAA6H-FQI3S-DK6GHJ"
+    here = _txid_to_int(txid)
+    assert 0 <= here < 2**31 - 1
+    code = ("from trading_live_claude.brokers.kraken import _txid_to_int;"
+            f"print(_txid_to_int({txid!r}))")
+    for seed in ("1", "2"):
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                             env={**os.environ, "PYTHONHASHSEED": seed,
+                                  "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")})
+        assert int(out.stdout.strip()) == here
+    assert _txid_to_int("OTHER-TXID-000000") != here

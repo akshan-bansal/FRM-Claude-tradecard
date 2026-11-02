@@ -17,24 +17,30 @@ from __future__ import annotations
 import argparse
 import asyncio
 import atexit
+import contextlib
 import hashlib
 import json
+import signal
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from ..analysis.params import PARAMS_MODES, build_strategy, running_params
 from ..analysis.symbol_validation import preflight
 from ..analysis.universe import CRYPTO_SLEEVE, validated_for
 from ..audit.ledger import Ledger
 from ..audit.semantics import instrument_currency
 from ..audit.versioning import session_provenance
 from ..brokers.base import Broker, BrokerError
+from ..brokers.fresh import guard_feed
 from ..brokers.paper import PaperBroker
 from ..data.cache import CandleCache
 from ..data.market import MarketData
+from ..desk_policy import VenuePolicyError, assert_ib_futures_only, assert_single_currency
 from ..execution.approval import wire_card_approval
+from ..execution.approval_asgi import BookRef
 from ..execution.basket import attach_basket_gate
 from ..execution.router import (
     LIVE_CONFIRM_PHRASE,
@@ -43,11 +49,19 @@ from ..execution.router import (
     Router,
     RouterMode,
 )
+from ..execution.venue_costs import VenueCostModel
+from ..intel.apply import OverlaidBias
 from ..intel.routing import OverlayProvider, PersistenceGate, futures_overrides
 from ..intel.vs_engine import MarketContext, VSInvestmentEngine
 from ..logging_setup import get_logger
+from ..risk.position_cap import position_cap_for
 from ..risk.sizing import PositionSizer
+from ..risk.sizing_policy import SizingPolicy, calendar_days
 from ..risk.spectral_var import attach_spectral_gate
+from ..signals.candle_exit import CandleExit
+from ..signals.overbought_exit import OverboughtExit
+from ..signals.oversold_entry import OversoldEntry
+from ..signals.profit_lock import ProfitLock
 from ..strategies import STRATEGIES
 from ..strategies.base import Strategy
 from .alerter import AlertConfig, Alerter
@@ -60,19 +74,18 @@ VENUES: tuple[Venue, ...] = ("questrade", "kraken", "ib")
 Emit = Callable[[str], object]
 
 # What may differ between a paper plan and its money counterpart, and why: the mode and the fact of real
-# money; a ledger stream of its own, strict because a money order must not go unrecorded; and the
-# simulated account's balance and costs, which a real account has for itself.
-NECESSARY_DIFFERENCES = frozenset({"mode", "money", "stream", "strict_ledger", "paper_equity", "paper_costs"})
+# money; a ledger stream of its own, strict because a money order must not go unrecorded; the simulated
+# account's balance and costs, which a real account has for itself; closing the book on stop, because a
+# money session must never liquidate itself; and resuming, because a real book lives at the broker.
+NECESSARY_DIFFERENCES = frozenset({"mode", "money", "stream", "strict_ledger", "paper_equity", "paper_costs",
+                                   "flatten_on_exit", "resume_session"})
 
-# Paper's costs per venue. ASSUMPTIONS, to be replaced by what `trading audit query fill-quality` measures:
-# Questrade keeps the long-standing flat ticket; Kraken is its published base-tier taker rate; IB is its
-# minimum per-order commission. Slippage is charged on top of crossing the spread. Override any of it with
-# `paper_costs` in trading.yaml.
-DEFAULT_PAPER_COSTS: dict[str, dict[str, float]] = {
-    "questrade": {"commission_per_trade": 4.95, "commission_bps": 0.0, "slippage_bps": 5.0},
-    "kraken": {"commission_per_trade": 0.0, "commission_bps": 40.0, "slippage_bps": 5.0},
-    "ib": {"commission_per_trade": 1.0, "commission_bps": 0.0, "slippage_bps": 5.0},
-}
+# Paper's costs per venue: each venue's own fee shape, execution/venue_costs.py. The slippage on top of
+# crossing the spread is still an assumption, to be replaced by what `trading audit query fill-quality`
+# measures. Override any field with `paper_costs` in trading.yaml.
+DEFAULT_PAPER_COSTS: dict[str, dict[str, Any]] = {v: asdict(VenueCostModel.for_venue(v)) for v in VENUES}
+_BASKET_VENUES = {"questrade": "qt", "kraken": "kraken", "ib": "ib"}
+_ASSET_CLASSES = {"questrade": "equity", "kraken": "crypto", "ib": "multi"}
 _STREAMS: dict[tuple[str, bool], str] = {
     ("questrade", False): "qt-paper", ("questrade", True): "qt-live",
     ("kraken", False): "kraken", ("kraken", True): "kraken-live",
@@ -105,8 +118,28 @@ class SessionOptions:
     intel_refresh: float | None = None
     require_card: bool | None = None
     card_shim_port: int | None = None
+    card_shim_host: str | None = None
+    card_attach: bool | None = None
     card_ttl: float | None = None
     require_basket: bool | None = None
+    flatten_on_exit: bool | None = None
+    warmup_interval: int | None = None
+    warmup_minutes: float | None = None
+    profit_lock: bool | None = None
+    profit_lock_exempt: str | None = None
+    candle_exit: bool | None = None
+    candle_exit_exempt: str | None = None
+    overbought_exit: bool | None = None
+    overbought_exit_exempt: str | None = None
+    oversold_entry: bool | None = None
+    oversold_entry_only: str | None = None
+    parallel_sizing: bool | None = None
+    mute_alerts: str | None = None
+    max_cost_ratio: float | None = None
+    max_positions: int | None = None
+    params: str | None = None
+    sizing_v2: bool | None = None
+    account_currency: str | None = None
     spectral_var_cap: float | None = None
     spectral_var_level: float | None = None
     spectral_var_horizon: int | None = None
@@ -114,6 +147,11 @@ class SessionOptions:
     audit_ledger: bool = True
     allow_screened: bool = False
     stream: str | None = None
+    # One-shots on a simulated book. They run once at startup and leave no setting behind, so they are
+    # not part of what is practised.
+    resume_session: str = ""
+    close_symbols: str = ""
+    trim_to_slots: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,8 +161,11 @@ class StrategyBook:
     default: Strategy
     per_symbol: Mapping[str, Strategy] = field(default_factory=dict)
 
+    def strategy_for(self, symbol: str) -> Strategy:
+        return self.per_symbol.get(symbol, self.default)
+
     def name_for(self, symbol: str) -> str:
-        return self.per_symbol.get(symbol, self.default).name
+        return self.strategy_for(symbol).name
 
 
 @dataclass(frozen=True)
@@ -140,18 +181,37 @@ class SessionPlan:
     symbols: tuple[str, ...]
     strategy: str
     strategy_map: dict[str, str]
+    params: str
+    strategy_params: dict[str, dict[str, Any]]
     account_currency: str
     interval_seconds: int
+    warmup_interval_seconds: int
+    warmup_minutes: float
     emit_on_change_only: bool
     limits: dict[str, Any]
+    position_cap: dict[str, Any]
+    stale_quote: dict[str, Any]
     risk_per_trade: float
     risk_model: str
     heat_aggregation: str
     respect_market_hours: bool
     forced_exits: bool
     entry_triggers: dict[str, str]
+    profit_lock: bool
+    profit_lock_exempt: tuple[str, ...]
+    candle_exit: bool
+    candle_exit_exempt: tuple[str, ...]
+    overbought_exit: bool
+    overbought_exit_exempt: tuple[str, ...]
+    oversold_entry: bool
+    oversold_entry_only: tuple[str, ...]
+    parallel_sizing: bool
+    sizing_v2: bool
+    mute_alerts: tuple[str, ...]
     require_card: bool
     card_shim_port: int
+    card_shim_host: str
+    card_attach: bool
     card_ttl_seconds: float
     require_basket: bool
     spectral_var_cap: float | None
@@ -162,7 +222,9 @@ class SessionPlan:
     hedge_symbol: str
     daily_budget: tuple[int, float] | None
     paper_equity: float | None
-    paper_costs: dict[str, float]
+    paper_costs: dict[str, Any]
+    flatten_on_exit: bool
+    resume_session: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -171,6 +233,17 @@ class SessionPlan:
         """Hash of everything that must match between a rehearsal and the session it rehearses."""
         shared = {k: v for k, v in self.to_dict().items() if k not in NECESSARY_DIFFERENCES}
         return hashlib.sha256(json.dumps(shared, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def _names(text: str | None, *, upper: bool = False) -> tuple[str, ...]:
+    """A comma-separated list as a sorted tuple, so two plans compare equal however it was typed."""
+    parts = {s.strip().upper() if upper else s.strip() for s in (text or "").split(",")}
+    return tuple(sorted(p for p in parts if p))
+
+
+def paper_costs_for(settings: Any, venue: str) -> dict[str, Any]:
+    """The simulated account's costs: the venue's own fee shape, then any ``paper_costs`` override."""
+    return {**DEFAULT_PAPER_COSTS[venue], **settings.paper_costs.get(venue, {})}
 
 
 def plan_differences(a: SessionPlan, b: SessionPlan) -> dict[str, tuple[Any, Any]]:
@@ -209,6 +282,25 @@ def resolve_book(settings: Any, venue: str, strategy: str = "", strategy_map: st
     return StrategyBook(default=strategy_or_error(default), per_symbol=strategy_map_or_error(text))
 
 
+def book_with_params(book: StrategyBook, symbols: Sequence[str], mode: str, *, emit: Emit = _quiet) -> StrategyBook:
+    """The book with each symbol's parameters taken from ``mode``, printing what actually runs.
+
+    ``default`` leaves it alone: class defaults, and the sleeve's screened parameters on Kraken.
+    """
+    if mode not in PARAMS_MODES:
+        raise SessionError(f"params must be one of {', '.join(PARAMS_MODES)}, not {mode!r}.")
+    if mode == "default":
+        return book
+    resolved: dict[str, Strategy] = {}
+    for sym in symbols:
+        name = book.name_for(sym)
+        built = build_strategy(name, sym, mode)
+        resolved[sym] = built.strategy  # type: ignore[assignment]
+        note = f"  [{built.note}]" if built.note else ""
+        emit(f"params {sym}: {name} <- {built.source} {running_params(built.strategy)}{note}")
+    return replace(book, per_symbol=resolved)
+
+
 def resolve_symbols(settings: Any, venue: str, symbols: str | Sequence[str] | None, book: StrategyBook,
                     futures: Sequence[str] = ()) -> list[str]:
     """The symbols a session watches: those asked for, else the venue's own list, plus map and futures."""
@@ -237,23 +329,51 @@ def plan_session(settings: Any, *, venue: str, mode: RouterMode, symbols: Sequen
     policy = monitor_policy(settings)
     interval = settings.autonomous_interval_seconds if autonomous else settings.poll_interval_seconds
     stream = o.stream or ("autonomous" if autonomous else _STREAMS[(venue, money)])
+    limits = Router.limits_from(settings)
+    if o.max_positions:
+        limits["max_open_positions"] = o.max_positions
+    if o.max_cost_ratio is not None:
+        limits["max_round_trip_cost_ratio"] = o.max_cost_ratio
+    require_card = bool(pick(o.require_card, settings.require_card))
+    basket = pick(o.require_basket, settings.require_basket)
     return SessionPlan(
         venue=venue, mode=mode, money=money, stream=stream,
         strict_ledger=mode in ("live", "autonomous"),
         audit_ledger=True if mode in ("live", "autonomous") else o.audit_ledger,
         symbols=tuple(symbols), strategy=book.default.name,
         strategy_map={s: v.name for s, v in book.per_symbol.items()},
-        account_currency="USD" if venue in ("kraken", "ib") else settings.account_currency,
+        params=str(pick(o.params, settings.params)),
+        strategy_params={s: running_params(book.strategy_for(s)) for s in symbols},
+        account_currency=(o.account_currency or ("USD" if venue in ("kraken", "ib") else settings.account_currency)),
         interval_seconds=int(pick(o.interval, interval)),
+        warmup_interval_seconds=int(pick(o.warmup_interval, settings.warmup_interval_seconds)),
+        warmup_minutes=float(pick(o.warmup_minutes, settings.warmup_minutes)),
         emit_on_change_only=not bool(pick(o.level, False)),
-        limits=Router.limits_from(settings), risk_per_trade=settings.risk_pct_per_trade,
+        limits=limits, risk_per_trade=settings.risk_pct_per_trade,
+        position_cap={"mode": settings.position_cap_mode, "ref_vol": settings.position_cap_ref_vol,
+                      "floor_pct": settings.position_cap_floor_pct, "ceiling_pct": settings.position_cap_ceiling_pct},
+        stale_quote={"frozen_s": settings.stale_quote_frozen_s, "max_trade_age_s": settings.stale_quote_max_trade_age_s,
+                     "on_stale": settings.on_stale_quote},
         risk_model=policy["risk_model"], heat_aggregation=policy["heat_aggregation"],
         respect_market_hours=settings.respect_market_hours, forced_exits=policy["forced_exits"],
         entry_triggers=dict(policy["entry_triggers"]),
-        require_card=bool(pick(o.require_card, settings.require_card)),
+        profit_lock=bool(pick(o.profit_lock, settings.profit_lock)),
+        profit_lock_exempt=_names(pick(o.profit_lock_exempt, settings.profit_lock_exempt)),
+        candle_exit=bool(pick(o.candle_exit, settings.candle_exit)),
+        candle_exit_exempt=_names(pick(o.candle_exit_exempt, settings.candle_exit_exempt)),
+        overbought_exit=bool(pick(o.overbought_exit, settings.overbought_exit)),
+        overbought_exit_exempt=_names(pick(o.overbought_exit_exempt, settings.overbought_exit_exempt)),
+        oversold_entry=bool(pick(o.oversold_entry, settings.oversold_entry)),
+        oversold_entry_only=_names(pick(o.oversold_entry_only, settings.oversold_entry_only)),
+        parallel_sizing=bool(pick(o.parallel_sizing, settings.parallel_sizing)),
+        sizing_v2=bool(pick(o.sizing_v2, settings.sizing_v2)),
+        mute_alerts=_names(pick(o.mute_alerts, settings.mute_alerts), upper=True),
+        require_card=require_card,
         card_shim_port=int(pick(o.card_shim_port, settings.card_shim_port)),
+        card_shim_host=str(pick(o.card_shim_host, settings.card_shim_host)),
+        card_attach=bool(pick(o.card_attach, settings.card_attach)),
         card_ttl_seconds=float(pick(o.card_ttl, settings.card_ttl_seconds)),
-        require_basket=bool(pick(o.require_basket, settings.require_basket)),
+        require_basket=require_card if basket is None else bool(basket),
         spectral_var_cap=pick(o.spectral_var_cap, settings.spectral_var_cap),
         spectral_var_level=float(pick(o.spectral_var_level, settings.spectral_var_level)),
         spectral_var_horizon=int(pick(o.spectral_var_horizon, settings.spectral_var_horizon)),
@@ -263,7 +383,9 @@ def plan_session(settings: Any, *, venue: str, mode: RouterMode, symbols: Sequen
         daily_budget=((settings.autonomous_daily_max_trades, settings.autonomous_daily_max_notional_usd)
                       if autonomous else None),
         paper_equity=float(pick(o.paper_equity, settings.paper_starting_equity)) if simulated else None,
-        paper_costs=({**DEFAULT_PAPER_COSTS[venue], **settings.paper_costs.get(venue, {})} if simulated else {}),
+        paper_costs=paper_costs_for(settings, venue) if simulated else {},
+        flatten_on_exit=mode == "paper" and bool(pick(o.flatten_on_exit, settings.flatten_on_exit)),
+        resume_session=o.resume_session if simulated else "",
     )
 
 
@@ -382,13 +504,15 @@ def _print_bias(bias: Mapping[str, float], emit: Emit) -> None:
         emit(f"    {sym:>12}  x{bias[sym]:.2f}  ({label})")
 
 
-def allocator_weight_bias(market: Any, symbols: Sequence[str], *, emit: Emit = _quiet) -> Any:
+def allocator_weight_bias(market: Any, symbols: Sequence[str], overlay_for: Any = None, *,
+                          emit: Emit = _quiet) -> Any:
     """Correlation-aware per-symbol size bias for the equity pool, or ``None`` when it cannot be computed.
 
     Computes bias from OOS score + return covariance, so a redundant name (bank ETFs correlated with bank
     ETFs, sector ETFs with their names) gets its slot cut and a low-correlation name gets it lifted. The
     monitor bounds it to [0.1, 3.0]; equal-weight is neutral (1.0). Computed once at startup from the local
-    candle cache. Symbols not in WALK_FORWARD_VALIDATED stay neutral.
+    candle cache. Symbols not in WALK_FORWARD_VALIDATED stay neutral. With an overlay, its class scalar is
+    applied to the allocation through ``apply_overlay``, and follows each refresh.
     """
     try:
         from ..analysis.universe import WALK_FORWARD_VALIDATED as wfv
@@ -409,6 +533,9 @@ def allocator_weight_bias(market: Any, symbols: Sequence[str], *, emit: Emit = _
         eqw = 1.0 / len(returns)
         bias = {s: res.weights.get(s, 0.0) / eqw for s in returns}
         _print_bias(bias, emit)
+        if overlay_for is not None:
+            emit("live overlay applied to the allocation through apply_overlay.")
+            return OverlaidBias(res, eqw, symbols, overlay_for)
         return lambda sym, _m=bias: _m.get(sym, 1.0)
     except Exception as e:
         emit(f"allocator bias OFF: {e}")
@@ -459,13 +586,16 @@ def venue_weight_bias(venue: str, market: Any, symbols: Sequence[str], overlay_f
                       emit: Emit = _quiet) -> Any:
     """Each venue's allocator. Same function for paper and money, so a practised bias is the real one."""
     if venue == "kraken":
-        from ..portfolio.sleeve_bias import sleeve_conviction_bias
-        bias = sleeve_conviction_bias(CRYPTO_SLEEVE)
+        from ..portfolio.sleeve_bias import sleeve_allocation
+        bias, allocation, equal_weight = sleeve_allocation(CRYPTO_SLEEVE)
         _print_bias(bias, emit)
+        if overlay_for is not None and allocation is not None:
+            emit("live overlay applied to the allocation through apply_overlay.")
+            return OverlaidBias(allocation, equal_weight, bias, overlay_for)
         return lambda sym, _m=bias: _m.get(sym, 1.0)
     if venue == "ib":
         return _ib_weight_bias(market, symbols, overlay_for, emit=emit)
-    return allocator_weight_bias(market, symbols, emit=emit)
+    return allocator_weight_bias(market, symbols, overlay_for, emit=emit)
 
 
 # ---------------------------------------------------------------- alerts
@@ -492,11 +622,13 @@ def alert_emitter(alerter: Alerter, book: StrategyBook, *, label: str = "",
             # wf_record says whether this symbol cleared walk-forward; without it the alert says so.
             message = format_entry(strategy_name=book.name_for(ev.symbol), symbol=ev.symbol, price=ev.price,
                                    detail=ev.detail, is_transition=ev.is_transition,
-                                   poll_count=ev.poll_count, wf_record=validated_for(ev.symbol))
+                                   poll_count=ev.poll_count, wf_record=validated_for(ev.symbol),
+                                   live_params=running_params(book.strategy_for(ev.symbol)))
         elif ev.kind == "exit":
-            shares = int(ev.detail.get("shares", 0)) if isinstance(ev.detail, dict) else 0
+            shares = float(ev.detail.get("shares", 0)) if isinstance(ev.detail, dict) else 0.0
             message = format_exit(strategy_name=book.name_for(ev.symbol), symbol=ev.symbol,
-                                  price=ev.price, shares=shares)
+                                  price=ev.price, shares=shares,
+                                  detail=ev.detail if isinstance(ev.detail, dict) else None)
         if message is not None:
             # The label says which session this is: a phone alert must show whether real money moved.
             alerter.send(f"{label} {message[0]}".strip(), message[1])
@@ -517,11 +649,37 @@ class Session:
     ledger: Ledger | None
     feed: Broker
     keepalive: Any = None
+    close_symbols: tuple[str, ...] = ()
+    trim_to_slots: bool = False
+    emit: Emit = _quiet
+
+    def _install_stop_handlers(self) -> None:
+        """Ctrl-C and SIGTERM finish the poll and leave through the loop's ``finally``. A hard kill cannot
+        be caught, so a force-terminated process leaves the book as it is."""
+        def _on_signal(signum: int, _frame: object) -> None:
+            self.emit(f"signal {signum}: finishing poll, then "
+                      f"{'flattening' if self.monitor.flatten_on_exit else 'exiting'}.")
+            self.monitor.request_stop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            # ValueError: not on the main thread. OSError: signal unsupported on this OS.
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(sig, _on_signal)
+
+    def _run_one_shots(self) -> None:
+        for row in self.monitor.close_symbols(self.close_symbols) if self.close_symbols else ():
+            state = "ACCEPTED" if row["accepted"] else f"NOT CLOSED: {row['reason']}"
+            self.emit(f"close {row['symbol']}: {row['qty']:g} @ {row.get('price', 0):.4f} {state}")
+        for row in self.monitor.trim_to_slots() if self.trim_to_slots else ():
+            state = "ACCEPTED" if row["accepted"] else "REJECTED by the Router"
+            self.emit(f"slot trim {row['symbol']}: sold {row['sold']:g} of {row['held']:g} @ {row['price']:.4f}, "
+                      f"kept {row['kept']:g} (scale x{row['scale']}) {state}")
 
     def run(self, iterations: int | None = None) -> None:
+        self._install_stop_handlers()
         if self.keepalive is not None:
             self.keepalive.start()
         try:
+            self._run_one_shots()
             self.monitor.run_forever(max_iterations=iterations or None)
         finally:
             if self.keepalive is not None:
@@ -541,10 +699,98 @@ def _open_ledger(settings: Any, plan: SessionPlan, session_id: str | None) -> Le
     return led
 
 
+def _card_thesis(engine: VSInvestmentEngine, overlay_for: Any, weight_bias: Any,
+                 monitor_ref: list[LiveMonitor]) -> Callable[[Any, str], tuple[str, str]]:
+    """What the card shows for an intent: the engine's thesis over the sizing the session really applied.
+
+    Read at prompt time, so the writeups in state/intel_writeups/ carry the overlay and the sizing chain.
+    The market fields beyond the reward-to-risk multiple need columns no strategy emits yet.
+    """
+    def _thesis(intent: Any, broker: str) -> tuple[str, str]:
+        snap = getattr(overlay_for, "last_snapshot", None) if overlay_for else None
+        dec = overlay_for(intent.symbol) if overlay_for else None
+        r_mult = None
+        try:
+            risk = abs(intent.entry - intent.stop)
+            if risk > 0 and intent.target:
+                r_mult = round(abs(intent.target - intent.entry) / risk, 2)
+        except (AttributeError, TypeError):
+            pass
+        chain = [f"Order size: {intent.shares:g} units (notional ~${intent.shares * intent.entry:,.0f})"]
+        if dec is not None:
+            if dec.scalar < 1.0:
+                chain.append(f"OSINT overlay ({dec.asset_class}): x{dec.scalar:.3f} - live intel de-risking this class"
+                             + (f" ({'; '.join(dec.reasons)})" if dec.reasons else ""))
+            if dec.halt_new_entries:
+                chain.append(f"HALT: overlay stood {dec.asset_class} down")
+        try:                                   # advisory rows only; never block the prompt
+            if monitor_ref:
+                ib, theses = monitor_ref[0]._interpret_bias(intent.symbol)
+                if ib < 1.0:
+                    chain.append(f"Interpret bias: x{ib:.3f} - theses implicating this symbol: "
+                                 f"{', '.join(theses) or '(unnamed)'}")
+            wb = float(weight_bias(intent.symbol)) if weight_bias else 1.0
+            if wb != 1.0:
+                chain.append(f"Allocator weight: x{wb:.2f} ({'boost' if wb > 1 else 'trim'})")
+        except Exception as e:
+            log.warning("session.thesis.chain_failed", symbol=intent.symbol, error=str(e))
+        return engine.explain(intent, broker=broker, market=MarketContext(r_multiple=r_mult),
+                              overlay_snapshot=snap, overlay_decisions=[dec] if dec else None,
+                              sizing_chain=chain)
+    return _thesis
+
+
+def _sizing_policy(plan: SessionPlan, feed: Broker, router: Any, state_dir: Path, session_id: str | None,
+                   emit: Emit) -> SizingPolicy | None:
+    """Kraken sizes in its own lots, and the Router's trim has to round to the same ones.
+
+    Without its real lot rules a pair would be sized on guesses, so the session refuses instead.
+    """
+    if plan.venue != "kraken" or not plan.sizing_v2:
+        return None
+    wanted = list(plan.symbols)
+    rules = feed.lot_rules(wanted)  # type: ignore[attr-defined]
+    missing = sorted(set(wanted) - set(rules))
+    if missing:
+        raise SessionError(f"No Kraken lot rules for {missing}; not starting. sizing_v2 off falls back to whole units.")
+    getattr(router, "inner", router).quantity_rule_for = rules.__getitem__
+    emit("sizing v2 ON. Kraken lot rules:")
+    for sym, rule in rules.items():
+        emit(f"    {sym:>10}  step {rule.step:g}  min {rule.min_qty:g}  min value ${rule.min_notional:g}")
+    return SizingPolicy(quantity_rule_for=rules.__getitem__, periods_per_year_for=calendar_days, enforce_stops=True,
+                        journal_path=state_dir / "sizing_decisions.jsonl", session_id=session_id)
+
+
+def _announce(plan: SessionPlan, session_id: str | None, state_dir: Path, emit: Emit) -> None:
+    """Say which optional behaviour this session is running with."""
+    emit(f"sizing: {'parallel (joint allocation per poll)' if plan.parallel_sizing else 'sequential'}.")
+    if plan.profit_lock:
+        emit(f"profit lock ON: arms at +1 ATR, giveback 3 -> 1 ATR by +4 ATR. Exempt: {', '.join(plan.profit_lock_exempt) or 'none'}.")
+    if plan.candle_exit:
+        emit(f"candle exit ON: bearish reversal closes a long up >= 1 ATR. Exempt: {', '.join(plan.candle_exit_exempt) or 'none'}.")
+    if plan.overbought_exit:
+        emit(f"overbought exit ON: close > upper BB(20,2) or RSI(14) >= 70 closes a long up >= 1 ATR. "
+             f"Exempt: {', '.join(plan.overbought_exit_exempt) or 'none'}.")
+    if plan.oversold_entry:
+        emit(f"oversold entry ON: adds a tranche to a held trend position. Applies to: "
+             f"{', '.join(plan.oversold_entry_only) or 'none'}. Not walk-forward calibrated.")
+    if plan.mute_alerts:
+        emit(f"alerts muted for: {', '.join(plan.mute_alerts)} (still traded and journaled).")
+    if plan.limits.get("max_round_trip_cost_ratio"):
+        emit(f"cost floor ON: entries need round-trip cost <= {plan.limits['max_round_trip_cost_ratio']:.2%} of notional.")
+    if plan.warmup_interval_seconds:
+        emit(f"warm-up: polling every {min(plan.warmup_interval_seconds, plan.interval_seconds)}s for "
+             f"{plan.warmup_minutes:g} min, then every {plan.interval_seconds}s.")
+    per_session = f" or {state_dir / ('STOP_' + session_id)} (this one)" if session_id and plan.paper_equity is not None else ""
+    emit(f"graceful stop: touch {state_dir / 'STOP'} (all sessions){per_session}. Exits within one poll and "
+         f"{'flattens' if plan.flatten_on_exit else 'does NOT flatten'}.")
+
+
 def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: StrategyBook,
                   account_number: str | None = None, live_confirmation: str | None = None,
                   expected_env: str | None = None, allow_screened: bool = False,
                   class_overrides: Mapping[str, Any] | None = None, keepalive: Any = None,
+                  close_symbols: Sequence[str] = (), trim_to_slots: bool = False,
                   label: str = "", emit: Emit = _quiet) -> Session:
     """Assemble a session from its plan, one engine layer at a time."""
     state_dir = Path(settings.state_dir)
@@ -557,15 +803,23 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
                           live_confirmation=live_confirmation, emit=emit)
 
     # Execution. The one thing that makes a session paper: its broker simulates fills against the feed.
-    # Everything downstream is the same object graph.
-    exec_broker: Broker = feed
+    # Everything downstream is the same object graph, and both read quotes through the stale-quote guard.
+    guarded = guard_feed(feed, settings)
+    exec_broker: Broker = guarded
+    cost_model = VenueCostModel(**plan.paper_costs) if plan.paper_costs else None
     if plan.paper_equity is not None:
-        costs = plan.paper_costs
-        exec_broker = PaperBroker(feed=feed, starting_equity=plan.paper_equity, journal_dir=state_dir,
-                                  slippage_bps=costs["slippage_bps"],
-                                  commission_per_trade=costs["commission_per_trade"],
-                                  commission_bps=costs["commission_bps"], cross_spread=True)
-        emit(f"{label} PAPER. session={exec_broker.session_id} equity={plan.paper_equity:,.0f}; "  # type: ignore[attr-defined]
+        paper = PaperBroker(feed=guarded, starting_equity=plan.paper_equity, journal_dir=state_dir,
+                            slippage_bps=cost_model.slippage_bps if cost_model else 5.0, cost_model=cost_model,
+                            fill_model="touch", session_id=plan.resume_session or None)
+        if plan.resume_session:
+            try:
+                restored = paper.resume()
+            except PaperBroker.RehydrationMismatch as e:
+                raise SessionError(f"Cannot resume session {plan.resume_session}: {e}") from e
+            emit(f"{label} RESUMED session {plan.resume_session}: {restored['fills_replayed']} fills replayed, positions "
+                 f"{restored['positions'] or 'none'}, cash ${restored['cash']:,.2f}, realized ${restored['realized_pnl']:,.2f}.")
+        exec_broker = paper
+        emit(f"{label} PAPER. session={paper.session_id} equity={plan.paper_equity:,.0f}; "
              "fills are simulated, the real account is untouched.")
 
     # Data.
@@ -579,34 +833,7 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
 
     # Audit, before anything can trade.
     ledger = _open_ledger(settings, plan, getattr(exec_broker, "session_id", None))
-
-    # Risk gates.
-    budget: dict[str, Any] = {}
-    if plan.daily_budget is not None:
-        budget = {"daily_max_trades": plan.daily_budget[0], "daily_max_notional_usd": plan.daily_budget[1]}
-    try:
-        router: Any = Router.build_default(mode=plan.mode, broker=exec_broker, state_dir=state_dir,  # type: ignore[arg-type]
-                                           **plan.limits, **budget, live_confirmation=live_confirmation,
-                                           ledger=ledger)
-    except (LiveModeNotConfirmed, AutonomousNotEnabled) as e:
-        raise SessionError(str(e)) from e
-    if attach_basket_gate(router, plan.venue, state_dir, enabled=plan.require_basket):
-        emit(f"basket gate ON: entries need a card-signed {plan.venue} basket.")
-    spectral = attach_spectral_gate(router, feed, cap_pct=plan.spectral_var_cap, level=plan.spectral_var_level,
-                                    horizon_days=plan.spectral_var_horizon)
-    if spectral is not None:
-        emit(f"spectral VaR gate ON: {spectral.thresholds()}")
-    if plan.require_card:
-        engine = VSInvestmentEngine()
-        wiring = wire_card_approval(
-            router, shim_port=plan.card_shim_port, ttl_seconds=plan.card_ttl_seconds,
-            thesis_fn=lambda intent, venue: engine.explain(intent, broker=venue, market=MarketContext()),
-            db_path=state_dir / "approval.db", state_dir=state_dir,
-            session_id=getattr(exec_broker, "session_id", None) or getattr(ledger, "session_id", None))
-        router = wiring.router
-        emit(f"require-card ON: approval shim at {wiring.shim_url}. Card auth token: {wiring.auth_token}")
-        emit("Pair the card by passing the token as Authorization: Bearer <token> on every request.")
-        emit(f"desk panel at {wiring.desk_url} (build it first: python scripts/build_desk_dash.py).")
+    session_id = getattr(exec_broker, "session_id", None) or getattr(ledger, "session_id", None)
 
     # Intel.
     overlay_for, interpret_for = (None, None)
@@ -616,6 +843,43 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
     if overlay_for is None:
         emit("intel overlay OFF " + ("(no WORLDMONITOR_API_KEY)." if plan.intel_overlay else "(turned off)."))
     weight_bias = venue_weight_bias(plan.venue, market, symbols, overlay_for, emit=emit)
+
+    # Risk gates.
+    budget: dict[str, Any] = {}
+    if plan.daily_budget is not None:
+        budget = {"daily_max_trades": plan.daily_budget[0], "daily_max_notional_usd": plan.daily_budget[1]}
+    try:
+        router: Any = Router.build_default(mode=plan.mode, broker=exec_broker, state_dir=state_dir,  # type: ignore[arg-type]
+                                           **plan.limits, **budget, live_confirmation=live_confirmation,
+                                           ledger=ledger, cost_model=cost_model,
+                                           position_cap_pct_for=position_cap_for(settings, market))
+    except (LiveModeNotConfirmed, AutonomousNotEnabled) as e:
+        raise SessionError(str(e)) from e
+    if attach_basket_gate(router, _BASKET_VENUES[plan.venue], state_dir, enabled=plan.require_basket):
+        emit(f"basket gate ON: entries need a card-signed {_BASKET_VENUES[plan.venue]} basket "
+             "(python scripts/basket.py status).")
+    spectral = attach_spectral_gate(router, feed, cap_pct=plan.spectral_var_cap, level=plan.spectral_var_level,
+                                    horizon_days=plan.spectral_var_horizon)
+    if spectral is not None:
+        emit(f"spectral VaR gate ON: {spectral.thresholds()}")
+    sizing_policy = _sizing_policy(plan, feed, router, state_dir, session_id, emit)
+    monitor_ref: list[LiveMonitor] = []
+    if plan.require_card:
+        wiring = wire_card_approval(
+            router, shim_host=plan.card_shim_host, shim_port=plan.card_shim_port, ttl_seconds=plan.card_ttl_seconds,
+            thesis_fn=_card_thesis(VSInvestmentEngine(), overlay_for, weight_bias, monitor_ref),
+            db_path=state_dir / "approval.db", state_dir=state_dir, session_id=session_id,
+            account_currency=plan.account_currency, start_shim=not plan.card_attach,
+            books=None if plan.card_attach else [BookRef(venue=plan.venue, session_id=str(session_id or ""),
+                                                         currency=plan.account_currency,
+                                                         asset_class=_ASSET_CLASSES[plan.venue])])
+        router = wiring.router
+        if plan.card_attach:
+            emit(f"require-card ON: ATTACHED to the shim at {wiring.shim_url}. It must already serve state/approval.db.")
+        else:
+            emit(f"require-card ON: approval shim at {wiring.shim_url}. Card auth token: {wiring.auth_token}")
+            emit("Pair the card by passing the token as Authorization: Bearer <token> on every request.")
+            emit(f"desk panel at {wiring.desk_url} (build it first: python scripts/build_desk_dash.py).")
 
     # Alerts.
     alerter = build_alerter(settings)
@@ -641,15 +905,27 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
         emit_on_change_only=plan.emit_on_change_only, strategy_map=dict(book.per_symbol) or None,
         hedge_symbol=plan.hedge_symbol or None, overlay_for=overlay_for, interpret_for=interpret_for,
         weight_bias_for=weight_bias, persistence_for=PersistenceGate(class_overrides=class_overrides),
+        sizing_policy=sizing_policy, flatten_on_exit=plan.flatten_on_exit, stop_sentinel_dir=state_dir,
+        warmup_interval_seconds=plan.warmup_interval_seconds or None, warmup_minutes=plan.warmup_minutes,
+        profit_lock=ProfitLock() if plan.profit_lock else None, profit_lock_exempt=set(plan.profit_lock_exempt),
+        candle_exit=CandleExit() if plan.candle_exit else None, candle_exit_exempt=set(plan.candle_exit_exempt),
+        overbought_exit=OverboughtExit() if plan.overbought_exit else None,
+        overbought_exit_exempt=set(plan.overbought_exit_exempt),
+        oversold_entry=OversoldEntry() if plan.oversold_entry else None,
+        oversold_entry_only=set(plan.oversold_entry_only),
+        parallel_sizing=plan.parallel_sizing, mute_symbols=set(plan.mute_alerts),
         **monitor_policy(settings),
     )
+    monitor_ref.append(monitor)
     emit(f"{label} {plan.mode} on {plan.venue}: {len(symbols)} symbols, plan {plan.fingerprint()}.")
+    _announce(plan, session_id, state_dir, emit)
     for sym in symbols:
         emit(f"    {sym:>12} <- {book.name_for(sym)}")
     if ledger is not None:
         emit(f"audit ledger ON: {ledger.dir} stream {plan.stream}")
     return Session(plan=plan, monitor=monitor, router=router, exec_broker=exec_broker, market=market,
-                   ledger=ledger, feed=feed, keepalive=keepalive)
+                   ledger=ledger, feed=feed, keepalive=keepalive, close_symbols=tuple(close_symbols),
+                   trim_to_slots=trim_to_slots, emit=emit)
 
 
 def start_session(settings: Any, *, venue: str, mode: RouterMode, symbols: str | Sequence[str] | None = None,
@@ -660,14 +936,31 @@ def start_session(settings: Any, *, venue: str, mode: RouterMode, symbols: str |
     """Everything a runner does, from its arguments to a session ready to run."""
     o = options or SessionOptions()
     book = resolve_book(settings, venue, strategy, strategy_map)
-    plan = plan_session(settings, venue=venue, mode=mode, symbols=resolve_symbols(settings, venue, symbols, book, futures),
-                        book=book, options=o, rehearsal=rehearsal)
+    wanted = resolve_symbols(settings, venue, symbols, book, futures)
+    book = book_with_params(book, wanted, o.params or settings.params, emit=emit)
+    plan = plan_session(settings, venue=venue, mode=mode, symbols=wanted, book=book, options=o, rehearsal=rehearsal)
+    if plan.paper_equity is None and (o.resume_session or o.close_symbols or o.trim_to_slots):
+        raise SessionError("--resume-session, --close-symbols and --trim-to-slots act on a simulated book only.")
+    if venue == "ib" and settings.ib_futures_only:
+        _check_ib_policy(wanted, futures, plan.account_currency)
     feed, keepalive = venue_feed(settings, venue, money=plan.money, transport=transport, futures=futures)
     return build_session(settings, plan, feed=feed, book=book, account_number=account_number,
                          live_confirmation=live_confirmation, expected_env=expected_env,
                          allow_screened=o.allow_screened,
                          class_overrides=futures_overrides(list(futures)) if futures else None,
-                         keepalive=keepalive, label=label or f"{venue}-{mode}", emit=emit)
+                         keepalive=keepalive, close_symbols=_names(o.close_symbols, upper=True),
+                         trim_to_slots=o.trim_to_slots, label=label or f"{venue}-{mode}", emit=emit)
+
+
+def _check_ib_policy(symbols: Sequence[str], futures: Sequence[str], currency: str) -> None:
+    """The desk's split (desk_policy.py): IB carries futures, equities trade on Questrade, one currency a book."""
+    roots = {r.upper().lstrip("/") for r in futures}
+    named = [f"/{s.lstrip('/')}" if s.lstrip("/") in roots else s for s in symbols]
+    try:
+        assert_ib_futures_only(named)
+        assert_single_currency(named, currency)
+    except VenuePolicyError as e:
+        raise SessionError(f"{e} Set ib_futures_only: false in trading.yaml to run equities on IB anyway.") from e
 
 
 def add_session_args(ap: argparse.ArgumentParser) -> None:
@@ -682,6 +975,12 @@ def add_session_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--require-card", dest="require_card", action=bool_flag, default=None,
                     help="A TradeCard (or scripts/approval_card_sim.py) must ACCEPT every order.")
     ap.add_argument("--card-shim-port", type=int, default=None)
+    ap.add_argument("--card-shim-host", default=None,
+                    help="Interface the approval shim binds. Loopback by default; set a LAN address deliberately "
+                         "to reach the card or the desk panel from a device.")
+    ap.add_argument("--card-attach", dest="card_attach", action="store_true", default=None,
+                    help="Wrap the router for card approval but do NOT bind a port: attach to a shim already "
+                         "running on state/approval.db. This is how QT, Kraken and IB share one port and token.")
     ap.add_argument("--card-ttl", type=float, default=None, help="Seconds a card prompt stays live.")
     ap.add_argument("--require-basket", dest="require_basket", action=bool_flag, default=None,
                     help="Entries need a card-signed basket for this venue. Exits are never gated.")
@@ -693,14 +992,48 @@ def add_session_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--spectral-var-level", dest="spectral_var_level", type=float, default=None)
     ap.add_argument("--spectral-var-horizon", dest="spectral_var_horizon", type=int, default=None,
                     help="VaR horizon in trading days.")
+    ap.add_argument("--flatten-on-exit", dest="flatten_on_exit", action=bool_flag, default=None,
+                    help="PAPER ONLY. Close every open position through the Router when the session stops. To stop "
+                         "cleanly, touch state/STOP_<session_id>; a hard kill skips this.")
+    ap.add_argument("--warmup-interval", dest="warmup_interval", type=int, default=None,
+                    help="Poll every N seconds for the first --warmup-minutes, then fall back to --interval.")
+    ap.add_argument("--warmup-minutes", dest="warmup_minutes", type=float, default=None)
+    ap.add_argument("--parallel-sizing", dest="parallel_sizing", action=bool_flag, default=None,
+                    help="Allocate each poll's entries jointly before routing any of them. The Router still gates each.")
+    ap.add_argument("--mute-alerts", dest="mute_alerts", default=None,
+                    help="Comma-separated symbols whose alerts are muted (still traded and journaled).")
+    ap.add_argument("--max-cost-ratio", dest="max_cost_ratio", type=float, default=None,
+                    help="Reject an ENTRY whose round-trip cost exceeds this fraction of its notional, priced per "
+                         "venue. 0 = off. Kraken's fee alone is ~52 bps round trip; a 0.005 ceiling fits at no size.")
+    ap.add_argument("--max-positions", dest="max_positions", type=int, default=None,
+                    help="Open-position cap for this run, over max_open_positions.")
+    ap.add_argument("--params", dest="params", default=None, choices=PARAMS_MODES,
+                    help="Where each symbol's strategy parameters come from: default, wf or calibrated.")
+    ap.add_argument("--sizing-v2", dest="sizing_v2", action=bool_flag, default=None,
+                    help="Kraken's own lot rules (fractional coins). Refuses to start if they cannot be fetched.")
+    ap.add_argument("--resume-session", dest="resume_session", default="",
+                    help="PAPER ONLY. Continue an earlier session's book from state/ instead of starting flat, at the "
+                         "same --paper-equity. Refuses if the journals disagree.")
+    ap.add_argument("--close-symbols", dest="close_symbols", default="",
+                    help="PAPER ONLY, one-shot. Close these positions in full at startup, through the Router.")
+    ap.add_argument("--trim-to-slots", dest="trim_to_slots", action="store_true",
+                    help="PAPER ONLY, one-shot. Trim every holding by the same factor to make room for free slots.")
 
 
 def options_from_args(args: argparse.Namespace, *, level: bool | None = None) -> SessionOptions:
     return SessionOptions(interval=args.interval, level=level, intel_overlay=args.intel_overlay,
-                          require_card=args.require_card, card_shim_port=args.card_shim_port, card_ttl=args.card_ttl,
+                          require_card=args.require_card, card_shim_port=args.card_shim_port,
+                          card_shim_host=args.card_shim_host, card_attach=args.card_attach, card_ttl=args.card_ttl,
                           require_basket=args.require_basket, spectral_var_cap=args.spectral_var_cap,
                           spectral_var_level=args.spectral_var_level, spectral_var_horizon=args.spectral_var_horizon,
-                          paper_equity=args.paper_equity, audit_ledger=args.audit_ledger)
+                          paper_equity=args.paper_equity, audit_ledger=args.audit_ledger,
+                          flatten_on_exit=args.flatten_on_exit, warmup_interval=args.warmup_interval,
+                          warmup_minutes=args.warmup_minutes, parallel_sizing=args.parallel_sizing,
+                          mute_alerts=args.mute_alerts, max_cost_ratio=args.max_cost_ratio,
+                          max_positions=args.max_positions, params=args.params, sizing_v2=args.sizing_v2,
+                          account_currency=getattr(args, "account_currency", None),
+                          resume_session=args.resume_session, close_symbols=args.close_symbols,
+                          trim_to_slots=args.trim_to_slots)
 
 
 __all__ = [
@@ -715,11 +1048,13 @@ __all__ = [
     "add_session_args",
     "alert_emitter",
     "allocator_weight_bias",
+    "book_with_params",
     "build_alerter",
     "build_session",
     "check_money_ready",
     "intel_overlay_hooks",
     "options_from_args",
+    "paper_costs_for",
     "plan_differences",
     "plan_session",
     "resolve_book",

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
 
@@ -101,6 +102,18 @@ class Candle(BaseModel):
     VWAP: float | None = None
 
 
+def plain_decimal(x: float) -> str:
+    """Exact decimal text with no exponent or rounding: 12.0 -> "12", 5e-08 -> "0.00000005".
+
+    ``str(float)`` switches to scientific notation below 1e-4, which exchange APIs
+    reject and which would mis-render satoshi-scale crypto quantities.
+    """
+    q = float(x)
+    if q.is_integer():
+        return str(int(q))
+    return format(Decimal(repr(q)), "f")
+
+
 class Order(BaseModel):
     """Order intent + lifecycle. Used both as request body and as response normalized form."""
 
@@ -175,6 +188,19 @@ class Execution(BaseModel):
     time: datetime
     venue: str
     account: str | None = None
+# Canonical venue tags, documentation for ``Fill.venue`` rather than a validation constraint.
+# ``Fill.venue`` was Literal["paper","questrade-practice","questrade-live"] — a pre-multi-venue
+# vocabulary that rejected a Kraken or IB fill built with its real venue, and disagreed with the
+# journal, which already carried kraken / questrade / ib_web rows. Re-enumerating it as a Literal
+# was tried and rejected: PaperBroker falls back to the feed's ``.name`` for any feed that doesn't
+# declare ``.venue`` (test doubles, future adapters), so a closed set makes every new feed a schema
+# change. The field is therefore an open ``str``; this tuple records the values real adapters emit,
+# and ``tests/test_paper_broker_journal.py`` asserts each concrete broker's ``.venue`` is in it so
+# a typo or drift still fails a test. The two legacy questrade spellings stay for historical rows.
+CANONICAL_VENUES: tuple[str, ...] = (
+    "paper", "questrade", "kraken", "ib", "ib_web", "global",
+    "questrade-practice", "questrade-live",
+)
 
 
 class Fill(BaseModel):
@@ -187,4 +213,4 @@ class Fill(BaseModel):
     price: float
     commission: float = 0.0
     fill_time: datetime
-    venue: Literal["paper", "questrade-practice", "questrade-live"]
+    venue: str            # see CANONICAL_VENUES above for the values real adapters emit

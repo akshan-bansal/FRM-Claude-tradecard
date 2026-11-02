@@ -37,11 +37,15 @@ short-circuits before dispatch).
 """
 from __future__ import annotations
 
+import threading
+from collections import deque
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from ..logging_setup import get_logger
+from ..venues import venue_for
 from .base import Broker, BrokerError, OrderRejected
 from .models import Account, Candle, Execution, Order, OrderAction, Position, Quote
 
@@ -111,6 +115,26 @@ class IBContract:
 # that want the depth-of-book surface (research on microstructure, execution-cost estimates).
 
 @dataclass(frozen=True)
+class StockDetails:
+    """Per-listing facts from IB contract details that price and size a stock correctly.
+
+    ``price_magnifier``: IB quotes and bars come in ``price * magnifier`` units — 100 for
+    pence-quoted LSE shares (BP. quotes in GBX), 1 almost everywhere else. ``size_increment``: the
+    board lot (Tokyo varies per name, e.g. 1306.T trades in 10s and 7203.T in 100s; Hong Kong
+    per name, e.g. 2800 in 500s); fractional (<1) where IB allows fractional shares.
+    """
+
+    price_magnifier: float
+    size_increment: float
+
+    @property
+    def board_lot(self) -> int | None:
+        """Whole-share lot when the listing has one (>1); ``None`` for 1 or fractional increments."""
+        inc = self.size_increment
+        return int(inc) if inc > 1 and float(inc).is_integer() else None
+
+
+@dataclass(frozen=True)
 class L2Level:
     price: float
     size: float
@@ -166,8 +190,26 @@ class IBBroker(Broker):
         self._account = account
         self._enable_live_orders = enable_live_orders
         self._readonly = readonly_market_data
+        # "/ROOT" symbols resolve to (conId, root, exchange, currency, trading class) of the contract
+        # currently in play; set by the caller from a FuturesBook.
+        self.futures_contract_for: Callable[[str], tuple[int, str, str, str, str] | None] | None = None
         self._ib: Any = None                    # lazy-imported ib_insync.IB() instance
         self._connected = False
+        # News feed state (see subscribe_news / drain_news). Bounded so a burst can't grow
+        # the process; the drain callback is expected to keep up. maxlen matches the task
+        # spec's 1000-entry buffer.
+        self._news_buffer: deque[dict[str, Any]] = deque(maxlen=1000)
+        self._news_lock = threading.Lock()
+        self._news_provider_filter: set[str] | None = None
+        self._news_subscribed_contracts: list[Any] = []
+        self._news_bulletins_on = False
+        # Track (providerCode, articleId) pairs seen inside the current buffer window so a
+        # duplicate NewsTick fired by ib_insync (some providers repeat) doesn't turn into two
+        # graph edges. The set is cleared alongside the buffer on drain, so long-term dedup
+        # is the caller's job — this only guards a single drain cycle.
+        self._news_seen: set[tuple[str, str]] = set()
+        self._news_tick_handler: Any = None
+        self._stock_details: dict[str, StockDetails] = {}
 
     # ---- connection lifecycle ------------------------------------------------
 
@@ -252,21 +294,70 @@ class IBBroker(Broker):
         return self.quotes([symbol])[0]
 
     def quotes(self, symbols: list[str]) -> list[Quote]:
-        """Live tickers for one or more symbols. Uses SMART/USD stock as the default contract
-        shape; call ``quote_contract`` for anything past a plain US equity."""
+        """Live stock tickers routed to each symbol's listing venue; ``quote_contract`` for other types."""
         ib = self._require_ib()
         from ib_insync import Stock              # local import so module import stays lightweight
-        contracts = [Stock(s, "SMART", "USD") for s in symbols]
+        contracts = [self._futures_contract(s) if s.startswith("/") else Stock(*_infer_stock_venue(s))
+                     for s in symbols]
+        # Resolve every stock's magnifier BEFORE requesting tickers, so an unscalable listing
+        # fails the call instead of returning a pence price read as pounds.
+        scales = [1.0 if s.startswith("/") else self.stock_details(s).price_magnifier
+                  for s in symbols]
         tickers = ib.reqTickers(*contracts)
         out: list[Quote] = []
-        for sym, t in zip(symbols, tickers, strict=True):
+        for sym, t, k in zip(symbols, tickers, scales, strict=True):
             out.append(Quote(
                 symbol=sym, symbolId=int(t.contract.conId or 0),
-                bidPrice=float(t.bid) if t.bid and t.bid > 0 else None,
-                askPrice=float(t.ask) if t.ask and t.ask > 0 else None,
-                lastTradePrice=float(t.last) if t.last and t.last > 0 else None,
+                bidPrice=float(t.bid) / k if t.bid and t.bid > 0 else None,
+                askPrice=float(t.ask) / k if t.ask and t.ask > 0 else None,
+                lastTradePrice=float(t.last) / k if t.last and t.last > 0 else None,
             ))
         return out
+
+    def stock_details(self, symbol: str) -> StockDetails:
+        """Price magnifier + size increment for a stock listing, fetched once and cached.
+
+        Raises ``BrokerError`` when IB returns no details: guessing a magnifier of 1 would read a
+        pence-quoted LSE price 100x too high, which is worse than no quote at all.
+        """
+        key = symbol.upper()
+        cached = self._stock_details.get(key)
+        if cached is not None:
+            return cached
+        ib = self._require_ib()
+        from ib_insync import Stock
+        try:
+            details = list(ib.reqContractDetails(Stock(*_infer_stock_venue(symbol))))
+        except Exception as e:
+            raise BrokerError(f"IBBroker: contract details for {symbol} failed: {e}") from e
+        if not details:
+            raise BrokerError(f"IBBroker: no contract details for {symbol}; cannot scale its prices")
+        d = details[0]
+        magnifier = float(getattr(d, "priceMagnifier", 0) or 1.0)
+        increment = float(getattr(d, "sizeIncrement", 0) or getattr(d, "minSize", 0) or 1.0)
+        info = StockDetails(price_magnifier=magnifier, size_increment=increment)
+        self._stock_details[key] = info
+        if magnifier != 1.0 or info.board_lot:
+            log.info("ib.stock_details", symbol=symbol, price_magnifier=magnifier,
+                     board_lot=info.board_lot)
+        return info
+
+    def _futures_resolution(self, symbol: str) -> tuple[int, str, str, str, str]:
+        resolved = self.futures_contract_for(symbol) if self.futures_contract_for else None
+        if resolved is None:
+            raise BrokerError(f"IBBroker: no active futures contract registered for {symbol}")
+        return resolved
+
+    def _futures_contract(self, symbol: str) -> Any:
+        from ib_insync import Contract
+        con_id, _root, exchange, currency, _cls = self._futures_resolution(symbol)
+        return Contract(conId=con_id, exchange=exchange, currency=currency)
+
+    def futures_contract_details(self, root: str, exchange: str, currency: str = "") -> list[Any]:
+        """Listed (unexpired) contracts for ``root`` on ``exchange`` — read-only discovery."""
+        ib = self._require_ib()
+        from ib_insync import Future
+        return list(ib.reqContractDetails(Future(root, exchange=exchange, currency=currency)))
 
     def quote_contract(self, contract: IBContract) -> Quote:
         """Full-fidelity quote for a specific IBContract — bonds, futures, options, forex."""
@@ -288,7 +379,14 @@ class IBBroker(Broker):
         from ib_insync import Stock
         duration_days = max(1, (end - start).days)
         bar_size = _interval_to_ib_bar_size(interval)
-        contract = Stock(symbol, "SMART", "USD")
+        if symbol.startswith("/"):
+            from ib_insync import ContFuture
+            _con_id, root, exchange, currency, trading_class = self._futures_resolution(symbol)
+            contract: Any = ContFuture(root, exchange, currency=currency, tradingClass=trading_class)
+        else:
+            contract = Stock(*_infer_stock_venue(symbol))
+        # Bars share the quote's units (pence for GBX listings); futures are rescaled elsewhere.
+        k = 1.0 if symbol.startswith("/") else self.stock_details(symbol).price_magnifier
         bars = ib.reqHistoricalData(
             contract, endDateTime=end.strftime("%Y%m%d %H:%M:%S"),
             durationStr=f"{duration_days} D", barSizeSetting=bar_size,
@@ -298,8 +396,8 @@ class IBBroker(Broker):
         for b in bars:
             ts = b.date if isinstance(b.date, datetime) else datetime.combine(b.date, datetime.min.time())
             out.append(Candle(
-                start=ts, end=ts, open=float(b.open), high=float(b.high),
-                low=float(b.low), close=float(b.close), volume=int(b.volume),
+                start=ts, end=ts, open=float(b.open) / k, high=float(b.high) / k,
+                low=float(b.low) / k, close=float(b.close) / k, volume=int(b.volume),
             ))
         return out
 
@@ -314,6 +412,182 @@ class IBBroker(Broker):
                 except ValueError:
                     return 0.0
         return 0.0
+
+    # ---- news feed (headlines + bulletins) ----------------------------------
+    # Wraps IB's news surface (reqMktData tick 292, reqHistoricalNews, reqNewsBulletins)
+    # into the vendor-record shape intel.graph.event_records_to_edges consumes. Not part
+    # of the Broker protocol — a caller opting in must construct an IBBroker explicitly.
+    #
+    # Buffer semantics: the tick/bulletin handlers append to a bounded deque under a lock;
+    # drain_news atomically swaps the buffer out. A drop from the deque's maxlen is silent
+    # by design — the drain cadence is set high enough (e.g. 30s) that in-order loss is
+    # not expected; if it starts happening, the correct answer is a wider maxlen or a
+    # faster drain, not a broker-side crash. Live-order state is untouched throughout.
+    #
+    # Providers not subscribed on the IB account emit no ticks; that failure mode is silent
+    # on IB's side too. Call list_news_providers() at wiring time to log what actually flows.
+
+    def list_news_providers(self) -> list[dict[str, str]]:
+        """Return the news providers this account is subscribed to.
+
+        Each dict has ``code`` (the providerCode IB uses in NewsTick / historical news
+        requests) and ``name`` (the human-facing label). Empty list = the account has no
+        news subscriptions active; wiring should degrade gracefully in that case.
+        """
+        ib = self._require_ib()
+        out: list[dict[str, str]] = []
+        for p in ib.reqNewsProviders() or []:
+            code = getattr(p, "code", "") or ""
+            name = getattr(p, "name", "") or ""
+            if code:
+                out.append({"code": str(code), "name": str(name)})
+        return out
+
+    def subscribe_news(
+        self,
+        symbols: Sequence[str],
+        providers: Sequence[str] | None = None,
+        *,
+        include_bulletins: bool = False,
+    ) -> None:
+        """Subscribe to real-time headlines for the given equity symbols.
+
+        Uses ``reqMktData(contract, genericTickList='mdoff,292')`` — tick type 292 is IB's
+        streaming news headline channel; ``mdoff`` suppresses the price ticks we don't need
+        alongside. Each incoming ``NewsTick`` is projected into the record shape
+        ``event_records_to_edges`` accepts and pushed to the buffer.
+
+        ``providers`` is an optional allow-list of provider codes (e.g. ``('BRFG', 'FLY')``);
+        ticks from other providers are dropped rather than buffered. ``None`` accepts all.
+
+        ``include_bulletins=True`` additionally calls ``reqNewsBulletins(True)`` to buffer
+        account-wide bulletins (free, no per-symbol subscription needed). These land in the
+        same buffer with ``providerCode='IB-BULLETIN'`` and ``meta.symbol=None``.
+        """
+        ib = self._require_ib()
+        from ib_insync import Stock
+        self._news_provider_filter = set(providers) if providers else None
+
+        # IB's news channel is global — ib.tickNewsEvent fires per NewsTick without a conId,
+        # so per-symbol attribution is not reliable from the tick payload alone. What the
+        # per-symbol reqMktData subscription controls is *whether* IB streams headlines for
+        # that instrument's tape to this session; the tick itself lands on the global bus.
+        # We therefore record symbol=None on tick records and put attribution in follow-up
+        # NLP (intel/interpret.py) if the caller wants it — see task 67689008 caveats.
+
+        def _on_tick_news(tick: Any) -> None:
+            provider = str(getattr(tick, "providerCode", "") or "")
+            article_id = str(getattr(tick, "articleId", "") or "")
+            headline = str(getattr(tick, "headline", "") or "")
+            if not provider or not headline:
+                return
+            if self._news_provider_filter is not None and provider not in self._news_provider_filter:
+                return
+            rec = _news_tick_to_record(
+                provider_code=provider, article_id=article_id, headline=headline,
+                time_stamp=getattr(tick, "timeStamp", None),
+                extra_data=getattr(tick, "extraData", None), symbol=None,
+            )
+            with self._news_lock:
+                key = (provider, article_id)
+                if article_id and key in self._news_seen:
+                    return
+                if article_id:
+                    self._news_seen.add(key)
+                self._news_buffer.append(rec)
+
+        # Idempotence: attaching the same handler twice would duplicate every tick. ib_insync
+        # Events dedupe by identity, so use one stored bound handler per broker instance.
+        if getattr(self, "_news_tick_handler", None) is None:
+            self._news_tick_handler = _on_tick_news
+            ib.tickNewsEvent += _on_tick_news
+
+        for sym in symbols:
+            bare, exchange, currency = _infer_stock_venue(sym)
+            contract = Stock(bare, exchange, currency)
+            ib.reqMktData(contract, "mdoff,292", False, False)
+            self._news_subscribed_contracts.append(contract)
+
+        if include_bulletins and not self._news_bulletins_on:
+            ib.reqNewsBulletins(True)
+            def _on_bulletin(b: Any) -> None:
+                headline = str(getattr(b, "message", "") or "")
+                if not headline:
+                    return
+                msg_id = str(getattr(b, "msgId", "") or "")
+                rec = _news_tick_to_record(
+                    provider_code="IB-BULLETIN", article_id=msg_id, headline=headline,
+                    time_stamp=None, extra_data=None, symbol=None,
+                )
+                with self._news_lock:
+                    key = ("IB-BULLETIN", msg_id)
+                    if msg_id and key in self._news_seen:
+                        return
+                    if msg_id:
+                        self._news_seen.add(key)
+                    self._news_buffer.append(rec)
+            ib.newsBulletinEvent += _on_bulletin
+            self._news_bulletins_on = True
+
+        log.info("ib.news.subscribed", symbols=list(symbols),
+                 providers=list(providers) if providers else "all",
+                 bulletins=self._news_bulletins_on)
+
+    def drain_news(self) -> list[dict[str, Any]]:
+        """Pop and return every buffered news record. Clears the buffer + dedup set.
+
+        The records are shaped for ``intel.graph.event_records_to_edges``:
+        ``{"id", "title", "headline", "sources", "ingestedAt", "meta"}`` — where ``id`` is
+        ``f"{providerCode}:{articleId}"``, ``sources`` is a one-element list, ``ingestedAt``
+        is ISO-8601 UTC, and ``meta`` carries the originating symbol and IB's ``extraData``
+        pointer for the full article body.
+        """
+        with self._news_lock:
+            out = list(self._news_buffer)
+            self._news_buffer.clear()
+            self._news_seen.clear()
+        return out
+
+    def historical_news(
+        self,
+        symbol: str,
+        providers: Sequence[str],
+        since: datetime,
+        until: datetime | None = None,
+        limit: int = 300,
+    ) -> list[dict[str, Any]]:
+        """Backfill news for ``symbol`` between ``since`` and ``until`` (default: now).
+
+        Requires the target providers to be subscribed on the IB account; if none are, IB
+        returns an empty list. Return shape matches ``drain_news()``.
+        """
+        ib = self._require_ib()
+        from ib_insync import Stock
+        bare, exchange, currency = _infer_stock_venue(symbol)
+        contract = Stock(bare, exchange, currency)
+        (qualified,) = ib.qualifyContracts(contract) or (None,)
+        if qualified is None or not getattr(qualified, "conId", 0):
+            return []
+        con_id = int(qualified.conId)
+        end = until or datetime.now(UTC)
+        # IB's historical news API expects "YYYY-MM-DD HH:MM:SS.000" strings.
+        start_s = since.strftime("%Y-%m-%d %H:%M:%S.000")
+        end_s = end.strftime("%Y-%m-%d %H:%M:%S.000")
+        raw = ib.reqHistoricalNews(
+            con_id, ",".join(providers), start_s, end_s, int(limit),
+        ) or []
+        out: list[dict[str, Any]] = []
+        for h in raw:
+            provider = str(getattr(h, "providerCode", "") or "")
+            article_id = str(getattr(h, "articleId", "") or "")
+            headline = str(getattr(h, "headline", "") or "")
+            if not provider or not headline:
+                continue
+            out.append(_news_tick_to_record(
+                provider_code=provider, article_id=article_id, headline=headline,
+                time_stamp=getattr(h, "time", None), extra_data=None, symbol=symbol,
+            ))
+        return out
 
     # ---- L2 depth-of-book ----------------------------------------------------
 
@@ -355,6 +629,8 @@ class IBBroker(Broker):
                 "for simulated fills, or construct with enable_live_orders=True after the human "
                 "go-live confirmation."
             )
+        if order.symbol.startswith("/"):
+            raise OrderRejected("IBBroker: live futures orders are not implemented; paper only.")
         ib = self._require_ib()
         from ib_insync import LimitOrder, MarketOrder, Stock
 
@@ -364,7 +640,8 @@ class IBBroker(Broker):
             ib_order = LimitOrder(
                 action="BUY" if order.action == OrderAction.BUY else "SELL",
                 totalQuantity=order.totalQuantity,
-                lmtPrice=order.limitPrice,
+                # Back into IB's quoted units: quotes() divided by the magnifier (GBX -> GBP).
+                lmtPrice=order.limitPrice * self.stock_details(order.symbol).price_magnifier,
             )
         else:
             ib_order = MarketOrder(
@@ -388,7 +665,8 @@ class IBBroker(Broker):
 
         ``algo_params`` maps to IB's ``algoParams`` list (e.g. ``{"startTime": "20261231-14:30:00
         US/Eastern", "endTime": "20261231-16:00:00 US/Eastern", "allowPastEndTime": False}`` for
-        VWAP). Returns the IB order id.
+        VWAP). Returns the IB order id. ``limit_price`` is in IB's quoted units for ``contract``
+        (pence for GBX listings), like ``quote_contract`` — not the rescaled ``quotes()`` units.
         """
         if not self._enable_live_orders:
             raise OrderRejected("IBBroker: live orders disabled; enable_live_orders=True required.")
@@ -507,33 +785,66 @@ def _to_ib_contract(spec: IBContract) -> Any:
                      exchange=spec.exchange, currency=spec.currency)
 
 
-# Exchange-suffix → (exchange, currency) map shared with IB Web's `_resolve_stk_conid`.
-# US-listed tickers have no suffix and route SMART/USD (SMART is IB's price-improvement
-# router across US venues). Suffixed tickers get their listing venue explicitly with the
-# right currency — silently sending XIC.TO to SMART/USD would either fail or execute
-# against the wrong instrument.
-_STOCK_SUFFIX_VENUE: dict[str, tuple[str, str]] = {
-    ".TO": ("TSE", "CAD"),        # Toronto Stock Exchange
-    ".V":  ("VENTURE", "CAD"),    # TSX Venture
-    ".L":  ("LSE", "GBP"),        # London
-    ".AX": ("ASX", "AUD"),        # Sydney
-}
+def require_paper_or_data_only(accounts: Sequence[str], *, live_data_only: bool) -> str:
+    """Return ``"paper"`` for an all-DU login, ``"live-data-only"`` for a live login explicitly accepted as a
+    market-data feed, and raise otherwise. Callers must never route orders to IB in the second case."""
+    if accounts and all(a.startswith("DU") for a in accounts):
+        return "paper"
+    if not accounts:
+        raise BrokerError("IB login exposes no accounts; cannot tell paper from live.")
+    if not live_data_only:
+        raise BrokerError(
+            "IB login is a LIVE account. Log in to paper, or pass --live-data-only to use it purely as a "
+            "read-only market-data feed (tick 'Read-Only API' in TWS first).")
+    return "live-data-only"
 
 
 def _infer_stock_venue(symbol: str) -> tuple[str, str, str]:
-    """Return (bare_symbol, exchange, currency) for an IB `Stock()` contract.
+    """Return (ib_symbol, exchange, currency) for an IB `Stock()` contract, per trading_live_claude.venues."""
+    venue, bare = venue_for(symbol)
+    if venue.code == "CRYPTO":
+        return symbol, "SMART", "USD"
+    return bare, venue.ib_exchange, venue.currency
 
-    Strips known exchange suffixes and returns the appropriate venue + currency; unknown
-    or absent suffixes default to SMART/USD (the US default that was IBBroker's blanket
-    fallback prior to 2026-09-09). Ports the same logic IBWebBroker._resolve_stk_conid
-    uses on the REST side; keeps the two adapters routing consistently for the same
-    input symbol.
+
+def _news_tick_to_record(
+    *,
+    provider_code: str,
+    article_id: str,
+    headline: str,
+    time_stamp: Any,
+    extra_data: Any,
+    symbol: str | None,
+) -> dict[str, Any]:
+    """Project an IB news event into the vendor-record shape event_records_to_edges reads.
+
+    ``time_stamp`` may be an int (epoch ms from NewsTick.timeStamp), a datetime (from
+    HistoricalNews.time), or None (bulletins carry no timestamp — we stamp with now).
+    ``ingestedAt`` is populated regardless so _event_id's fallback hash works if the
+    provider ever ships a blank articleId. ``sources`` is a one-element list so
+    _extract_sources yields the provider code as the corroboration key.
     """
-    up = symbol.upper()
-    for suffix, (exch, ccy) in _STOCK_SUFFIX_VENUE.items():
-        if up.endswith(suffix):
-            return symbol[: -len(suffix)], exch, ccy
-    return symbol, "SMART", "USD"
+    if isinstance(time_stamp, datetime):
+        dt = time_stamp if time_stamp.tzinfo else time_stamp.replace(tzinfo=UTC)
+    elif isinstance(time_stamp, (int, float)) and time_stamp > 0:
+        # IB emits epoch seconds on NewsTick despite the "timeStamp" name (~10-digit values
+        # in the wild); guard against a vendor that ever ships milliseconds by scaling down.
+        secs = float(time_stamp)
+        if secs > 1e12:                              # clearly milliseconds
+            secs = secs / 1000.0
+        dt = datetime.fromtimestamp(secs, tz=UTC)
+    else:
+        dt = datetime.now(UTC)
+    ident = f"{provider_code}:{article_id}" if article_id else ""
+    rec: dict[str, Any] = {
+        "id": ident,
+        "title": headline,
+        "headline": headline,
+        "sources": [provider_code],
+        "ingestedAt": dt.isoformat(),
+        "meta": {"symbol": symbol, "extraData": extra_data or ""},
+    }
+    return rec
 
 
 def _interval_to_ib_bar_size(interval: str) -> str:

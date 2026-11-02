@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     alert_email_to: str = ""
     quantconnect_user_id: str = ""
     quantconnect_api_token: str = ""
+    # Quantpedia Pro API (research data only: strategy metadata, performance curves, source, papers).
+    quantpedia_username: str = ""
+    quantpedia_api_key: str = ""
     # Kraken private REST API (crypto sleeve execution). Public market data needs none of this;
     # only the future KrakenBroker's private endpoints (balances, orders) do.
     kraken_api_key: str = ""
@@ -115,6 +118,15 @@ class Settings(BaseSettings):
     # equity. Weighted variant (by inverse relative vol) deferred to a follow-up.
     max_position_notional_pct: float = Field(default=0.50, ge=0.01, le=1.0)
 
+    # Dynamic per-name cap (risk/position_cap.py), on every runner. 'vol_scaled': cap =
+    # max_position_notional_pct x position_cap_ref_vol / realised vol (higher of 20d/60d),
+    # clipped to [floor, ceiling]; unknown vol gets the floor. 'static': the flat cap above.
+    # The cap also counts notional already held in the name.
+    position_cap_mode: Literal["static", "vol_scaled"] = "vol_scaled"
+    position_cap_ref_vol: float = Field(default=0.20, gt=0.0, le=2.0)
+    position_cap_floor_pct: float = Field(default=0.05, gt=0.0, le=1.0)
+    position_cap_ceiling_pct: float = Field(default=0.75, gt=0.0, le=1.0)
+
     # Router-level intra-day forced-exit trigger (2026-09-08). Independent of the
     # strategy's own exit bar. When a position's unrealized loss exceeds N × ATR_at_entry,
     # Router.check_forced_exits emits a close intent on the next monitor poll. Runs on
@@ -139,8 +151,29 @@ class Settings(BaseSettings):
     intel_refresh_seconds: float = Field(default=900.0, ge=30.0)
     require_card: bool = False
     card_shim_port: int = 8787
+    card_shim_host: str = "127.0.0.1"        # loopback; a LAN address reaches the card or desk from a device
+    card_attach: bool = False                # wrap for the card but bind no port: a shim is already running
     card_ttl_seconds: float = Field(default=90.0, gt=0.0)
-    require_basket: bool = False
+    require_basket: bool | None = None       # None: on whenever require_card is on
+    # Paper only: close the book when the session stops. A money session never closes itself.
+    flatten_on_exit: bool = True
+    warmup_interval_seconds: int = Field(default=0, ge=0)   # poll this fast at first; 0 = off
+    warmup_minutes: float = Field(default=60.0, ge=0.0)
+    # Exits and adds on a held position (signals/*). Each is off unless turned on.
+    profit_lock: bool = False
+    profit_lock_exempt: str = "ts_momentum"  # comma-separated strategy names
+    candle_exit: bool = False
+    candle_exit_exempt: str = ""
+    overbought_exit: bool = False
+    overbought_exit_exempt: str = ""
+    oversold_entry: bool = False
+    oversold_entry_only: str = "ts_momentum"
+    parallel_sizing: bool = True             # each poll's entries sized jointly
+    mute_alerts: str = ""                    # comma-separated symbols: still traded and journaled
+    max_round_trip_cost_ratio: float = Field(default=0.0, ge=0.0)  # 0 = off
+    params: Literal["default", "wf", "calibrated"] = "default"     # where strategy parameters come from
+    sizing_v2: bool = True                   # Kraken's own lot rules; refuses to start without them
+    ib_futures_only: bool = True             # desk_policy: IB carries futures; equities trade on Questrade
     spectral_var_cap: float | None = Field(default=None, gt=0.0, le=1.0)  # None = gate off
     spectral_var_level: float = Field(default=0.99, gt=0.5, lt=1.0)
     spectral_var_horizon: int = Field(default=1, ge=1, le=60)
@@ -148,7 +181,7 @@ class Settings(BaseSettings):
     # Set this to the money you plan to trade. Whole-unit rounding, the minimum ticket and fees all scale
     # with it, so a rehearsal at another size does not translate.
     paper_starting_equity: float = Field(default=100_000.0, gt=0.0)
-    # Per venue: commission_per_trade, commission_bps, slippage_bps. Merged over DEFAULT_PAPER_COSTS.
+    # Per venue, over the venue's own fee shape (execution/venue_costs.py): any VenueCostModel field.
     paper_costs: dict[str, dict[str, float]] = Field(default_factory=dict)
     # Off: an IB warning prompt on an order rejects it, and its text reaches the journal.
     ib_auto_confirm_prompts: bool = False
@@ -160,6 +193,39 @@ class Settings(BaseSettings):
     # × 2.33× allocator) firing entry every poll and getting rejected every poll for 39
     # polls in a row — while a 50%-cap position would have been perfectly tradeable.
     on_size_cap_breach: Literal["trim", "reject"] = "trim"
+
+    # Stale-quote guard on every feed (brokers/fresh.py). A quote is stale when halted,
+    # delayed, priceless, crossed, unchanged for stale_quote_frozen_s, or (when set) its last
+    # trade is older than stale_quote_max_trade_age_s. 'raise' skips that symbol's entries/
+    # exits and rejects a paper fill; 'warn' only logs. 0 disables a check. 900s = three
+    # unchanged polls at the 300s cadence; equities read stale outside market hours by design.
+    stale_quote_frozen_s: float = Field(default=900.0, ge=0.0)
+    stale_quote_max_trade_age_s: float = Field(default=0.0, ge=0.0)
+    on_stale_quote: Literal["warn", "raise"] = "raise"
+
+    # Exchange hopping (venues.py, brokers/fx.py). skip_closed_venues: the monitor
+    # neither polls nor trades a symbol outside its venue's regular hours. IB paper converts
+    # every price into account_currency using IB spot FX (routed through USD), refreshed every
+    # fx_rate_ttl_s; past fx_max_rate_age_s without a rate, that symbol's quotes read as stale.
+    skip_closed_venues: bool = True
+    fx_rate_ttl_s: float = Field(default=60.0, ge=1.0)
+    fx_max_rate_age_s: float = Field(default=900.0, ge=1.0)
+
+    # 24-hour global book (execution/scheduler.py, scripts/paper_global.py). Intents for a closed
+    # venue queue until its next tradeable window: open + scheduler_open_buffer_min through close
+    # - scheduler_close_buffer_min (keeps orders out of auctions), expiring scheduler_intent_ttl_min
+    # after release. Entries need a spread under the per-class ceiling; Tokyo rounds to 100-share
+    # lots and Hong Kong names need an explicit board_lots entry. corr_lead_lag: Dimson lags for
+    # the heat gate's cross-venue correlation (0 = same-day correlation).
+    scheduler_open_buffer_min: float = Field(default=5.0, ge=0.0)
+    scheduler_close_buffer_min: float = Field(default=10.0, ge=0.0)
+    scheduler_intent_ttl_min: float = Field(default=30.0, ge=1.0)
+    max_spread_bps_equity: float = Field(default=50.0, gt=0.0)
+    max_spread_bps_crypto: float = Field(default=30.0, gt=0.0)
+    board_lots: dict[str, int] = Field(default_factory=dict)
+    corr_lead_lag: int = Field(default=1, ge=0, le=5)
+    # Futures roll: business days before the earlier of last trade and contract-month start.
+    futures_roll_bdays: int = Field(default=5, ge=1, le=30)
 
     default_strategy: str = "ema_crossover"
     default_symbols: str = "AAPL,MSFT,SHOP.TO,XIC.TO"
@@ -221,6 +287,10 @@ _TRADING_KNOB_FIELDS: tuple[str, ...] = (
     "min_ticket_usd",
     "max_gross_leverage",
     "max_position_notional_pct",
+    "position_cap_mode",
+    "position_cap_ref_vol",
+    "position_cap_floor_pct",
+    "position_cap_ceiling_pct",
     "force_exit_atr_mult",
     "forced_exits",
     "respect_market_hours",
@@ -231,7 +301,26 @@ _TRADING_KNOB_FIELDS: tuple[str, ...] = (
     "intel_refresh_seconds",
     "require_card",
     "card_shim_port",
+    "card_shim_host",
+    "card_attach",
     "card_ttl_seconds",
+    "flatten_on_exit",
+    "warmup_interval_seconds",
+    "warmup_minutes",
+    "profit_lock",
+    "profit_lock_exempt",
+    "candle_exit",
+    "candle_exit_exempt",
+    "overbought_exit",
+    "overbought_exit_exempt",
+    "oversold_entry",
+    "oversold_entry_only",
+    "parallel_sizing",
+    "mute_alerts",
+    "max_round_trip_cost_ratio",
+    "params",
+    "sizing_v2",
+    "ib_futures_only",
     "require_basket",
     "spectral_var_cap",
     "spectral_var_level",
@@ -241,6 +330,20 @@ _TRADING_KNOB_FIELDS: tuple[str, ...] = (
     "paper_costs",
     "ib_auto_confirm_prompts",
     "on_size_cap_breach",
+    "stale_quote_frozen_s",
+    "stale_quote_max_trade_age_s",
+    "on_stale_quote",
+    "skip_closed_venues",
+    "fx_rate_ttl_s",
+    "fx_max_rate_age_s",
+    "scheduler_open_buffer_min",
+    "scheduler_close_buffer_min",
+    "scheduler_intent_ttl_min",
+    "max_spread_bps_equity",
+    "max_spread_bps_crypto",
+    "board_lots",
+    "corr_lead_lag",
+    "futures_roll_bdays",
     "default_strategy",
     "default_symbols",
     "timezone",

@@ -18,6 +18,7 @@ from trading_live_claude.brokers.base import BrokerError
 from trading_live_claude.brokers.kraken import KrakenBroker, _asset_to_routed_symbol, _holdings
 from trading_live_claude.brokers.models import Order, OrderAction, OrderType, Quote
 from trading_live_claude.brokers.paper import PaperBroker
+from trading_live_claude.execution.venue_costs import VenueCostModel
 from trading_live_claude.brokers.questrade import QuestradeBroker, environment_of
 from trading_live_claude.brokers.token_store import TokenSet
 
@@ -43,7 +44,7 @@ def _paper(tmp: Path, feed: Any = None, **kw: Any) -> PaperBroker:
 
 
 def test_a_rehearsal_fill_pays_the_far_side_of_the_book(tmp_path: Path) -> None:
-    b = _paper(tmp_path, slippage_bps=0.0, commission_per_trade=0.0, cross_spread=True)
+    b = _paper(tmp_path, slippage_bps=0.0, commission_per_trade=0.0, fill_model="touch")
     b.place_order(_order())
     assert b.fills[-1].price == 101.0
     b.place_order(_order(OrderAction.SELL))
@@ -51,13 +52,14 @@ def test_a_rehearsal_fill_pays_the_far_side_of_the_book(tmp_path: Path) -> None:
 
 
 def test_slippage_comes_on_top_of_the_spread(tmp_path: Path) -> None:
-    b = _paper(tmp_path, slippage_bps=10.0, commission_per_trade=0.0, cross_spread=True)
+    b = _paper(tmp_path, slippage_bps=10.0, commission_per_trade=0.0, fill_model="touch")
     b.place_order(_order())
     assert b.fills[-1].price == pytest.approx(101.0 * 1.001)
 
 
 def test_a_round_trip_loses_the_spread_and_the_fees(tmp_path: Path) -> None:
-    b = _paper(tmp_path, slippage_bps=0.0, commission_per_trade=0.0, commission_bps=40.0, cross_spread=True)
+    b = _paper(tmp_path, slippage_bps=0.0, fill_model="touch",
+               cost_model=VenueCostModel(flat_per_fill=0.0, commission_bps=40.0))
     start = b.equity("PAPER-001")
     b.place_order(_order())
     b.place_order(_order(OrderAction.SELL))
@@ -67,7 +69,7 @@ def test_a_round_trip_loses_the_spread_and_the_fees(tmp_path: Path) -> None:
 
 
 def test_a_one_sided_quote_falls_back_to_the_mid_price(tmp_path: Path) -> None:
-    b = _paper(tmp_path, _Quotes(bid=None, ask=None), slippage_bps=0.0, commission_per_trade=0.0, cross_spread=True)
+    b = _paper(tmp_path, _Quotes(bid=None, ask=None), slippage_bps=0.0, commission_per_trade=0.0, fill_model="touch")
     b.place_order(_order())
     assert b.fills[-1].price == 100.0
 
@@ -79,7 +81,7 @@ def test_a_bare_paper_broker_keeps_its_old_fill(tmp_path: Path) -> None:
 
 
 def test_commission_bps_scales_with_the_order(tmp_path: Path) -> None:
-    b = _paper(tmp_path, slippage_bps=0.0, commission_per_trade=1.0, commission_bps=10.0)
+    b = _paper(tmp_path, slippage_bps=0.0, cost_model=VenueCostModel(flat_per_fill=1.0, commission_bps=10.0))
     b.place_order(_order())
     assert b.fills[-1].commission == pytest.approx(1.0 + 10 * 100.0 * 0.001)
 
@@ -148,7 +150,7 @@ def test_staked_and_stable_balances_are_not_positions() -> None:
 
 @respx.mock
 def test_equity_is_cash_plus_marked_holdings(private: dict[str, Any]) -> None:
-    _ticker({"XBTUSD": 60_000.0, "SOL/USD": 100.0})
+    _ticker({"XBTUSD": 60_000.0, "SOLUSD": 100.0})
     with _kraken() as b:
         assert b.equity("KRAKEN", "USD") == pytest.approx(1000.0 + 0.5 * 60_000.0 + 10 * 100.0)
 
@@ -156,7 +158,7 @@ def test_equity_is_cash_plus_marked_holdings(private: dict[str, Any]) -> None:
 @respx.mock
 def test_buying_does_not_read_as_a_loss(private: dict[str, Any]) -> None:
     """The bug that would have tripped the kill-switch on the first real fill."""
-    _ticker({"SOL/USD": 100.0})
+    _ticker({"SOLUSD": 100.0})
     private["/0/private/Balance"] = {"ZUSD": "2000.0"}
     with _kraken() as b:
         before = b.equity("KRAKEN", "USD")
@@ -168,7 +170,7 @@ def test_buying_does_not_read_as_a_loss(private: dict[str, Any]) -> None:
 def test_a_quote_gap_keeps_the_last_mark(private: dict[str, Any]) -> None:
     private["/0/private/Balance"] = {"ZUSD": "0", "SOL": "10"}
     route = respx.get(f"{API}/0/public/Ticker")
-    route.mock(return_value=httpx.Response(200, json={"error": [], "result": {"SOL/USD": {
+    route.mock(return_value=httpx.Response(200, json={"error": [], "result": {"SOLUSD": {
         "a": ["100"], "b": ["100"], "c": ["100"]}}}))
     with _kraken() as b:
         assert b.equity("KRAKEN", "USD") == pytest.approx(1000.0)
@@ -179,7 +181,7 @@ def test_a_quote_gap_keeps_the_last_mark(private: dict[str, Any]) -> None:
 @respx.mock
 def test_an_unpriceable_dust_asset_does_not_stop_the_book(private: dict[str, Any]) -> None:
     private["/0/private/Balance"] = {"ZUSD": "500", "SOL": "1", "DUST": "7"}
-    _ticker({"SOL/USD": 100.0})
+    _ticker({"SOLUSD": 100.0})
     with _kraken() as b:
         assert b.equity("KRAKEN", "USD") == pytest.approx(600.0)
 
@@ -200,7 +202,7 @@ def test_positions_carry_their_mark_and_average_entry(private: dict[str, Any], m
     private["/0/private/TradesHistory"] = {"trades": {
         "T2": _trade("buy", 5, 120.0, 2.0), "T1": _trade("buy", 10, 90.0, 1.0), "T3": _trade("sell", 5, 130.0, 3.0)}}
     monkeypatch.setattr(kraken_module, "_pair_to_symbol", lambda _p: "SOL/USD")
-    _ticker({"SOL/USD": 110.0})
+    _ticker({"SOLUSD": 110.0})
     with _kraken() as b:
         p = b.positions("KRAKEN")[0]
     assert p.symbol == "SOL/USD" and p.currentPrice == 110.0 and p.currentMarketValue == 1100.0
@@ -212,7 +214,7 @@ def test_positions_carry_their_mark_and_average_entry(private: dict[str, Any], m
 def test_trade_history_is_read_only_when_the_holding_changes(private: dict[str, Any]) -> None:
     calls: list[str] = []
     private["/0/private/Balance"] = {"SOL": "10"}
-    _ticker({"SOL/USD": 100.0})
+    _ticker({"SOLUSD": 100.0})
     with _kraken() as b:
         real = b.executions
         b.executions = lambda *a, **k: calls.append("read") or real(*a, **k)  # type: ignore[method-assign,func-returns-value]
@@ -228,7 +230,7 @@ def test_trade_history_is_read_only_when_the_holding_changes(private: dict[str, 
 def test_an_unreadable_trade_history_leaves_the_entry_unknown(private: dict[str, Any]) -> None:
     private["/0/private/Balance"] = {"SOL": "10"}
     private["/0/private/TradesHistory"] = kraken_module.KrakenAuthError("no permission")
-    _ticker({"SOL/USD": 100.0})
+    _ticker({"SOLUSD": 100.0})
     with _kraken() as b:
         assert b.positions("KRAKEN")[0].averageEntryPrice == 0.0
 

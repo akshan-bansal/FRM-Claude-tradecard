@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +19,7 @@ from .analysis import build_signal_matrix, render_matrix_markdown
 from .audit.ledger import Ledger
 from .backtest import BacktestEngine
 from .brokers import PaperBroker, QuestradeBroker
+from .brokers.fresh import guard_feed
 from .config import get_settings
 from .daemon import AutonomousDaemon
 from .data import CandleCache, MarketData
@@ -60,7 +62,17 @@ from .scoring.selection import (
     score_strategies,
 )
 from .strategies import STRATEGIES
-from .tune import DEFAULT_TUNE_STRATEGIES, DEFAULT_TUNE_UNIVERSE, apply_tune, run_tune
+from .tune import (
+    DEFAULT_LABEL_HORIZON,
+    DEFAULT_TUNE_STRATEGIES,
+    DEFAULT_TUNE_UNIVERSE,
+    CandidateEvents,
+    TuneResult,
+    apply_tune,
+    audit_candidates,
+    lens_cell,
+    run_tune,
+)
 
 
 def _session_ledger(settings: object, stream: str, *, mode: str, session_id: str | None = None,
@@ -119,6 +131,73 @@ _O_SPECTRAL_LEVEL = typer.Option(None, help="Spectral VaR confidence level.")
 _O_SPECTRAL_HORIZON = typer.Option(None, help="Spectral VaR horizon in days.")
 _O_FUTURES = typer.Option("", help="IB only: futures roots to resolve as FUT front-month, e.g. 'ES,NQ,GC'.")
 _O_TRANSPORT = typer.Option("web", help="IB only: web (Client Portal Gateway) or socket (TWS/IB Gateway).")
+
+
+_O_CARD_HOST = typer.Option(
+    None, help="Interface the approval shim binds. Loopback by default; set a LAN address deliberately to reach the "
+               "card or the desk panel from a device.")
+_O_CARD_ATTACH = typer.Option(
+    None, "--card-attach/--card-own-shim",
+    help="Wrap the router for card approval but do NOT bind a port: attach to a shim already running on "
+         "state/approval.db (scripts/approval_shim.py --db ...). This is how QT, Kraken and IB share one port and token.")
+_O_FLATTEN = typer.Option(
+    None, "--flatten-on-exit/--no-flatten-on-exit",
+    help="PAPER ONLY. Close every open position through the Router when the session stops, so its last journal row "
+         "is a flat book. On by default. A hard kill skips it. A money session never closes itself.")
+_O_WARMUP_INTERVAL = typer.Option(
+    None, help="Poll every N seconds for the first --warmup-minutes after launch, then fall back to --interval in the "
+               "same process. 0 = off. It re-checks the forming bar and live quotes; it makes no new daily signals.")
+_O_WARMUP_MINUTES = typer.Option(None, help="Length of the warm-up window in minutes.")
+_O_PROFIT_LOCK = typer.Option(
+    None, "--profit-lock/--no-profit-lock",
+    help="Once a long is up 1 ATR, exit when price falls back from its best polled price by an allowed giveback that "
+         "shrinks from 3 ATR to 1 ATR as the gain grows, never below entry. See signals/profit_lock.py.")
+_O_PROFIT_LOCK_EXEMPT = typer.Option(
+    None, help="Comma-separated strategies the profit lock never applies to. Default exempts ts_momentum: the "
+               "2026-09-18 backtest showed the lock cutting its trend winners. Empty locks every strategy.")
+_O_CANDLE_EXIT = typer.Option(
+    None, "--candle-exit/--no-candle-exit",
+    help="Sell a long up >= 1 ATR (and >= 2 round-trip costs) when a bearish reversal candle completed on the previous "
+         "daily bar. See signals/candle_exit.py.")
+_O_CANDLE_EXIT_EXEMPT = typer.Option(None, help="Comma-separated strategies the candle exit never applies to.")
+_O_OVERBOUGHT_EXIT = typer.Option(
+    None, "--overbought-exit/--no-overbought-exit",
+    help="Sell a long up >= 1 ATR (and >= 2 round-trip costs) when the last completed daily bar closed above the upper "
+         "Bollinger band (20, 2 sd) or RSI(14) >= 70. See signals/overbought_exit.py.")
+_O_OVERBOUGHT_EXIT_EXEMPT = typer.Option(None, help="Comma-separated strategies the overbought exit never applies to.")
+_O_OVERSOLD_ENTRY = typer.Option(
+    None, "--oversold-entry/--no-oversold-entry",
+    help="Not walk-forward calibrated. Add a tranche to a HELD trend position when the last completed bar closed below "
+         "the lower Bollinger band or RSI(14) <= 30 while its trend signal is on. See signals/oversold_entry.py.")
+_O_OVERSOLD_ENTRY_ONLY = typer.Option(None, help="Comma-separated strategies the oversold entry applies to.")
+_O_PARALLEL = typer.Option(
+    None, "--parallel-sizing/--sequential-sizing",
+    help="Allocate each poll's entries jointly (ranked slots, pro-rata share of the leverage headroom, per-symbol cap) "
+         "before routing any of them. On by default. The Router still gates every intent.")
+_O_MUTE = typer.Option(None, help="Comma-separated symbols whose alerts are muted. They are still traded and journaled.")
+_O_COST = typer.Option(
+    None, "--max-cost-ratio",
+    help="Reject an ENTRY whose round-trip cost exceeds this fraction of its notional, priced per venue "
+         "(execution/venue_costs.py). 0 = off. Exits are never gated on cost.")
+_O_MAX_POSITIONS = typer.Option(None, "--max-positions", help="Open-position cap for this run, over max_open_positions.")
+_O_PARAMS = typer.Option(None, "--params", help="Where each symbol's strategy parameters come from: default, wf or calibrated.")
+_O_SIZING_V2 = typer.Option(
+    None, "--sizing-v2/--no-sizing-v2", help="Kraken's own lot rules (fractional coins). Refuses to start without them.")
+_O_RESUME = typer.Option(
+    "", "--resume-session",
+    help="PAPER ONLY. Continue an earlier session's book from state/ instead of starting flat, at the same equity. "
+         "Refuses if the journals disagree. Pair with --no-flatten-on-exit on the session you stop for a restart.")
+_O_CLOSE = typer.Option(
+    "", "--close-symbols", help="PAPER ONLY, one-shot. Close these positions in full at startup, through the Router.")
+_O_TRIM = typer.Option(
+    False, "--trim-to-slots/--no-trim-to-slots",
+    help="PAPER ONLY, one-shot. Trim every holding by the same factor to make room for free slots, through the Router.")
+_SESSION_FIELDS = {f.name for f in fields(SessionOptions)}
+
+
+def _options_from(given: dict[str, object], **extra: object) -> SessionOptions:
+    """``SessionOptions`` from a command's own parameters, so a flag on the command cannot miss the session."""
+    return SessionOptions(**{k: v for k, v in given.items() if k in _SESSION_FIELDS}, **extra)  # type: ignore[arg-type]
 
 
 def _emit(message: str) -> None:
@@ -283,6 +362,28 @@ def signal(
     spectral_var_cap: float = _O_SPECTRAL_CAP,
     spectral_var_level: float = _O_SPECTRAL_LEVEL,
     spectral_var_horizon: int = _O_SPECTRAL_HORIZON,
+    card_shim_host: str = _O_CARD_HOST,
+    card_attach: bool = _O_CARD_ATTACH,
+    warmup_interval: int = _O_WARMUP_INTERVAL,
+    warmup_minutes: float = _O_WARMUP_MINUTES,
+    profit_lock: bool = _O_PROFIT_LOCK,
+    profit_lock_exempt: str = _O_PROFIT_LOCK_EXEMPT,
+    candle_exit: bool = _O_CANDLE_EXIT,
+    candle_exit_exempt: str = _O_CANDLE_EXIT_EXEMPT,
+    overbought_exit: bool = _O_OVERBOUGHT_EXIT,
+    overbought_exit_exempt: str = _O_OVERBOUGHT_EXIT_EXEMPT,
+    oversold_entry: bool = _O_OVERSOLD_ENTRY,
+    oversold_entry_only: str = _O_OVERSOLD_ENTRY_ONLY,
+    parallel_sizing: bool = _O_PARALLEL,
+    mute_alerts: str = _O_MUTE,
+    max_cost_ratio: float = _O_COST,
+    max_positions: int = _O_MAX_POSITIONS,
+    params: str = _O_PARAMS,
+    sizing_v2: bool = _O_SIZING_V2,
+    flatten_on_exit: bool = _O_FLATTEN,
+    resume_session: str = _O_RESUME,
+    close_symbols: str = _O_CLOSE,
+    trim_to_slots: bool = _O_TRIM,
     audit_ledger: bool = typer.Option(
         True, "--audit-ledger/--no-audit-ledger",
         help="Record every signal, gate decision and order to the hash-chained audit ledger "
@@ -295,15 +396,11 @@ def signal(
     to monitor each symbol with its own strategy (e.g. the tuner's best-per-symbol);
     symbols not in the map use --strategy as the fallback.
     """
+    given = locals()
     _run_session(
         get_settings(), iterations=iterations, venue="questrade", mode="paper" if paper else "dry-run",
         symbols=symbols, strategy=strategy, strategy_map=strategy_map, label="[signal]",
-        options=SessionOptions(
-            interval=interval, level=level, hedge=hedge, intel_overlay=intel_overlay, intel_refresh=overlay_refresh,
-            require_card=require_card, card_shim_port=card_shim_port, card_ttl=card_ttl, require_basket=require_basket,
-            spectral_var_cap=spectral_var_cap, spectral_var_level=spectral_var_level,
-            spectral_var_horizon=spectral_var_horizon, paper_equity=paper_equity, audit_ledger=audit_ledger,
-            stream="qt"),
+        options=_options_from(given, intel_refresh=overlay_refresh, stream="qt"),
     )
 
 
@@ -350,17 +447,36 @@ def paper(
     spectral_var_horizon: int = _O_SPECTRAL_HORIZON,
     futures: str = _O_FUTURES,
     transport: str = _O_TRANSPORT,
+    card_shim_host: str = _O_CARD_HOST,
+    card_attach: bool = _O_CARD_ATTACH,
+    warmup_interval: int = _O_WARMUP_INTERVAL,
+    warmup_minutes: float = _O_WARMUP_MINUTES,
+    profit_lock: bool = _O_PROFIT_LOCK,
+    profit_lock_exempt: str = _O_PROFIT_LOCK_EXEMPT,
+    candle_exit: bool = _O_CANDLE_EXIT,
+    candle_exit_exempt: str = _O_CANDLE_EXIT_EXEMPT,
+    overbought_exit: bool = _O_OVERBOUGHT_EXIT,
+    overbought_exit_exempt: str = _O_OVERBOUGHT_EXIT_EXEMPT,
+    oversold_entry: bool = _O_OVERSOLD_ENTRY,
+    oversold_entry_only: str = _O_OVERSOLD_ENTRY_ONLY,
+    parallel_sizing: bool = _O_PARALLEL,
+    mute_alerts: str = _O_MUTE,
+    max_cost_ratio: float = _O_COST,
+    max_positions: int = _O_MAX_POSITIONS,
+    params: str = _O_PARAMS,
+    sizing_v2: bool = _O_SIZING_V2,
+    flatten_on_exit: bool = _O_FLATTEN,
+    resume_session: str = _O_RESUME,
+    close_symbols: str = _O_CLOSE,
+    trim_to_slots: bool = _O_TRIM,
     starting_equity: float = typer.Option(None, help="Default: paper_starting_equity. Use what you plan to trade."),
 ) -> None:
     """Rehearse a money session: same build as `trading live`, with fills simulated against the venue's quotes."""
+    given = locals()
     _run_session(
         get_settings(), iterations=iterations, venue=venue, mode="paper", symbols=symbols, strategy=strategy,
         strategy_map=strategy_map, futures=_roots(futures), transport=transport, label=f"[{venue}-paper]",
-        options=SessionOptions(
-            interval=interval, level=level, hedge=hedge, intel_overlay=intel_overlay, intel_refresh=overlay_refresh,
-            require_card=require_card, card_shim_port=card_shim_port, card_ttl=card_ttl, require_basket=require_basket,
-            spectral_var_cap=spectral_var_cap, spectral_var_level=spectral_var_level,
-            spectral_var_horizon=spectral_var_horizon, paper_equity=starting_equity),
+        options=_options_from(given, intel_refresh=overlay_refresh, paper_equity=starting_equity),
     )
 
 
@@ -386,6 +502,24 @@ def live(
     spectral_var_horizon: int = _O_SPECTRAL_HORIZON,
     futures: str = _O_FUTURES,
     transport: str = _O_TRANSPORT,
+    card_shim_host: str = _O_CARD_HOST,
+    card_attach: bool = _O_CARD_ATTACH,
+    warmup_interval: int = _O_WARMUP_INTERVAL,
+    warmup_minutes: float = _O_WARMUP_MINUTES,
+    profit_lock: bool = _O_PROFIT_LOCK,
+    profit_lock_exempt: str = _O_PROFIT_LOCK_EXEMPT,
+    candle_exit: bool = _O_CANDLE_EXIT,
+    candle_exit_exempt: str = _O_CANDLE_EXIT_EXEMPT,
+    overbought_exit: bool = _O_OVERBOUGHT_EXIT,
+    overbought_exit_exempt: str = _O_OVERBOUGHT_EXIT_EXEMPT,
+    oversold_entry: bool = _O_OVERSOLD_ENTRY,
+    oversold_entry_only: str = _O_OVERSOLD_ENTRY_ONLY,
+    parallel_sizing: bool = _O_PARALLEL,
+    mute_alerts: str = _O_MUTE,
+    max_cost_ratio: float = _O_COST,
+    max_positions: int = _O_MAX_POSITIONS,
+    params: str = _O_PARAMS,
+    sizing_v2: bool = _O_SIZING_V2,
     allow_screened: bool = typer.Option(
         False, "--allow-screened", help="Kraken: trade sleeve symbols that are in-sample only and marked paper-only.",
     ),
@@ -395,15 +529,12 @@ def live(
     Built by the same code as `trading paper`, with the same flags and `config/trading.yaml` knobs. What differs
     is what has to: the real broker, the typed confirmation, and a ledger whose failed write stops the order.
     """
+    given = locals()
     _run_session(
         get_settings(), iterations=iterations, venue=venue, mode="live", symbols=symbols, strategy=strategy,
         strategy_map=strategy_map, futures=_roots(futures), transport=transport, live_confirmation=confirm,
         label=f"[{venue}-live]",
-        options=SessionOptions(
-            interval=interval, level=level, hedge=hedge, intel_overlay=intel_overlay, intel_refresh=overlay_refresh,
-            require_card=require_card, card_shim_port=card_shim_port, card_ttl=card_ttl, require_basket=require_basket,
-            spectral_var_cap=spectral_var_cap, spectral_var_level=spectral_var_level,
-            spectral_var_horizon=spectral_var_horizon, allow_screened=allow_screened),
+        options=_options_from(given, intel_refresh=overlay_refresh),
     )
 
 
@@ -502,6 +633,31 @@ def risk_report() -> None:
 # ----- tune ------------------------------------------------------------------
 
 
+def _print_lens_audit(rows: list[TuneResult], events: list[CandidateEvents], *, n_perm: int) -> None:
+    """Advisory table under the scoreboard. Reads the results; changes nothing."""
+    verdicts = audit_candidates(events, label_horizon=DEFAULT_LABEL_HORIZON, n_perm=n_perm)
+    table = Table(title="Lens audit (advisory only: does not affect ranking or trading.yaml)")
+    for col in ("strategy", "symbol", "score", "transfer to other symbols",
+                "persistence in own history", "entries"):
+        table.add_column(col)
+    thinned = 1
+    for r in rows:
+        v = verdicts.get((r.strategy, r.symbol))
+        thinned = max(thinned, v.thinned_by) if v else thinned
+        table.add_row(r.strategy, r.symbol, f"{r.score:.2f}",
+                      lens_cell(v.reliability if v else None),
+                      lens_cell(v.future if v else None),
+                      str(v.n_events) if v else "0")
+    console.print(table)
+    console.print(
+        "[dim]transfer: entry-state to forward-return, read from this strategy's entries on other "
+        "symbols. persistence: read from this symbol's own already-matured history. 'no' means not "
+        "distinguishable from chance, which is a limit on the evidence, not proof there is no edge. "
+        f"n/a means too few entries to say.{f' Entries thinned to every {thinned}th.' if thinned > 1 else ''}"
+        "[/dim]"
+    )
+
+
 @app.command()
 def tune(
     years: float = typer.Option(5.0, help="Years of history per backtest"),
@@ -509,6 +665,10 @@ def tune(
     strategies: str = typer.Option("", help="Comma-separated strategy keys (empty = all)"),
     dry_run: bool = typer.Option(False, help="Score + print, but don't write trading.yaml"),
     parallel: int = typer.Option(4, help="Concurrent backtests"),
+    lens_audit: bool = typer.Option(
+        False, help="Also print an advisory lens audit; never changes ranking or trading.yaml"),
+    lens_permutations: int = typer.Option(
+        500, help="Permutation draws per lens verdict (more = slower, finer p-values)"),
 ) -> None:
     """Backtest a strategy x symbol grid; write the winning config to config/trading.yaml."""
     settings = get_settings()
@@ -522,7 +682,9 @@ def tune(
         f"[bold]Tuning[/bold] {len(strat_list)} strategies x {len(sym_list)} symbols, "
         f"years={years}, parallel={parallel}"
     )
-    results = run_tune(broker, cache, symbols=sym_list, strategies=strat_list, years=years, parallel=parallel)
+    audit_sink: list[CandidateEvents] | None = [] if lens_audit else None
+    results = run_tune(broker, cache, symbols=sym_list, strategies=strat_list, years=years,
+                       parallel=parallel, audit_sink=audit_sink)
     if not results:
         console.print("[red]No backtests succeeded.[/red]")
         raise typer.Exit(code=1)
@@ -543,6 +705,13 @@ def tune(
             f"{r.score:.2f}",
         )
     console.print(table)
+
+    if audit_sink is not None:
+        try:
+            _print_lens_audit(results[:15], audit_sink, n_perm=lens_permutations)
+        except Exception as exc:  # advisory only: it must never stop the tune from completing
+            log.warning("tune.lens_audit.failed", error=str(exc))
+            console.print(f"[yellow]Lens audit skipped ({exc}). Ranking and trading.yaml unaffected.[/yellow]")
 
     update = apply_tune(results, dry_run=dry_run)
     if update is None:
@@ -974,7 +1143,7 @@ def qc_ingest(
     client = _make_qc(settings)
     try:
         analyses = analyze_library(client)
-        qc_scores = rank_qc_library(client, objective="sharpe_over_dd")
+        qc_scores = rank_qc_library(client, objective="sortino_over_dd")
     except QuantConnectError as e:
         console.print(f"[red]QuantConnect error: {e}[/red]")
         raise typer.Exit(code=1) from e
@@ -1028,20 +1197,128 @@ def qc_ingest(
         console.print(f"[green]Combined pool written:[/green] {out}")
 
 
+def _make_quantpedia(settings):
+    from .integrations.quantpedia import QuantpediaClient, QuantpediaError
+    try:
+        return QuantpediaClient(settings.quantpedia_username, settings.quantpedia_api_key)
+    except QuantpediaError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=2) from e
+
+
+@app.command(name="quantpedia-search")
+def quantpedia_search(
+    terms: str = typer.Argument("", help="Space-separated terms, e.g. 'commodity futures momentum'"),
+    deep: bool = typer.Option(False, help="Match against full metadata (one request per strategy) instead of names"),
+    limit: int = typer.Option(40, help="Max rows to show"),
+) -> None:
+    """Search the Quantpedia strategies visible to your account (read-only)."""
+    from .integrations.quantpedia import QuantpediaError, matches
+
+    words = [t for t in terms.split() if t]
+    with _make_quantpedia(get_settings()) as qp:
+        try:
+            listed = qp.list_strategies()
+            rows: list[dict] = []
+            for s in listed:
+                if not deep:
+                    if all(w.lower() in str(s.get("name", "")).lower() for w in words):
+                        rows.append(s)
+                else:
+                    detail = qp.strategy(str(s["id"]))
+                    if matches(detail, words):
+                        rows.append(detail)
+                if len(rows) >= limit:
+                    break
+        except QuantpediaError as e:
+            console.print(f"[red]Quantpedia: {e}[/red]")
+            raise typer.Exit(code=1) from e
+    table = Table(title=f"Quantpedia — {len(rows)} of {len(listed)} strategies match {words or 'all'}")
+    for col in ("id", "name", "sharpe (paper)", "instruments", "rebalancing"):
+        table.add_column(col)
+    for r in rows:
+        pm = r.get("paperMetrics") or {}
+        table.add_row(str(r.get("id")), str(r.get("name", ""))[:70], str(pm.get("sharpeRatio", "-")),
+                      ", ".join(map(str, r.get("instruments") or []))[:30] or "-",
+                      str(r.get("rebalancingPeriod", "-")))
+    console.print(table)
+
+
+@app.command(name="quantpedia-show")
+def quantpedia_show(strategy_id: str = typer.Argument(..., help="Quantpedia strategy id")) -> None:
+    """Show one Quantpedia strategy's metadata, paper metrics and calculated metrics."""
+    from .integrations.quantpedia import QuantpediaError
+
+    with _make_quantpedia(get_settings()) as qp:
+        try:
+            d = qp.strategy(strategy_id)
+        except QuantpediaError as e:
+            console.print(f"[red]Quantpedia: {e}[/red]")
+            raise typer.Exit(code=1) from e
+    console.print(f"[bold]{d.get('name')}[/bold]  (id {d.get('id')})")
+    console.print(str(d.get("description", ""))[:1200])
+    for label in ("instruments", "marketFactors", "regions", "keywords"):
+        console.print(f"[cyan]{label}[/cyan]: {', '.join(map(str, d.get(label) or [])) or '-'}")
+    for label in ("complexity", "confidence", "crisisHedge", "rebalancingPeriod"):
+        console.print(f"[cyan]{label}[/cyan]: {d.get(label, '-')}")
+    for group in ("paperMetrics", "calculatedMetrics"):
+        table = Table(title=group)
+        table.add_column("metric")
+        table.add_column("value", justify="right")
+        for k, v in (d.get(group) or {}).items():
+            table.add_row(str(k), str(v))
+        console.print(table)
+    paper = d.get("sourcePaper") or {}
+    if paper:
+        console.print(f"[cyan]source paper[/cyan]: {paper.get('name')} (fileId {paper.get('fileId')})")
+
+
+@app.command(name="quantpedia-pull")
+def quantpedia_pull(
+    strategy_id: str = typer.Argument(..., help="Quantpedia strategy id"),
+    out: str = typer.Option("reports/quantpedia", help="Output directory"),
+) -> None:
+    """Save a strategy's metadata, performance curve and backtest source files locally."""
+    import json as _json
+
+    from .integrations.quantpedia import QuantpediaError
+
+    target = Path(out) / strategy_id
+    with _make_quantpedia(get_settings()) as qp:
+        try:
+            detail = qp.strategy(strategy_id)
+            perf = qp.performance(strategy_id)
+            files = qp.source_code(strategy_id)
+        except QuantpediaError as e:
+            console.print(f"[red]Quantpedia: {e}[/red]")
+            raise typer.Exit(code=1) from e
+    (target / "source").mkdir(parents=True, exist_ok=True)
+    (target / "strategy.json").write_text(_json.dumps(detail, indent=2), encoding="utf-8")
+    perf.rename("performance").to_csv(target / "performance.csv", index_label="date")
+    for f in files:
+        name = Path(str(f.get("file_name", "file.txt"))).name
+        (target / "source" / name).write_text(str(f.get("content", "")), encoding="utf-8")
+    span = f"{perf.index.min().date()} → {perf.index.max().date()}" if len(perf) else "empty"
+    console.print(f"[green]Saved[/green] {target}: metadata, {len(perf)} performance points ({span}), "
+                  f"{len(files)} source file(s).")
+
+
 @app.command(name="qc-rank")
 def qc_rank(
-    objective: str = typer.Option("sharpe_over_dd", help="Objective to rank by (scoring.objective registry)"),
+    objective: str = typer.Option("sortino_over_dd", help="Objective to rank by (scoring.objective registry)"),
+    min_orders: int = typer.Option(20, help="Skip backtests with fewer QC 'Total Orders' than this."),
 ) -> None:
     """Rank your QC-library strategies by their latest backtest, via the objective adapter.
 
-    Reads each project's most recent completed backtest and scores it (Sharpe / drawdown).
+    Reads each project's most recent completed backtest and scores it (Sortino / drawdown by
+    default), skipping errored backtests and those with fewer than --min-orders orders.
     Projects without a saved backtest are skipped. Family is detected from source code so
     these rank in the same taxonomy as native strategies.
     """
     settings = get_settings()
     client = _make_qc(settings)
     try:
-        scores = rank_qc_library(client, objective=objective)
+        scores = rank_qc_library(client, objective=objective, min_orders=min_orders)
     except QuantConnectError as e:
         console.print(f"[red]QuantConnect error: {e}[/red]")
         raise typer.Exit(code=1) from e
@@ -1336,7 +1613,8 @@ def place_order(
     feed = _make_questrade(settings)
     broker = feed
     if chosen_mode == "paper":
-        broker = PaperBroker(feed=feed, starting_equity=100_000.0, journal_dir=settings.state_dir)
+        broker = PaperBroker(feed=guard_feed(feed, settings), starting_equity=100_000.0,
+                             journal_dir=settings.state_dir)
 
     accounts = broker.accounts()
     if not accounts:

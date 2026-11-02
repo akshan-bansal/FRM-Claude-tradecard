@@ -39,16 +39,23 @@ def normalize(symbols: list[str] | tuple[str, ...] | frozenset[str]) -> tuple[st
     return tuple(sorted({s.strip().upper().lstrip("/") for s in symbols if s and s.strip()}))
 
 
-def ib_refusal(symbol: str) -> str | None:
+def ib_refusal(symbol: str, universe_path: Path = Path("config/futures_universe.json")) -> str | None:
     """Why ``symbol`` cannot be in an IB basket: the IB book carries listed futures only.
 
-    A symbol qualifies when its root has a roll calendar (``ROOT_CALENDARS``), spelled with or
-    without the leading slash: the same registry ``classify_instrument`` reads to call an IB symbol a
-    future, so the basket and the overlay cannot disagree about what IB carries. Equities trade on
-    Questrade (desk venue split).
+    A symbol qualifies when its root has a roll calendar (``ROOT_CALENDARS``, the registry
+    ``classify_instrument`` reads to call an IB symbol a future) or is a contract in the futures
+    universe, spelled with or without the leading slash. Equities trade on Questrade (desk venue split).
     """
     from ..data.futures_calendar import ROOT_CALENDARS
-    if symbol.strip().upper().lstrip("/") in ROOT_CALENDARS:
+    root = symbol.strip().upper().lstrip("/")
+    if root in ROOT_CALENDARS:
+        return None
+    try:
+        roots = {str(c["symbol"]).upper().lstrip("/")
+                 for c in json.loads(universe_path.read_text(encoding="utf-8"))["contracts"]}
+    except (OSError, ValueError, KeyError, TypeError):
+        roots = set()
+    if root in roots:
         return None
     return f"{symbol} has no futures roll calendar; IB carries futures only (equities trade on Questrade)"
 

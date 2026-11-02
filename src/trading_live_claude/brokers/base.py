@@ -19,11 +19,23 @@ class OrderRejected(BrokerError):
     """Broker rejected the order (validation, insufficient funds, halted, etc.)."""
 
 
+class StaleQuote(BrokerError):
+    """A quote is frozen, halted, delayed, priceless or too old to fill or mark against."""
+
+    def __init__(self, symbol: str, reasons: tuple[str, ...]) -> None:
+        super().__init__(f"stale quote {symbol}: {'; '.join(reasons)}")
+        self.symbol = symbol
+        self.reasons = reasons
+
+
 @runtime_checkable
 class Broker(Protocol):
     """Minimal broker surface for strategies/router."""
 
     name: str
+    # Where orders actually go ("questrade", "kraken", "ib", "ib_web", "paper", "global"). Every
+    # concrete broker sets it; declared here so callers can rely on it (audit gap, 2026-09-18).
+    venue: str
 
     def accounts(self) -> list[Account]: ...
 
