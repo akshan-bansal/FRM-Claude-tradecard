@@ -55,7 +55,13 @@ class PaperBroker(Broker):
         journal_dir: Path | None = None,
         session_id: str | None = None,
         venue: str | None = None,
+        commission_bps: float = 0.0,
+        cross_spread: bool = False,
     ) -> None:
+        # A market order pays the far side of the book, not the mid. Off for a bare PaperBroker; every
+        # runner turns it on (monitor/session.py), with costs for its venue.
+        self._cross_spread = cross_spread
+        self._commission_bps = commission_bps
         self._feed = feed
         # Venue tag on every journal row + intel-graph edge. Explicit ``venue`` wins; otherwise
         # inherit from the feed broker's declared ``.venue`` (QuestradeBroker→"questrade",
@@ -87,6 +93,7 @@ class PaperBroker(Broker):
         # needs different limits than the Router. Day-open equity is tracked per UTC date
         # so the daily-loss branch of KillSwitch.evaluate has a stable baseline.
         self._kill_switch = None                              # populated on first _journal_equity
+        self._was_halted = False
         self._day_open_equity: float = starting_equity
         self._day_open_utc_date: str | None = None
 
@@ -126,12 +133,16 @@ class PaperBroker(Broker):
                                 rejected_reasons=["no_reference_price"])
             raise OrderRejected(f"No reference price for {order.symbol}; cannot simulate fill")
 
-        slippage = ref_price * (self._slippage_bps / 10_000.0)
-        fill_price = ref_price + slippage if order.action == OrderAction.BUY else ref_price - slippage
+        touch = ref_price
+        if self._cross_spread and quote.bidPrice and quote.askPrice and quote.askPrice >= quote.bidPrice:
+            touch = quote.askPrice if order.action == OrderAction.BUY else quote.bidPrice
+        slippage = touch * (self._slippage_bps / 10_000.0)
+        fill_price = touch + slippage if order.action == OrderAction.BUY else touch - slippage
 
         signed_qty = order.totalQuantity if order.action == OrderAction.BUY else -order.totalQuantity
         notional = abs(signed_qty) * fill_price
-        self._cash -= signed_qty * fill_price + self._commission
+        commission = self._commission + notional * self._commission_bps / 10_000.0
+        self._cash -= signed_qty * fill_price + commission
 
         pos = self._positions.get(order.symbol)
         if pos is None:
@@ -170,7 +181,7 @@ class PaperBroker(Broker):
             side=OrderAction(order.action).value,  # type: ignore[arg-type]
             quantity=order.totalQuantity,
             price=fill_price,
-            commission=self._commission,
+            commission=commission,
             fill_time=datetime.now(UTC),
             venue="paper",
         )
@@ -349,11 +360,18 @@ class PaperBroker(Broker):
                     max_drawdown_pct=_s.max_drawdown_kill_switch,
                     daily_loss_limit_pct=_s.daily_loss_limit_pct,
                 )
-            self._kill_switch.evaluate(
-                equity=equity,
-                peak_equity=self._peak_equity,
-                day_open_equity=self._day_open_equity,
-            )
+            # Same rule as a live book (risk/equity_watch.py): nothing is evaluated while tripped, so a
+            # manual stop keeps its reason, and a human clear restarts the measure from here.
+            halted = self._kill_switch.state().halted
+            if self._was_halted and not halted:
+                self._peak_equity = self._day_open_equity = equity
+            self._was_halted = halted
+            if not halted:
+                self._kill_switch.evaluate(
+                    equity=equity,
+                    peak_equity=self._peak_equity,
+                    day_open_equity=self._day_open_equity,
+                )
         except Exception:                                # noqa: BLE001 — never let telemetry crash a paper session
             pass
 

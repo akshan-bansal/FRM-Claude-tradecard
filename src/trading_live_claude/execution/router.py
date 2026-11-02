@@ -865,6 +865,7 @@ class Router:
                 state_dir,
                 max_trades_per_day=daily_max_trades,
                 max_notional_per_day_usd=daily_max_notional_usd,
+                mode="autonomous",
             )
             return cls.confirm_autonomous(
                 broker=broker,

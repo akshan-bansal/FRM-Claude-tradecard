@@ -290,8 +290,8 @@ def test_place_order_needs_account_id_even_when_gate_open() -> None:
 
 
 @respx.mock
-def test_place_order_auto_confirms_the_precheck_prompt() -> None:
-    """Web API returns a warning prompt on some orders; auto-confirm so paper flow doesn't hang."""
+def test_place_order_confirms_the_prompt_only_when_told_to() -> None:
+    """Web API returns a warning prompt on some orders. Confirming them is opt-in."""
     respx.post(f"{_CP_BASE}/iserver/secdef/search").mock(
         return_value=httpx.Response(200, json=[{"conid": 265598, "symbol": "AAPL"}]))
     orders_route = respx.post(f"{_CP_BASE}/iserver/account/DU111/orders").mock(
@@ -304,10 +304,53 @@ def test_place_order_auto_confirms_the_precheck_prompt() -> None:
             {"order_id": "917531", "order_status": "PreSubmitted"},
         ])
     )
-    filled = _mk_broker(enable_live=True).place_order(_order())
+    broker = _mk_broker(enable_live=True)
+    broker._auto_confirm_prompts = True
+    filled = broker.place_order(_order())
     assert orders_route.call_count == 1
     assert confirm_route.call_count == 1
     assert filled.id == 917531
+
+
+def _search_and_orders(answer: object) -> None:
+    respx.post(f"{_CP_BASE}/iserver/secdef/search").mock(
+        return_value=httpx.Response(200, json=[{"conid": 265598, "symbol": "AAPL"}]))
+    respx.post(f"{_CP_BASE}/iserver/account/DU111/orders").mock(return_value=httpx.Response(200, json=answer))
+
+
+@respx.mock
+def test_a_prompt_rejects_the_order_by_default_and_says_why() -> None:
+    _search_and_orders([{"id": "p1", "message": ["Order would exceed margin"]}])
+    confirm = respx.post(f"{_CP_BASE}/iserver/reply/p1").mock(return_value=httpx.Response(200, json=[]))
+    with pytest.raises(OrderRejected, match="exceed margin"):
+        _mk_broker(enable_live=True).place_order(_order())
+    assert confirm.call_count == 0
+
+
+@respx.mock
+def test_prompts_cannot_loop_forever() -> None:
+    _search_and_orders([{"id": "p1", "message": ["again"]}])
+    confirm = respx.post(f"{_CP_BASE}/iserver/reply/p1").mock(
+        return_value=httpx.Response(200, json=[{"id": "p1", "message": ["again"]}]))
+    broker = _mk_broker(enable_live=True)
+    broker._auto_confirm_prompts = True
+    with pytest.raises(BrokerError, match="order state unknown"):
+        broker.place_order(_order())
+    assert confirm.call_count == 5
+
+
+@respx.mock
+def test_an_error_answer_is_a_rejection_not_a_placed_order() -> None:
+    _search_and_orders({"error": "Insufficient buying power"})
+    with pytest.raises(OrderRejected, match="Insufficient buying power"):
+        _mk_broker(enable_live=True).place_order(_order())
+
+
+@respx.mock
+def test_an_answer_with_no_order_id_is_order_state_unknown() -> None:
+    _search_and_orders([{"unexpected": True}])
+    with pytest.raises(BrokerError, match="order state unknown"):
+        _mk_broker(enable_live=True).place_order(_order())
 
 
 def test_cancel_order_is_gated_off_by_default() -> None:

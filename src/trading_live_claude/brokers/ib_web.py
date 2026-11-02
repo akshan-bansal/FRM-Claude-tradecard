@@ -210,7 +210,9 @@ class IBWebBroker(Broker):
         client: httpx.Client | None = None,
         enable_live_orders: bool = False,
         timeout: float = 30.0,
+        auto_confirm_prompts: bool = False,
     ) -> None:
+        self._auto_confirm_prompts = auto_confirm_prompts
         self._auth = auth
         self._client = client or auth.new_client(timeout=timeout)
         self._owns_client = client is None
@@ -503,14 +505,25 @@ class IBWebBroker(Broker):
             **({"price": order.limitPrice} if order.limitPrice is not None else {}),
         }]}
         resp = self._post(f"/iserver/account/{order.accountId}/orders", body)
-        # Web API sometimes returns a confirmation prompt (list of {id, message}) that must be
-        # answered before the order fires. Auto-confirm any that come back — a paper trader
-        # doesn't want to hand-approve every one, and the confirmation is a soft warning.
-        while isinstance(resp, list) and resp and "id" in resp[0] and "message" in resp[0]:
-            reply_id = resp[0]["id"]
-            resp = self._post(f"/iserver/reply/{reply_id}", {"confirmed": True})
-        if isinstance(resp, list) and resp and "order_id" in resp[0]:
-            order.id = int(resp[0]["order_id"])
+        # The Web API can answer with a prompt (list of {id, message}) that must be confirmed before
+        # the order fires: margin, price far from the market, and the like. This path only runs with
+        # real money, so a prompt rejects the order and its text reaches the journal, unless
+        # auto_confirm_prompts says otherwise. Either way the exchange is bounded.
+        for _ in range(_MAX_ORDER_PROMPTS):
+            if not (isinstance(resp, list) and resp and "id" in resp[0] and "message" in resp[0]):
+                break
+            if not self._auto_confirm_prompts:
+                raise OrderRejected(f"IB asked for confirmation: {resp[0]['message']}")
+            log.warning("ibweb.order.prompt_confirmed", symbol=order.symbol, message=str(resp[0]["message"]))
+            resp = self._post(f"/iserver/reply/{resp[0]['id']}", {"confirmed": True})
+        else:
+            raise BrokerError(f"IB kept prompting after {_MAX_ORDER_PROMPTS} confirmations; order state unknown.")
+        if isinstance(resp, dict) and resp.get("error"):
+            raise OrderRejected(f"IB rejected the order: {resp['error']}")
+        if not (isinstance(resp, list) and resp and "order_id" in resp[0]):
+            # An unrecognised answer must not read as a placed order.
+            raise BrokerError(f"IB returned no order id: {str(resp)[:200]}; order state unknown.")
+        order.id = int(resp[0]["order_id"])
         log.info("ibweb.order.submitted", symbol=order.symbol, qty=order.totalQuantity,
                  action=order.action.value, order_id=order.id)
         return order
@@ -519,6 +532,9 @@ class IBWebBroker(Broker):
         if not self._enable_live_orders:
             raise BrokerError("IBWebBroker: live orders disabled; nothing to cancel.")
         self._delete(f"/iserver/account/{account_number}/order/{order_id}")
+
+
+_MAX_ORDER_PROMPTS = 5
 
 
 # ---- helpers -------------------------------------------------------------------------------
