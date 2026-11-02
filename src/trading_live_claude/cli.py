@@ -44,6 +44,7 @@ from .integrations.lean_algorithm import (
     render_candlestick_lean_algorithm,
     render_lean_algorithm,
 )
+from .intel.routing import PersistenceGate
 from .intel.vs_engine import MarketContext, VSInvestmentEngine
 from .logging_setup import configure_logging, get_logger
 from .monitor import Alerter, LiveMonitor
@@ -97,6 +98,80 @@ _DEFAULT_REPORTS_DIR = Path("reports")
 
 
 # ----- helpers ---------------------------------------------------------------
+
+
+def _intel_overlay_hooks(settings, refresh_seconds: float = 900.0):
+    """``(overlay_for, interpret_for)`` over one WorldMonitor provider; ``(None, None)`` without a key.
+
+    Both only de-risk: the overlay trims or halts new entries, the theses trim, and neither touches
+    exits. The provider fails open: an outage keeps the last good read, or no overlay before the
+    first one.
+    """
+    if not settings.worldmonitor_api_key:
+        return None, None
+    import asyncio as _asyncio
+
+    from .intel import OverlayProvider
+    from .intel.interpret import interpret as _interpret
+    from .intel.worldmonitor import WorldMonitorClient
+
+    def _snapshot():
+        async def _f():
+            async with WorldMonitorClient(settings.worldmonitor_api_key) as wm:
+                return await wm.snapshot()
+        return _asyncio.run(_f())
+
+    provider = OverlayProvider(_snapshot, refresh_seconds=float(refresh_seconds))
+
+    # Same snapshot as the overlay decided on, no second fetch. Before the first read this is empty,
+    # so the bias is a no-op.
+    def _interpret_current():
+        snap = provider.last_snapshot
+        return _interpret(snap) if snap is not None else []
+
+    console.print(f"[cyan]intel overlay ON[/cyan] (refresh every {refresh_seconds:.0f}s; de-risk + halt gate).")
+    console.print("[cyan]interpret entry-filter ON[/cyan] (theses trim conviction; advisory, never blocks or boosts).")
+    return provider, _interpret_current
+
+
+def _allocator_weight_bias(market, symbols: list[str]):
+    """Correlation-aware per-symbol size bias, or ``None`` when it cannot be computed.
+
+    Mirrors what paper_kraken.py does on the crypto sleeve: computes per-symbol bias from OOS score +
+    return covariance, so a redundant name (bank ETFs correlated with bank ETFs, sector ETFs with
+    their names) gets its slot cut, and a low-correlation name gets it lifted. The monitor bounds it
+    to [0.1, 3.0]; equal-weight is neutral (1.0). Computed ONCE at startup from the local candle
+    cache; the correlation matrix is stable enough at daily frequency that a session-start compute
+    is fine. Symbols not in WALK_FORWARD_VALIDATED stay neutral.
+    """
+    try:
+        from .analysis.universe import WALK_FORWARD_VALIDATED as _WFV
+        from .portfolio.allocator import PortfolioAllocator as _Alloc
+        scores = {s: max(_WFV[s].oos_score, 0.0) for s in symbols if s in _WFV}
+        returns = {}
+        for s in scores:
+            try:
+                df = market.recent(s, bars=252, interval="1d")
+                if not df.empty and "close" in df.columns:
+                    returns[s] = df["close"].pct_change().dropna()
+            except Exception:
+                pass
+        if not returns:
+            return None
+        res = _Alloc(max_weight=0.20, max_sleeve_weight=1.0, min_score=0.0).allocate(
+            returns, scores, regime_scalar=1.0)
+        eqw = 1.0 / len(returns)
+        bias = {s: res.weights.get(s, 0.0) / eqw for s in returns}
+        console.print(f"[cyan]allocator bias ON[/cyan] over {len(returns)} names "
+                      f"(equal-weight baseline = 1.0):")
+        for s in sorted(bias, key=lambda k: -bias[k]):
+            v = bias[s]
+            lab = "boost" if v > 1.05 else "trim" if v < 0.95 else "neutral"
+            console.print(f"  {s:>12}  x{v:.2f}  ({lab})")
+        return lambda sym, _m=bias: _m.get(sym, 1.0)
+    except Exception as e:
+        console.print(f"[yellow]allocator bias OFF — {e}[/yellow]")
+        return None
 
 
 def _make_questrade(settings) -> QuestradeBroker:
@@ -320,70 +395,7 @@ def signal(
         if not settings.worldmonitor_api_key:
             console.print("[red]--intel-overlay needs WORLDMONITOR_API_KEY (set it or use --no-intel-overlay).[/red]")
             raise typer.Exit(code=1)
-        import asyncio as _asyncio
-
-        from .intel import OverlayProvider
-        from .intel.worldmonitor import WorldMonitorClient
-
-        def _snapshot():
-            async def _f():
-                async with WorldMonitorClient(settings.worldmonitor_api_key) as wm:
-                    return await wm.snapshot()
-            return _asyncio.run(_f())
-
-        overlay_provider = OverlayProvider(_snapshot, refresh_seconds=float(overlay_refresh))
-        overlay_for = overlay_provider
-        console.print(f"[cyan]intel overlay ON[/cyan] (refresh every {overlay_refresh}s; de-risk + halt gate).")
-
-        # Interpret bias — reuse the SAME provider's last_snapshot so decision and reasoning
-        # layers see the same snapshot, no second fetch. When no snapshot has been read yet,
-        # interpret_for returns an empty list so the bias is a no-op.
-        from .intel.interpret import interpret as _interpret
-
-        def _interpret_current():
-            snap = overlay_provider.last_snapshot
-            return _interpret(snap) if snap is not None else []
-        interpret_for = _interpret_current
-        console.print("[cyan]interpret entry-filter ON[/cyan] "
-                      "(theses trim conviction; advisory, never blocks or boosts).")
-
-    # Correlation-aware allocator on the equity pool. Mirrors what paper_kraken.py does on the
-    # crypto sleeve — computes per-symbol bias from OOS score + return covariance, so a
-    # redundant name (bank ETFs correlated with bank ETFs, sector ETFs with their names) gets
-    # its slot cut, and a low-correlation name gets it lifted. Bounded [0.1, 3.0]; equal-weight
-    # is neutral (multiplier 1.0). Computed ONCE at startup from the local candle cache; the
-    # correlation matrix is stable enough at daily frequency that a session-start compute is
-    # fine. Symbols not in WALK_FORWARD_VALIDATED default to neutral bias.
-    weight_bias_for = None
-    try:
-        from .analysis.universe import WALK_FORWARD_VALIDATED as _WFV
-        from .portfolio.allocator import PortfolioAllocator as _Alloc
-        _score_map = {s: max(_WFV[s].oos_score, 0.0) for s in sym_list if s in _WFV}
-        _ret_map = {}
-        for s in _score_map:
-            try:
-                _df = market.recent(s, bars=252, interval="1d")
-                if not _df.empty and "close" in _df.columns:
-                    _ret_map[s] = _df["close"].pct_change().dropna()
-            except Exception:
-                pass
-        if _ret_map:
-            _res = _Alloc(max_weight=0.20, max_sleeve_weight=1.0, min_score=0.0).allocate(
-                _ret_map, _score_map, regime_scalar=1.0)
-            _n = len(_ret_map)
-            _eqw = 1.0 / _n if _n else 1.0
-            _bias_map = {s: (_res.weights.get(s, 0.0) / _eqw) if _eqw > 0 else 1.0
-                         for s in sym_list}
-            weight_bias_for = lambda sym, _m=_bias_map: _m.get(sym, 1.0)
-            console.print(f"[cyan]allocator bias ON[/cyan] over {_n} names "
-                          f"(equal-weight baseline = 1.0):")
-            for _s in sorted(_bias_map, key=lambda k: -_bias_map[k]):
-                if _s in _score_map:
-                    _v = _bias_map[_s]
-                    _lab = "boost" if _v > 1.05 else "trim" if _v < 0.95 else "neutral"
-                    console.print(f"  {_s:>12}  x{_v:.2f}  ({_lab})")
-    except Exception as e:
-        console.print(f"[yellow]allocator bias OFF — {e}[/yellow]")
+        overlay_for, interpret_for = _intel_overlay_hooks(settings, overlay_refresh)
 
     monitor = LiveMonitor(
         broker=exec_broker,
@@ -402,8 +414,9 @@ def signal(
         emit_on_change_only=not level,
         hedge_symbol="UUP" if hedge else None,
         overlay_for=overlay_for,
-        interpret_for=interpret_for if intel_overlay else None,
-        weight_bias_for=weight_bias_for,
+        interpret_for=interpret_for,
+        weight_bias_for=_allocator_weight_bias(market, sym_list),
+        persistence_for=PersistenceGate(),
         **monitor_policy(settings),
     )
     monitor.run_forever(max_iterations=iterations or None)
@@ -466,6 +479,7 @@ def paper(
         account_currency=settings.account_currency,
         risk_model=settings.risk_model,
         heat_aggregation=settings.heat_aggregation,
+        persistence_for=PersistenceGate(),
         **monitor_policy(settings),
     )
     monitor.run_forever(max_iterations=iterations or None)
@@ -499,12 +513,19 @@ def live(
     ),
     spectral_var_level: float = typer.Option(0.99, help="Spectral VaR confidence level."),
     spectral_var_horizon: int = typer.Option(1, help="Spectral VaR horizon in days."),
+    intel_overlay: bool = typer.Option(
+        True, "--intel-overlay/--no-intel-overlay",
+        help="Gate entries with the WorldMonitor risk overlay when WORLDMONITOR_API_KEY is set. "
+             "On by default; an outage keeps the last good read.",
+    ),
+    overlay_refresh: int = typer.Option(900, help="Seconds between WorldMonitor overlay refreshes."),
 ) -> None:
     """LIVE trading against your real Questrade account. Reads `state/HALTED` for kill-switch.
 
-    Takes the same gates and approvals as the paper runners, and every limit from the same
-    `config/trading.yaml` knobs. What differs is what has to: the real broker, the typed
-    confirmation, and a ledger whose failed write stops the order.
+    Takes the same gates, approvals and intel hooks as the paper runners, and every limit from the
+    same `config/trading.yaml` knobs. What differs is what has to: the real broker, the typed
+    confirmation, and a ledger whose failed write stops the order. The overlay is on by default
+    here, where `signal` asks for it, because this is the runner that touches real money.
     """
     settings = get_settings()
     if settings.execution_mode != "live":
@@ -562,6 +583,11 @@ def live(
     market = MarketData(broker, cache=CandleCache(settings.data_cache_dir))
     sizer = PositionSizer(risk_pct=settings.risk_pct_per_trade)
 
+    overlay_for, interpret_for = _intel_overlay_hooks(settings, overlay_refresh) if intel_overlay else (None, None)
+    if overlay_for is None:
+        console.print("[yellow]intel overlay OFF[/yellow] "
+                      + ("(no WORLDMONITOR_API_KEY)." if intel_overlay else "(--no-intel-overlay)."))
+
     monitor = LiveMonitor(
         broker=broker,
         market=market,
@@ -577,6 +603,10 @@ def live(
         account_currency=settings.account_currency,
         risk_model=settings.risk_model,
         heat_aggregation=settings.heat_aggregation,
+        overlay_for=overlay_for,
+        interpret_for=interpret_for,
+        weight_bias_for=_allocator_weight_bias(market, sym_list),
+        persistence_for=PersistenceGate(),
         **monitor_policy(settings),
     )
     monitor.run_forever(max_iterations=iterations or None)
@@ -1521,6 +1551,10 @@ def autonomous_run() -> None:
                 f"price={ev.price:.4f} detail={ev.detail}",
             )
 
+    overlay_for, interpret_for = _intel_overlay_hooks(settings)
+    if overlay_for is None:
+        console.print("[yellow]intel overlay OFF[/yellow] (no WORLDMONITOR_API_KEY).")
+
     monitor = LiveMonitor(
         broker=broker,
         market=market,
@@ -1534,6 +1568,10 @@ def autonomous_run() -> None:
         account_currency=settings.account_currency,
         risk_model=settings.risk_model,
         heat_aggregation=settings.heat_aggregation,
+        overlay_for=overlay_for,
+        interpret_for=interpret_for,
+        weight_bias_for=_allocator_weight_bias(market, settings.autonomous_symbols_list),
+        persistence_for=PersistenceGate(),
         **monitor_policy(settings),
     )
     log.info(

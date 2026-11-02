@@ -219,6 +219,9 @@ def event_records_to_edges(
       (i.e. which archive we pulled the record from).
     * ``event`` -- ``affects_region`` --> ``region`` for country/region codes on the record.
 
+    The poll's ``observed`` edge carries the headline in ``meta.title``, for the agent layer's
+    evidence (:func:`recent_events_from_graph`). No query reads it.
+
     Records with no identifiable event id AND no title are skipped rather than fabricated — an
     edge without a stable subject is worse than no edge.
     """
@@ -249,7 +252,9 @@ def event_records_to_edges(
                             as_of=as_of, meta={"poll": poll_id}))
 
         # And a poll → event observation so downstream persistence queries can group by poll.
-        out.append(Edge(("poll", poll_id), "observed", ev_node, as_of=as_of))
+        title = rec.get("title") or rec.get("headline") or rec.get("summary")
+        out.append(Edge(("poll", poll_id), "observed", ev_node, as_of=as_of,
+                        meta={"title": str(title)[:300]} if title else {}))
     return out
 
 
@@ -550,12 +555,20 @@ def edges_where(edges: Sequence[Edge], *, subject: tuple[NodeType, str] | None =
 
 
 def edge_persistence(edges: Sequence[Edge], *, predicate: Predicate,
-                     object: tuple[NodeType, str]) -> int:
+                     object: tuple[NodeType, str], max_age_hours: float | None = None,
+                     now: _datetime | None = None) -> int:
     """How many consecutive polls (ending at the most recent) contain this predicate → object edge?
 
     Consecutive means: order polls by their earliest ``as_of``, then count from the end while the
     predicate/object appears in the poll's edge set. Analogous to
     ``intel/history.py::_run_length`` but per-edge rather than per-scalar.
+
+    Only a poll can break a run. Fills and headlines share this journal without observing anything,
+    so a group with no poll node and no matching edge is skipped; before 2026-11-01 one fill reset
+    every run to 0.
+
+    ``max_age_hours`` returns 0 when the newest matching edge is older than that: the poller stopped,
+    and nothing says the regime still holds.
 
     Returns 0 on an empty graph or when the edge is absent from the latest poll.
     """
@@ -586,15 +599,20 @@ def edge_persistence(edges: Sequence[Edge], *, predicate: Predicate,
         return 0
 
     run = 0
+    newest: Edge | None = None
     for poll_id in reversed(poll_order):
-        matched = False
-        for e in per_poll[poll_id]:
-            if e.predicate == predicate and e.object == object:
-                matched = True
+        group = per_poll[poll_id]
+        hit = next((e for e in group if e.predicate == predicate and e.object == object), None)
+        if hit is None:
+            if any(e.subject[0] == "poll" or e.object[0] == "poll" for e in group):
                 break
-        if not matched:
-            break
+            continue
+        newest = newest or hit
         run += 1
+    if run and max_age_hours is not None and newest is not None:
+        age = _age_hours(newest, now or _datetime.now(UTC))
+        if age is None or age > max_age_hours:
+            return 0
     return run
 
 
@@ -657,8 +675,9 @@ def recent_events_from_graph(
 
     The graph journal decomposes each event into typed edges, so a "record" for the agent is
     reconstructed by joining the edges belonging to one event node: sources from ``mentioned_by``
-    edges, categories from ``about_domain``, regions from ``affects_region``. Newest events
-    first (by ``as_of``); at most ``limit`` events. Silent no-op when the graph has no events.
+    edges, categories from ``about_domain``, regions from ``affects_region``, and the headline from
+    the poll's ``observed`` edge. Newest events first (by ``as_of``); at most ``limit`` events.
+    Silent no-op when the graph has no events.
     """
     per_event: dict[str, dict[str, object]] = {}
     stamps: dict[str, str] = {}
@@ -673,6 +692,8 @@ def recent_events_from_graph(
         # Track the most recent as_of for this event so we can order records by it.
         if e.as_of and (ev_id not in stamps or e.as_of > stamps[ev_id]):
             stamps[ev_id] = e.as_of
+        if e.meta.get("title"):
+            rec["title"] = e.meta["title"]
         if e.predicate == "mentioned_by":
             src_list = rec["sources"]
             assert isinstance(src_list, list)

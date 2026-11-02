@@ -8,6 +8,7 @@ elevated for min_polls or more consecutive polls.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,8 @@ def _seed_graph(path: Path, per_poll_elevated: list[list[str]]) -> None:
     domains elevated in that poll. Polls are ordered chronologically by their string id."""
     edges: list[Edge] = []
     for i, doms in enumerate(per_poll_elevated):
-        poll_id = f"2026-01-01T{i:02d}:00:00+00:00"
+        # recent, so the gate's staleness check passes: the newest poll is an hour old
+        poll_id = (datetime.now(UTC) - timedelta(hours=len(per_poll_elevated) - i)).isoformat()
         for d in doms:
             edges.append(_elevated_edge(poll_id, d))
     append_edges(edges, path=path)

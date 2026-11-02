@@ -285,6 +285,8 @@ class LiveMonitor:
         for t in theses:
             if t.name == "No notable configuration":
                 continue                        # quiet-tape null is not evidence
+            if t.direction != "adverse":
+                continue                        # a constructive read is no reason to trim
             # Union of exemplar tickers across this thesis's themes.
             exemplars: set[str] = set()
             for theme in t.themes:
