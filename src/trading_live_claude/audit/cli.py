@@ -190,7 +190,8 @@ def export_cmd(year: int = typer.Option(..., help="Tax year."),
 
 @audit_app.command("query")
 def query_cmd(name: str = typer.Argument(..., help="superficial | approved-vs-executed | replay | "
-                                                   "fast-cancels | by-version | breaks"),
+                                                   "fast-cancels | by-version | breaks | fill-quality | "
+                                                   "session-plans"),
               arg: str = typer.Option("", help="by-version: the version; fast-cancels: seconds."),
               affiliated: Path | None = typer.Option(None)) -> None:
     """Run a named audit query and print its rows as JSON."""
@@ -214,6 +215,10 @@ def query_cmd(name: str = typer.Argument(..., help="superficial | approved-vs-ex
         res = q.by_version(rows, arg)
     elif name == "breaks":
         res = q.breaks(rows)
+    elif name == "fill-quality":
+        res = q.fill_quality(rows)
+    elif name == "session-plans":
+        res = q.session_plans(rows)
     else:
         console.print(f"[red]unknown query {name!r}; one of {', '.join(q.QUERIES)}[/red]")
         raise typer.Exit(code=2)

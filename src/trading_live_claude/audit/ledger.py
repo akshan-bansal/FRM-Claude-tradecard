@@ -57,6 +57,7 @@ LEDGER_SCHEMA_VERSION = "1.0.0"
 LedgerEvent = Literal[
     # session
     "SESSION_STARTED", "SESSION_STOPPED",
+    "SESSION_PLAN",            # every setting the session runs on, and the fingerprint to compare by
     # signal -> gate
     "STRATEGY_SIGNAL", "SIGNAL_SUPPRESSED", "SIZED",
     "FORCED_EXIT",             # the monitor closing a position on Router.check_forced_exits

@@ -57,7 +57,9 @@ def monitor_policy(settings: Any) -> dict[str, Any]:
     from ..analysis.venue_calendar import symbol_is_open
     return {"session_open_for": symbol_is_open if settings.respect_market_hours else None,
             "entry_triggers": settings.entry_triggers,
-            "forced_exits": settings.forced_exits}
+            "forced_exits": settings.forced_exits,
+            "risk_model": settings.risk_model,
+            "heat_aggregation": settings.heat_aggregation}
 
 
 @dataclass
@@ -210,7 +212,8 @@ class LiveMonitor:
             EquityWatch(inner.kill_switch, account=account_number, mode=inner.mode,
                         currency=account_currency,
                         session_id=getattr(getattr(inner, "ledger", None), "session_id", None))
-            if getattr(inner, "mode", None) in ("live", "autonomous") else None)
+            if getattr(inner, "mode", None) in ("live", "autonomous")
+            and not hasattr(broker, "mark_to_market") else None)  # a paper book journals itself
 
     def _strategy_for(self, symbol: str) -> Strategy:
         """The per-symbol strategy, falling back to the default ``strategy``."""
@@ -415,6 +418,7 @@ class LiveMonitor:
                 annual_vol = float(rets.tail(63).std(ddof=0) * (252.0 ** 0.5)) if len(rets) >= 20 else None
                 ss = last.get("signal_strength", 1.0)
                 conviction = 1.0 if (ss is None or pd.isna(ss)) else float(ss)
+                signal_strength = conviction
                 # Live intelligence overlay: trim conviction by the asset-class risk scalar, and note
                 # whether new entries in this class are halted (routing is skipped, alert still fires).
                 decision = self.overlay_for(symbol) if self.overlay_for else None
@@ -470,12 +474,23 @@ class LiveMonitor:
                     if persistence_halt:
                         self._persistence_last_reason[symbol] = persistence_reason
                 routable = sized.shares > 0 and not overlay_halt and not persistence_halt
+                # Why this order is the size it is: every factor conviction went through. A boost or a
+                # trim with no recorded cause could not be explained after the fact.
+                sizing: dict[str, object] = {
+                    "signal_strength": round(signal_strength, 4), "annual_vol": annual_vol,
+                    "mitigation_scalar": mitigation.scalar, "strategy_scalar": mitigation.strategy_scalar,
+                    "osint_scalar": mitigation.osint_scalar, "overlay_halt": overlay_halt,
+                    "overlay_class": decision.asset_class if decision else None,
+                    "interpret_bias": round(interp_bias, 4), "interpret_theses": interp_applied,
+                    "allocator_bias": round(weight_bias, 4), "persistence_halt": persistence_halt,
+                    "persistence_reason": persistence_reason or None,
+                }
                 if not routable:
                     self._ledger_signal(symbol, strat, price, df, sized=sized, intent_id=None,
                                         reason=("overlay halt" if overlay_halt else
                                                 "persistence halt" if persistence_halt else
                                                 "sized to zero shares"), conviction=conviction,
-                                        trigger=entry_trigger, atr=atr_value)
+                                        trigger=entry_trigger, atr=atr_value, sizing=sizing)
                 if routable:
                     entry_rets = df["close"].pct_change() if self.risk_model != "atr" else None
                     risk_dollars = per_trade_risk(
@@ -495,7 +510,7 @@ class LiveMonitor:
                     )
                     self._ledger_signal(symbol, strat, price, df, sized=sized,
                                         intent_id=intent.intent_id, reason="", conviction=conviction,
-                                        trigger=entry_trigger, atr=atr_value)
+                                        trigger=entry_trigger, atr=atr_value, sizing=sizing)
                     if not entry_event:
                         self._level_tried[symbol] = bar
                     try:
@@ -646,14 +661,14 @@ class LiveMonitor:
     def _ledger_signal(self, symbol: str, strat: object, price: float, df: object, *,
                        sized: object, intent_id: str | None, reason: str,
                        conviction: float, trigger: str | None = None,
-                       atr: float | None = None) -> None:
+                       atr: float | None = None, sizing: dict[str, object] | None = None) -> None:
         """STRATEGY_SIGNAL for an entry that goes on to the router, SIGNAL_SUPPRESSED (with the
         reason) for one that does not. Without the second, an empty ledger would look the same as
         a broken one."""
         if self.ledger is None:
             return
         bar_ts = self._bar_stamp(df)
-        payload = {"symbol": symbol, "price": price, "trigger": trigger, "atr": atr,
+        payload = {"symbol": symbol, "price": price, "trigger": trigger, "atr": atr, "sizing": sizing,
                    "shares": float(getattr(sized, "shares", 0) or 0),
                    "stop": getattr(sized, "stop", None), "target": getattr(sized, "target", None),
                    "conviction": round(float(conviction), 4), "bar_ts": str(bar_ts),

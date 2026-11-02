@@ -17,6 +17,7 @@ polls. This turns the difference between "one 6x event-acceleration spike is noi
 """
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
@@ -136,6 +137,26 @@ class OverlayProvider:
         self._decisions: dict[OverlayClass, OverlayDecision] | None = None
         self._last_snapshot: IntelSnapshot | None = None
         self._ts = 0.0
+        self._background = False
+
+    def start_background(self) -> threading.Thread:
+        """Read once now, then refresh on a daemon thread, so a slow vendor cannot hold up a poll.
+
+        Otherwise the refresh runs inside ``LiveMonitor.step`` on an entry evaluation, and several vendor
+        calls in sequence could delay the rest of the poll, exits included. The first read is synchronous
+        so a session's first entries are not evaluated with no overlay at all.
+        """
+        self.refresh(force=True)
+        self._background = True
+
+        def _loop() -> None:
+            while True:
+                time.sleep(self._refresh)
+                self.refresh(force=True)
+
+        thread = threading.Thread(target=_loop, daemon=True, name="overlay-refresh")
+        thread.start()
+        return thread
 
     @property
     def last_snapshot(self) -> IntelSnapshot | None:
@@ -165,7 +186,8 @@ class OverlayProvider:
             log.warning("overlay.refresh_failed", error=str(e))
 
     def __call__(self, symbol: str) -> OverlayDecision | None:
-        self.refresh()
+        if not self._background:
+            self.refresh()
         if self._decisions is None:
             return None
         return self._decisions.get(classify_symbol(symbol, self._overrides))

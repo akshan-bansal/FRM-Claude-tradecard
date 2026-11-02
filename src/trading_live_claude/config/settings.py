@@ -26,7 +26,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ExecutionMode = Literal["paper", "dry-run", "live", "autonomous"]
 QuestradeEnv = Literal["practice", "live"]
-AutonomousAccount = Literal["practice", "live"]
+# practice is checked against the token and refused if the token is live; paper is a rehearsal: the same
+# autonomous gates and budget on a simulated broker.
+AutonomousAccount = Literal["paper", "practice", "live"]
 
 DEFAULT_TRADING_YAML = Path("config") / "trading.yaml"
 TRADING_YAML_ENV_VAR = "TRADING_YAML_PATH"
@@ -129,6 +131,28 @@ class Settings(BaseSettings):
     # not named takes its strategy family's default (Strategy.level_trigger_default).
     entry_triggers: dict[str, Literal["event", "level", "both"]] = Field(default_factory=dict)
 
+    # Everything else a session runs on, so that what was practised is what runs (monitor/session.py).
+    # A runner's flag overrides one of these for that run.
+    poll_interval_seconds: int = Field(default=300, ge=5, le=3600)
+    strategy_map: str = ""                   # SYM=strategy,SYM=strategy
+    intel_overlay: bool = True               # on whenever WORLDMONITOR_API_KEY is set
+    intel_refresh_seconds: float = Field(default=900.0, ge=30.0)
+    require_card: bool = False
+    card_shim_port: int = 8787
+    card_ttl_seconds: float = Field(default=90.0, gt=0.0)
+    require_basket: bool = False
+    spectral_var_cap: float | None = Field(default=None, gt=0.0, le=1.0)  # None = gate off
+    spectral_var_level: float = Field(default=0.99, gt=0.5, lt=1.0)
+    spectral_var_horizon: int = Field(default=1, ge=1, le=60)
+    hedge_symbol: str = ""                   # UUP to run the dollar-hedge overlay
+    # Set this to the money you plan to trade. Whole-unit rounding, the minimum ticket and fees all scale
+    # with it, so a rehearsal at another size does not translate.
+    paper_starting_equity: float = Field(default=100_000.0, gt=0.0)
+    # Per venue: commission_per_trade, commission_bps, slippage_bps. Merged over DEFAULT_PAPER_COSTS.
+    paper_costs: dict[str, dict[str, float]] = Field(default_factory=dict)
+    # Off: an IB warning prompt on an order rejects it, and its text reaches the journal.
+    ib_auto_confirm_prompts: bool = False
+
     # Behavior when the per-symbol notional cap OR the portfolio gross-leverage cap
     # would be breached (2026-09-09). 'trim' (default) resizes the intent to fit and
     # accepts; 'reject' returns the pre-2026-09-09 behavior of dropping the whole intent.
@@ -201,6 +225,21 @@ _TRADING_KNOB_FIELDS: tuple[str, ...] = (
     "forced_exits",
     "respect_market_hours",
     "entry_triggers",
+    "poll_interval_seconds",
+    "strategy_map",
+    "intel_overlay",
+    "intel_refresh_seconds",
+    "require_card",
+    "card_shim_port",
+    "card_ttl_seconds",
+    "require_basket",
+    "spectral_var_cap",
+    "spectral_var_level",
+    "spectral_var_horizon",
+    "hedge_symbol",
+    "paper_starting_equity",
+    "paper_costs",
+    "ib_auto_confirm_prompts",
     "on_size_cap_breach",
     "default_strategy",
     "default_symbols",

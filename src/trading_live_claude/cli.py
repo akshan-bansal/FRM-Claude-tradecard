@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -16,18 +15,14 @@ from rich.console import Console
 from rich.table import Table
 
 from .analysis import build_signal_matrix, render_matrix_markdown
-from .analysis.symbol_validation import preflight
 from .audit.ledger import Ledger
 from .backtest import BacktestEngine
 from .brokers import PaperBroker, QuestradeBroker
-from .brokers.base import Broker
 from .config import get_settings
 from .daemon import AutonomousDaemon
 from .data import CandleCache, MarketData
-from .execution import AUTONOMOUS_ENV_VAR, AutonomousNotEnabled, LiveModeNotConfirmed, Router
-from .execution.approval import wire_card_approval
+from .execution import AUTONOMOUS_ENV_VAR, Router
 from .execution.asset_router import ASSET_CLASSES, AssetRouter
-from .execution.basket import attach_basket_gate
 from .execution.daily_budget import DailyBudget
 from .integrations import (
     QuantConnectClient,
@@ -44,15 +39,12 @@ from .integrations.lean_algorithm import (
     render_candlestick_lean_algorithm,
     render_lean_algorithm,
 )
-from .intel.routing import PersistenceGate
-from .intel.vs_engine import MarketContext, VSInvestmentEngine
 from .logging_setup import configure_logging, get_logger
-from .monitor import Alerter, LiveMonitor
+from .monitor import Alerter
 from .monitor.alerter import AlertConfig
-from .monitor.live_loop import monitor_policy
+from .monitor.session import SessionError, SessionOptions, build_alerter, start_session
 from .optimize import PARAM_GRIDS, optimize_parameters
-from .risk import KillSwitch, PositionSizer
-from .risk.spectral_var import attach_spectral_gate
+from .risk import KillSwitch
 from .scoring.objective import DEFAULT_METRIC_WEIGHTS, OBJECTIVES, make_dot_product
 from .scoring.qc_bridge import rank_qc_library
 from .scoring.routing import (
@@ -67,7 +59,7 @@ from .scoring.selection import (
     render_combined_scoreboard,
     score_strategies,
 )
-from .strategies import STRATEGIES, Strategy
+from .strategies import STRATEGIES
 from .tune import DEFAULT_TUNE_STRATEGIES, DEFAULT_TUNE_UNIVERSE, apply_tune, run_tune
 
 
@@ -96,86 +88,59 @@ log = get_logger(__name__)
 
 _DEFAULT_REPORTS_DIR = Path("reports")
 
+_O_VENUE = typer.Option("questrade", help="questrade, kraken or ib.")
+_O_SYMBOLS = typer.Option("", help="Comma-separated symbols. Default: the venue's own list (Kraken: the sleeve).")
+_O_STRATEGY = typer.Option("", help="Fallback strategy key. Default: the venue's (Kraken: the sleeve's own).")
+_O_STRATEGY_MAP = typer.Option(
+    "", help="Per-symbol strategy overrides, e.g. 'XIC.TO=bollinger,BNS.TO=momentum_breakout'"
+)
+_O_INTERVAL = typer.Option(None, help="Poll interval, seconds. Default: poll_interval_seconds.")
+_O_ITERATIONS = typer.Option(0, help="Run N iterations and stop. 0 = forever.")
+_O_LEVEL = typer.Option(
+    None, "--level/--edge", help="Alert on every poll a name is AT an entry/exit level, not only when it flips.",
+)
+_O_HEDGE = typer.Option(None, "--hedge/--no-hedge", help="The dollar-hedge overlay (UUP). Off by default.")
+_O_INTEL = typer.Option(
+    None, "--intel-overlay/--no-intel-overlay",
+    help="The live risk overlay and thesis trims. On whenever WORLDMONITOR_API_KEY is set. If the feed fails, "
+         "each class falls back to a 0.8 cap, which can loosen a tighter trim.",
+)
+_O_INTEL_REFRESH = typer.Option(None, help="Seconds between overlay refreshes.")
+_O_CARD = typer.Option(
+    None, "--require-card/--no-require-card", help="A TradeCard must ACCEPT every order.",
+)
+_O_CARD_PORT = typer.Option(None, help="Port for the approval shim under --require-card.")
+_O_CARD_TTL = typer.Option(None, help="Seconds a card prompt stays open.")
+_O_BASKET = typer.Option(
+    None, "--require-basket/--no-require-basket", help="Entries need a card-signed basket for this venue.",
+)
+_O_SPECTRAL_CAP = typer.Option(None, help="Spectral VaR gate: cap an entry's tail loss at this fraction of equity.")
+_O_SPECTRAL_LEVEL = typer.Option(None, help="Spectral VaR confidence level.")
+_O_SPECTRAL_HORIZON = typer.Option(None, help="Spectral VaR horizon in days.")
+_O_FUTURES = typer.Option("", help="IB only: futures roots to resolve as FUT front-month, e.g. 'ES,NQ,GC'.")
+_O_TRANSPORT = typer.Option("web", help="IB only: web (Client Portal Gateway) or socket (TWS/IB Gateway).")
+
+
+def _emit(message: str) -> None:
+    console.print(message, markup=False, highlight=False)
+
+
+def _run_session(settings, *, iterations: int = 0, **kwargs) -> None:
+    """Every monitoring runner: build from monitor/session.py, then run. Paper and money share all of it."""
+    try:
+        session = start_session(settings, emit=_emit, **kwargs)
+    except SessionError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=2) from e
+    session.run(iterations)
+
+
+def _roots(text: str) -> list[str]:
+    return [s.strip().upper() for s in text.split(",") if s.strip()]
+
+
 
 # ----- helpers ---------------------------------------------------------------
-
-
-def _intel_overlay_hooks(settings, refresh_seconds: float = 900.0):
-    """``(overlay_for, interpret_for)`` over one WorldMonitor provider; ``(None, None)`` without a key.
-
-    Both only de-risk new entries and neither touches exits. The overlay trims; at the default floor
-    (0.25) its halt threshold (0.20) cannot be reached, so it does not stand a class down.
-
-    An outage fails open and can loosen the trim. When every vendor call fails the snapshot is
-    degraded and its class scalars rest on no readings, so 0.25 under stress becomes the 0.80 cap.
-    The last good read is kept only when the fetch itself raises, and there is no overlay before the
-    first read.
-    """
-    if not settings.worldmonitor_api_key:
-        return None, None
-    import asyncio as _asyncio
-
-    from .intel import OverlayProvider
-    from .intel.interpret import interpret as _interpret
-    from .intel.worldmonitor import WorldMonitorClient
-
-    def _snapshot():
-        async def _f():
-            async with WorldMonitorClient(settings.worldmonitor_api_key) as wm:
-                return await wm.snapshot()
-        return _asyncio.run(_f())
-
-    provider = OverlayProvider(_snapshot, refresh_seconds=float(refresh_seconds))
-
-    # Same snapshot as the overlay decided on, no second fetch. Before the first read this is empty,
-    # so the bias is a no-op.
-    def _interpret_current():
-        snap = provider.last_snapshot
-        return _interpret(snap) if snap is not None else []
-
-    console.print(f"[cyan]intel overlay ON[/cyan] (refresh every {refresh_seconds:.0f}s; trims entry size).")
-    console.print("[cyan]interpret entry-filter ON[/cyan] (theses trim conviction; advisory, never blocks or boosts).")
-    return provider, _interpret_current
-
-
-def _allocator_weight_bias(market, symbols: list[str]):
-    """Correlation-aware per-symbol size bias, or ``None`` when it cannot be computed.
-
-    Mirrors what paper_kraken.py does on the crypto sleeve: computes per-symbol bias from OOS score +
-    return covariance, so a redundant name (bank ETFs correlated with bank ETFs, sector ETFs with
-    their names) gets its slot cut, and a low-correlation name gets it lifted. The monitor bounds it
-    to [0.1, 3.0]; equal-weight is neutral (1.0). Computed ONCE at startup from the local candle
-    cache; the correlation matrix is stable enough at daily frequency that a session-start compute
-    is fine. Symbols not in WALK_FORWARD_VALIDATED stay neutral.
-    """
-    try:
-        from .analysis.universe import WALK_FORWARD_VALIDATED as _WFV
-        from .portfolio.allocator import PortfolioAllocator as _Alloc
-        scores = {s: max(_WFV[s].oos_score, 0.0) for s in symbols if s in _WFV}
-        returns = {}
-        for s in scores:
-            try:
-                df = market.recent(s, bars=252, interval="1d")
-                if not df.empty and "close" in df.columns:
-                    returns[s] = df["close"].pct_change().dropna()
-            except Exception:
-                pass
-        if not returns:
-            return None
-        res = _Alloc(max_weight=0.20, max_sleeve_weight=1.0, min_score=0.0).allocate(
-            returns, scores, regime_scalar=1.0)
-        eqw = 1.0 / len(returns)
-        bias = {s: res.weights.get(s, 0.0) / eqw for s in returns}
-        console.print(f"[cyan]allocator bias ON[/cyan] over {len(returns)} names "
-                      f"(equal-weight baseline = 1.0):")
-        for s in sorted(bias, key=lambda k: -bias[k]):
-            v = bias[s]
-            lab = "boost" if v > 1.05 else "trim" if v < 0.95 else "neutral"
-            console.print(f"  {s:>12}  x{v:.2f}  ({lab})")
-        return lambda sym, _m=bias: _m.get(sym, 1.0)
-    except Exception as e:
-        console.print(f"[yellow]allocator bias OFF — {e}[/yellow]")
-        return None
 
 
 def _make_questrade(settings) -> QuestradeBroker:
@@ -296,31 +261,13 @@ def backtest(
 def signal(
     strategy: str = typer.Option(..., help="Default/fallback strategy key"),
     symbols: str = typer.Option(..., help="Comma-separated symbols"),
-    interval: int = typer.Option(60, help="Poll interval (seconds)"),
-    iterations: int = typer.Option(0, help="Run N iterations and stop. 0 = forever."),
-    strategy_map: str = typer.Option(
-        "", help="Per-symbol strategy overrides, e.g. 'XIC.TO=bollinger,BNS.TO=momentum_breakout'"
-    ),
-    level: bool = typer.Option(
-        False,
-        "--level/--edge",
-        help="Alert whenever a name is AT an entry/exit level each poll (persistent), "
-        "not only when it flips into one. --edge (default) alerts on transitions only.",
-    ),
-    hedge: bool = typer.Option(
-        False,
-        "--hedge/--no-hedge",
-        help="Enable the dynamic dollar-hedge overlay (UUP): scales a hedge sleeve up as "
-        "the book draws down and surfaces rebalance alerts. Off by default.",
-    ),
-    intel_overlay: bool = typer.Option(
-        False,
-        "--intel-overlay/--no-intel-overlay",
-        help="Gate entries with the live WorldMonitor risk overlay: trims size by the per-asset-"
-        "class risk scalar and blocks NEW entries in a halted class (never blocks exits). "
-        "Needs WORLDMONITOR_API_KEY. Off by default.",
-    ),
-    overlay_refresh: int = typer.Option(900, help="Seconds between WorldMonitor overlay refreshes."),
+    interval: int = _O_INTERVAL,
+    iterations: int = _O_ITERATIONS,
+    strategy_map: str = _O_STRATEGY_MAP,
+    level: bool = _O_LEVEL,
+    hedge: bool = _O_HEDGE,
+    intel_overlay: bool = _O_INTEL,
+    overlay_refresh: float = _O_INTEL_REFRESH,
     paper: bool = typer.Option(
         False,
         "--paper/--dry-run",
@@ -328,102 +275,36 @@ def signal(
              "instead of the default dry-run router that gates and logs only. Paper never touches "
              "the real account; it builds the fill history live mode requires.",
     ),
-    paper_equity: float = typer.Option(100_000.0, help="Starting equity for the paper account."),
+    paper_equity: float = typer.Option(None, help="Starting equity. Default: paper_starting_equity."),
+    require_card: bool = _O_CARD,
+    card_shim_port: int = _O_CARD_PORT,
+    card_ttl: float = _O_CARD_TTL,
+    require_basket: bool = _O_BASKET,
+    spectral_var_cap: float = _O_SPECTRAL_CAP,
+    spectral_var_level: float = _O_SPECTRAL_LEVEL,
+    spectral_var_horizon: int = _O_SPECTRAL_HORIZON,
     audit_ledger: bool = typer.Option(
         True, "--audit-ledger/--no-audit-ledger",
         help="Record every signal, gate decision and order to the hash-chained audit ledger "
              "under state/ledger (stream qt). On by default.",
     ),
 ) -> None:
-    """Live-signal monitor. Never places real orders.
+    """Live-signal monitor on Questrade quotes. Never places real orders.
 
     Article skill #5 ("live-signal-monitor"): output signal only. Use --strategy-map
     to monitor each symbol with its own strategy (e.g. the tuner's best-per-symbol);
     symbols not in the map use --strategy as the fallback.
     """
-    settings = get_settings()
-    broker = _make_questrade(settings)
-    market = MarketData(broker, cache=CandleCache(settings.data_cache_dir))
-    strat = _strategy_or_die(strategy)
-    sizer = PositionSizer(risk_pct=settings.risk_pct_per_trade)
-
-    smap = _strategy_map_or_die(strategy_map)
-
-    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
-    for sym in smap:  # include map-only symbols in what we monitor
-        if sym not in sym_list:
-            sym_list.append(sym)
-
-    accounts = broker.accounts()
-    if not accounts:
-        console.print("[red]No accounts on Questrade login.[/red]")
-        raise typer.Exit(code=1)
-    account_number = settings.questrade_account_number or accounts[0].number
-
-    # Paper mode swaps the EXECUTION broker, not just the router mode string. That distinction is
-    # load-bearing: Router.submit short-circuits only for "dry-run", so mode="paper" against the
-    # real Questrade broker would place real orders. PaperBroker wraps Questrade as a read-only
-    # market-data feed and simulates every fill against it.
-    exec_broker: Broker = broker
-    exec_account = account_number
-    if paper:
-        exec_broker = PaperBroker(feed=broker, starting_equity=paper_equity,
-                                  journal_dir=settings.state_dir)
-        exec_account = exec_broker.accounts()[0].number
-        console.print(f"[cyan]PAPER mode[/cyan] simulated broker, starting equity "
-                      f"${paper_equity:,.0f}, account {exec_account}. "
-                      f"Real account is untouched; fills are journaled.")
-
-    # Pre-flight symbol validation (2026-09-09). Refuses to start when any symbol
-    # would 404 on candles at runtime (the ARX.TO / RIG.TO Questrade failure mode
-    # seen 2026-09-08 / 2026-09-09). Uses the underlying Questrade feed rather than
-    # the paper wrapper since PaperBroker.candles delegates anyway.
-    preflight(broker, [s.strip() for s in symbols.split(",") if s.strip()], emit=console.print)
-
-    ledger = _session_ledger(settings, stream="qt", mode="paper" if paper else "dry-run",
-                             session_id=getattr(exec_broker, "session_id", None),
-                             enabled=audit_ledger)
-    router = Router.build_default(
-        mode="paper" if paper else "dry-run",
-        broker=exec_broker,
-        state_dir=settings.state_dir,
-        **Router.limits_from(settings),
-        ledger=ledger,
+    _run_session(
+        get_settings(), iterations=iterations, venue="questrade", mode="paper" if paper else "dry-run",
+        symbols=symbols, strategy=strategy, strategy_map=strategy_map, label="[signal]",
+        options=SessionOptions(
+            interval=interval, level=level, hedge=hedge, intel_overlay=intel_overlay, intel_refresh=overlay_refresh,
+            require_card=require_card, card_shim_port=card_shim_port, card_ttl=card_ttl, require_basket=require_basket,
+            spectral_var_cap=spectral_var_cap, spectral_var_level=spectral_var_level,
+            spectral_var_horizon=spectral_var_horizon, paper_equity=paper_equity, audit_ledger=audit_ledger,
+            stream="qt"),
     )
-
-    _emit = _alert_emitter(_build_alerter(settings), strat, smap)
-
-    overlay_for = None
-    interpret_for = None
-    if intel_overlay:
-        if not settings.worldmonitor_api_key:
-            console.print("[red]--intel-overlay needs WORLDMONITOR_API_KEY (set it or use --no-intel-overlay).[/red]")
-            raise typer.Exit(code=1)
-        overlay_for, interpret_for = _intel_overlay_hooks(settings, overlay_refresh)
-
-    monitor = LiveMonitor(
-        broker=exec_broker,
-        market=market,
-        strategy=strat,
-        sizer=sizer,
-        router=router,
-        account_number=exec_account,
-        symbols=sym_list,
-        interval_seconds=interval,
-        on_event=_emit,
-        account_currency=settings.account_currency,
-        risk_model=settings.risk_model,
-        heat_aggregation=settings.heat_aggregation,
-        strategy_map=smap,
-        emit_on_change_only=not level,
-        hedge_symbol="UUP" if hedge else None,
-        overlay_for=overlay_for,
-        interpret_for=interpret_for,
-        weight_bias_for=_allocator_weight_bias(market, sym_list),
-        persistence_for=PersistenceGate(),
-        **monitor_policy(settings),
-    )
-    monitor.run_forever(max_iterations=iterations or None)
 
 
 @app.command(name="fundamentals-fetch")
@@ -450,170 +331,96 @@ def fundamentals_fetch(
 
 @app.command()
 def paper(
-    strategy: str = typer.Option(..., help="Strategy key"),
-    symbols: str = typer.Option(..., help="Comma-separated symbols"),
-    interval: int = typer.Option(60, help="Poll interval (seconds)"),
-    iterations: int = typer.Option(0, help="Run N iterations and stop. 0 = forever."),
-    starting_equity: float = typer.Option(100_000.0),
+    venue: str = _O_VENUE,
+    symbols: str = _O_SYMBOLS,
+    strategy: str = _O_STRATEGY,
+    strategy_map: str = _O_STRATEGY_MAP,
+    interval: int = _O_INTERVAL,
+    iterations: int = _O_ITERATIONS,
+    level: bool = _O_LEVEL,
+    hedge: bool = _O_HEDGE,
+    intel_overlay: bool = _O_INTEL,
+    overlay_refresh: float = _O_INTEL_REFRESH,
+    require_card: bool = _O_CARD,
+    card_shim_port: int = _O_CARD_PORT,
+    card_ttl: float = _O_CARD_TTL,
+    require_basket: bool = _O_BASKET,
+    spectral_var_cap: float = _O_SPECTRAL_CAP,
+    spectral_var_level: float = _O_SPECTRAL_LEVEL,
+    spectral_var_horizon: int = _O_SPECTRAL_HORIZON,
+    futures: str = _O_FUTURES,
+    transport: str = _O_TRANSPORT,
+    starting_equity: float = typer.Option(None, help="Default: paper_starting_equity. Use what you plan to trade."),
 ) -> None:
-    """Paper-trade against an in-memory broker fed by Questrade quotes."""
-    settings = get_settings()
-    feed = _make_questrade(settings)
-    pb = PaperBroker(feed=feed, starting_equity=starting_equity, journal_dir=settings.state_dir)
-    market = MarketData(feed, cache=CandleCache(settings.data_cache_dir))
-    strat = _strategy_or_die(strategy)
-    sizer = PositionSizer(risk_pct=settings.risk_pct_per_trade)
-    ledger = _session_ledger(settings, stream="qt-paper", mode="paper", session_id=pb.session_id)
-    router = Router.build_default(
-        mode="paper",
-        broker=pb,
-        state_dir=settings.state_dir,
-        **Router.limits_from(settings),
-        ledger=ledger,
+    """Rehearse a money session: same build as `trading live`, with fills simulated against the venue's quotes."""
+    _run_session(
+        get_settings(), iterations=iterations, venue=venue, mode="paper", symbols=symbols, strategy=strategy,
+        strategy_map=strategy_map, futures=_roots(futures), transport=transport, label=f"[{venue}-paper]",
+        options=SessionOptions(
+            interval=interval, level=level, hedge=hedge, intel_overlay=intel_overlay, intel_refresh=overlay_refresh,
+            require_card=require_card, card_shim_port=card_shim_port, card_ttl=card_ttl, require_basket=require_basket,
+            spectral_var_cap=spectral_var_cap, spectral_var_level=spectral_var_level,
+            spectral_var_horizon=spectral_var_horizon, paper_equity=starting_equity),
     )
-    monitor = LiveMonitor(
-        broker=pb,
-        market=market,
-        strategy=strat,
-        sizer=sizer,
-        router=router,
-        account_number="PAPER-001",
-        symbols=[s.strip().upper() for s in symbols.split(",") if s.strip()],
-        interval_seconds=interval,
-        account_currency=settings.account_currency,
-        risk_model=settings.risk_model,
-        heat_aggregation=settings.heat_aggregation,
-        persistence_for=PersistenceGate(),
-        **monitor_policy(settings),
-    )
-    monitor.run_forever(max_iterations=iterations or None)
 
 
 @app.command()
 def live(
-    strategy: str = typer.Option(..., help="Strategy key"),
-    symbols: str = typer.Option(..., help="Comma-separated symbols"),
-    interval: int = typer.Option(60, help="Poll interval (seconds)"),
     confirm: str = typer.Option(..., help='Confirmation phrase. Must equal: I UNDERSTAND THE RISK'),
-    iterations: int = typer.Option(0, help="Run N iterations and stop. 0 = forever."),
-    strategy_map: str = typer.Option(
-        "", help="Per-symbol strategy overrides, e.g. 'XIC.TO=bollinger,BNS.TO=momentum_breakout'"
+    venue: str = _O_VENUE,
+    symbols: str = _O_SYMBOLS,
+    strategy: str = _O_STRATEGY,
+    strategy_map: str = _O_STRATEGY_MAP,
+    interval: int = _O_INTERVAL,
+    iterations: int = _O_ITERATIONS,
+    level: bool = _O_LEVEL,
+    hedge: bool = _O_HEDGE,
+    intel_overlay: bool = _O_INTEL,
+    overlay_refresh: float = _O_INTEL_REFRESH,
+    require_card: bool = _O_CARD,
+    card_shim_port: int = _O_CARD_PORT,
+    card_ttl: float = _O_CARD_TTL,
+    require_basket: bool = _O_BASKET,
+    spectral_var_cap: float = _O_SPECTRAL_CAP,
+    spectral_var_level: float = _O_SPECTRAL_LEVEL,
+    spectral_var_horizon: int = _O_SPECTRAL_HORIZON,
+    futures: str = _O_FUTURES,
+    transport: str = _O_TRANSPORT,
+    allow_screened: bool = typer.Option(
+        False, "--allow-screened", help="Kraken: trade sleeve symbols that are in-sample only and marked paper-only.",
     ),
-    level: bool = typer.Option(
-        False, "--level/--edge",
-        help="Alert on every poll a name is AT an entry/exit level, not only when it flips into one.",
-    ),
-    require_card: bool = typer.Option(
-        False, "--require-card",
-        help="Route every accepted intent through the ApprovalRouter: a TradeCard must ACCEPT it.",
-    ),
-    card_shim_port: int = typer.Option(8787, help="Port for the approval shim under --require-card."),
-    card_ttl: float = typer.Option(90.0, help="Seconds a card prompt stays open."),
-    require_basket: bool = typer.Option(
-        False, "--require-basket", help="Entries need a card-signed Questrade basket (scripts/basket.py).",
-    ),
-    spectral_var_cap: float = typer.Option(
-        None, help="Turn on the spectral VaR gate: cap an entry's tail loss at this fraction of equity.",
-    ),
-    spectral_var_level: float = typer.Option(0.99, help="Spectral VaR confidence level."),
-    spectral_var_horizon: int = typer.Option(1, help="Spectral VaR horizon in days."),
-    intel_overlay: bool = typer.Option(
-        True, "--intel-overlay/--no-intel-overlay",
-        help="Gate entries with the WorldMonitor risk overlay when WORLDMONITOR_API_KEY is set. "
-             "On by default. If the feed fails, each class falls back to a 0.8 cap, which can loosen a tighter trim.",
-    ),
-    overlay_refresh: int = typer.Option(900, help="Seconds between WorldMonitor overlay refreshes."),
 ) -> None:
-    """LIVE trading against your real Questrade account. Reads `state/HALTED` for kill-switch.
+    """LIVE trading with real money. Reads `state/HALTED` for kill-switch.
 
-    Takes the same gates, approvals and intel hooks as the paper runners, and every limit from the
-    same `config/trading.yaml` knobs. What differs is what has to: the real broker, the typed
-    confirmation, and a ledger whose failed write stops the order. The overlay is on by default
-    here, where `signal` asks for it, because this is the runner that touches real money.
+    Built by the same code as `trading paper`, with the same flags and `config/trading.yaml` knobs. What differs
+    is what has to: the real broker, the typed confirmation, and a ledger whose failed write stops the order.
     """
-    settings = get_settings()
-    if settings.execution_mode != "live":
-        console.print('[red]Set EXECUTION_MODE=live in .env before using `trading live`.[/red]')
-        raise typer.Exit(code=2)
-    if settings.questrade_env != "live":
-        console.print('[yellow]QUESTRADE_ENV is not "live"; routing through practice account.[/yellow]')
-
-    broker = _make_questrade(settings)
-    accounts = broker.accounts()
-    if not accounts:
-        console.print("[red]No accounts.[/red]")
-        raise typer.Exit(code=1)
-    account_number = settings.questrade_account_number or accounts[0].number
-
-    strat = _strategy_or_die(strategy)
-    smap = _strategy_map_or_die(strategy_map)
-    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
-    sym_list += [sym for sym in smap if sym not in sym_list]
-    preflight(broker, sym_list, emit=console.print)
-
-    # Live trades must not go unrecorded: strict, so a failed ledger write stops the order.
-    ledger = _session_ledger(settings, stream="qt-live", mode="live", strict=True)
-    try:
-        router = Router.build_default(
-            mode="live",
-            broker=broker,
-            state_dir=settings.state_dir,
-            **Router.limits_from(settings),
-            live_confirmation=confirm,
-            ledger=ledger,
-        )
-    except LiveModeNotConfirmed as e:
-        console.print(f"[red]{e}[/red]")
-        raise typer.Exit(code=2) from e
-
-    if attach_basket_gate(router, "questrade", Path(settings.state_dir), enabled=require_basket):
-        console.print("[cyan]basket gate ON:[/cyan] entries need a card-signed questrade basket.")
-    spectral = attach_spectral_gate(router, broker, cap_pct=spectral_var_cap, level=spectral_var_level,
-                                    horizon_days=spectral_var_horizon)
-    if spectral is not None:
-        console.print(f"[cyan]spectral VaR gate ON:[/cyan] {spectral.thresholds()}")
-    if require_card:
-        engine = VSInvestmentEngine()
-        wiring = wire_card_approval(
-            router, shim_port=card_shim_port, ttl_seconds=card_ttl,
-            thesis_fn=lambda intent, venue: engine.explain(intent, broker=venue, market=MarketContext()),
-            db_path=Path(settings.state_dir) / "approval.db", state_dir=Path(settings.state_dir),
-            session_id=getattr(ledger, "session_id", None),
-        )
-        router = wiring.router
-        console.print(f"[cyan]--require-card ON:[/cyan] approval shim at {wiring.shim_url}. "
-                      f"Card auth token: {wiring.auth_token}")
-
-    market = MarketData(broker, cache=CandleCache(settings.data_cache_dir))
-    sizer = PositionSizer(risk_pct=settings.risk_pct_per_trade)
-
-    overlay_for, interpret_for = _intel_overlay_hooks(settings, overlay_refresh) if intel_overlay else (None, None)
-    if overlay_for is None:
-        console.print("[yellow]intel overlay OFF[/yellow] "
-                      + ("(no WORLDMONITOR_API_KEY)." if intel_overlay else "(--no-intel-overlay)."))
-
-    monitor = LiveMonitor(
-        broker=broker,
-        market=market,
-        strategy=strat,
-        sizer=sizer,
-        router=router,
-        account_number=account_number,
-        symbols=sym_list,
-        interval_seconds=interval,
-        on_event=_alert_emitter(_build_alerter(settings), strat, smap),
-        emit_on_change_only=not level,
-        strategy_map=smap or None,
-        account_currency=settings.account_currency,
-        risk_model=settings.risk_model,
-        heat_aggregation=settings.heat_aggregation,
-        overlay_for=overlay_for,
-        interpret_for=interpret_for,
-        weight_bias_for=_allocator_weight_bias(market, sym_list),
-        persistence_for=PersistenceGate(),
-        **monitor_policy(settings),
+    _run_session(
+        get_settings(), iterations=iterations, venue=venue, mode="live", symbols=symbols, strategy=strategy,
+        strategy_map=strategy_map, futures=_roots(futures), transport=transport, live_confirmation=confirm,
+        label=f"[{venue}-live]",
+        options=SessionOptions(
+            interval=interval, level=level, hedge=hedge, intel_overlay=intel_overlay, intel_refresh=overlay_refresh,
+            require_card=require_card, card_shim_port=card_shim_port, card_ttl=card_ttl, require_basket=require_basket,
+            spectral_var_cap=spectral_var_cap, spectral_var_level=spectral_var_level,
+            spectral_var_horizon=spectral_var_horizon, allow_screened=allow_screened),
     )
-    monitor.run_forever(max_iterations=iterations or None)
+
+
+@app.command()
+def doctor() -> None:
+    """What each engine layer has and lacks, by layer. Shows whether a secret is set, never its value."""
+    from .monitor.doctor import missing_for_money, wiring_rows
+    settings = get_settings()
+    table = Table(title="Engine wiring")
+    for col in ("Layer", "Item", "State", "Needed for"):
+        table.add_column(col)
+    for row in wiring_rows(settings):
+        table.add_row(row.layer, row.item, row.state, row.needed_for)
+    console.print(table)
+    for venue, missing in missing_for_money(settings).items():
+        state = "needs " + ", ".join(missing) if missing else ("no keys, log in to the gateway" if venue == "ib" else "keys set")
+        console.print(f"{venue} money session: {state}")
 
 
 @app.command()
@@ -1349,71 +1156,8 @@ from .audit.cli import audit_app  # noqa: E402  (registered beside the other sub
 app.add_typer(audit_app, name="audit")
 
 
-def _strategy_map_or_die(text: str) -> dict[str, Strategy]:
-    """Parse ``SYM=strategy,SYM=strategy`` into per-symbol strategy instances."""
-    smap: dict[str, Strategy] = {}
-    for pair in text.split(","):
-        pair = pair.strip()
-        if not pair:
-            continue
-        if "=" not in pair:
-            console.print(f"[red]Bad --strategy-map entry '{pair}'. Use SYMBOL=strategy.[/red]")
-            raise typer.Exit(code=2)
-        sym, sname = pair.split("=", 1)
-        smap[sym.strip().upper()] = _strategy_or_die(sname.strip())
-    return smap
-
-
-def _alert_emitter(alerter: Alerter, strat: Strategy, smap: dict[str, Strategy]) -> Callable[..., None]:
-    """The ``on_event`` for a monitor: format each entry, exit and hedge event and send it."""
-    from .analysis.universe import validated_for as _validated_for
-    from .intel.notification import (
-        format_entry as _fmt_entry,
-    )
-    from .intel.notification import (
-        format_exit as _fmt_exit,
-    )
-    from .intel.notification import (
-        format_hedge as _fmt_hedge,
-    )
-
-    def _emit(ev) -> None:
-        if ev.kind == "hedge":
-            title, body = _fmt_hedge(symbol=ev.symbol, detail=ev.detail)
-            alerter.send(title, body)
-        elif ev.kind == "entry":
-            sname = smap[ev.symbol].name if ev.symbol in smap else strat.name
-            # Statistical evidence for the selection — the walk-forward record, if this symbol
-            # cleared the gate. When it hasn't, format_entry emits the honest disclaimer instead.
-            wf_record = _validated_for(ev.symbol)
-            title, body = _fmt_entry(
-                strategy_name=sname, symbol=ev.symbol, price=ev.price, detail=ev.detail,
-                is_transition=getattr(ev, "is_transition", True),
-                poll_count=getattr(ev, "poll_count", 1),
-                wf_record=wf_record,
-            )
-            alerter.send(title, body)
-        elif ev.kind == "exit":
-            sname = smap[ev.symbol].name if ev.symbol in smap else strat.name
-            shares = int(ev.detail.get("shares", 0)) if isinstance(ev.detail, dict) else 0
-            title, body = _fmt_exit(strategy_name=sname, symbol=ev.symbol,
-                                     price=ev.price, shares=shares)
-            alerter.send(title, body)
-
-    return _emit
-
-
 def _build_alerter(settings) -> Alerter:
-    return Alerter(
-        AlertConfig(
-            telegram_bot_token=settings.telegram_bot_token,
-            telegram_chat_id=settings.telegram_chat_id,
-            smtp_host=settings.smtp_host,
-            smtp_user=settings.smtp_user,
-            smtp_pass=settings.smtp_pass,
-            email_to=settings.alert_email_to,
-        )
-    )
+    return build_alerter(settings)
 
 
 @autonomous_app.command("status")
@@ -1450,7 +1194,7 @@ def autonomous_status() -> None:
 
 @autonomous_app.command("start")
 def autonomous_start(
-    account: str = typer.Option("", help="Override autonomous_account: practice|live"),
+    account: str = typer.Option("", help="Override autonomous_account: paper|practice|live"),
 ) -> None:
     """Spawn the autonomous daemon. Background process; survives this shell."""
     settings = get_settings()
@@ -1465,8 +1209,8 @@ def autonomous_start(
         raise typer.Exit(code=2)
 
     chosen_account = (account or settings.autonomous_account).lower()
-    if chosen_account not in {"practice", "live"}:
-        console.print(f"[red]Invalid account '{chosen_account}'. Use practice or live.[/red]")
+    if chosen_account not in {"paper", "practice", "live"}:
+        console.print(f"[red]Invalid account '{chosen_account}'. Use paper, practice or live.[/red]")
         raise typer.Exit(code=2)
 
     extra_env = {
@@ -1508,84 +1252,20 @@ def autonomous_run() -> None:
         raise typer.Exit(code=2)
 
     chosen_account = os.environ.get("AUTONOMOUS_ACCOUNT_RUNTIME", settings.autonomous_account).lower()
-    if chosen_account not in {"practice", "live"}:
+    if chosen_account not in {"paper", "practice", "live"}:
         console.print(f"[red]Invalid AUTONOMOUS_ACCOUNT_RUNTIME='{chosen_account}'.[/red]")
         raise typer.Exit(code=2)
 
-    # If the user picked live but Questrade env is practice (or vice-versa), reconcile
-    # by spawning the broker against the matching endpoint. We honor `chosen_account`
-    # over `.env` QUESTRADE_ENV for the lifetime of this process.
-    os.environ["QUESTRADE_ENV"] = chosen_account
-
-    broker = _make_questrade(settings)
-    accounts = broker.accounts()
-    if not accounts:
-        console.print("[red]No accounts on Questrade login.[/red]")
-        raise typer.Exit(code=1)
-    account_number = settings.questrade_account_number or accounts[0].number
-
-    preflight(broker, settings.autonomous_symbols_list, emit=console.print)
-
-    market = MarketData(broker, cache=CandleCache(settings.data_cache_dir))
-    strat = _strategy_or_die(settings.autonomous_strategy)
-    sizer = PositionSizer(risk_pct=settings.risk_pct_per_trade)
-
-    # Autonomous trades have no human in the loop, so they must not go unrecorded either.
-    ledger = _session_ledger(settings, stream="autonomous", mode="autonomous", strict=True)
-    try:
-        router = Router.build_default(
-            mode="autonomous",
-            broker=broker,
-            state_dir=settings.state_dir,
-            **Router.limits_from(settings),
-            daily_max_trades=settings.autonomous_daily_max_trades,
-            daily_max_notional_usd=settings.autonomous_daily_max_notional_usd,
-            ledger=ledger,
-        )
-    except (LiveModeNotConfirmed, AutonomousNotEnabled) as e:
-        console.print(f"[red]{e}[/red]")
-        raise typer.Exit(code=2) from e
-
-    alerter = _build_alerter(settings)
-
-    def _emit(ev) -> None:
-        if ev.kind in {"entry", "exit"}:
-            alerter.send(
-                f"[autonomous/{chosen_account}] {settings.autonomous_strategy} {ev.kind.upper()}: {ev.symbol}",
-                f"price={ev.price:.4f} detail={ev.detail}",
-            )
-
-    overlay_for, interpret_for = _intel_overlay_hooks(settings)
-    if overlay_for is None:
-        console.print("[yellow]intel overlay OFF[/yellow] (no WORLDMONITOR_API_KEY).")
-
-    monitor = LiveMonitor(
-        broker=broker,
-        market=market,
-        strategy=strat,
-        sizer=sizer,
-        router=router,
-        account_number=account_number,
-        symbols=settings.autonomous_symbols_list,
-        interval_seconds=settings.autonomous_interval_seconds,
-        on_event=_emit,
-        account_currency=settings.account_currency,
-        risk_model=settings.risk_model,
-        heat_aggregation=settings.heat_aggregation,
-        overlay_for=overlay_for,
-        interpret_for=interpret_for,
-        weight_bias_for=_allocator_weight_bias(market, settings.autonomous_symbols_list),
-        persistence_for=PersistenceGate(),
-        **monitor_policy(settings),
+    # paper is a rehearsal: the daemon's own gates and budget on a simulated broker. practice and live are
+    # checked against the token, which alone decides the account; a mismatch refuses to start.
+    rehearsal = chosen_account == "paper"
+    log.info("autonomous.loop.start", account=chosen_account, strategy=settings.autonomous_strategy,
+             symbols=settings.autonomous_symbols_list, interval=settings.autonomous_interval_seconds)
+    _run_session(
+        settings, venue="questrade", mode="autonomous", symbols=settings.autonomous_symbols_list,
+        strategy=settings.autonomous_strategy, expected_env=None if rehearsal else chosen_account,
+        rehearsal=rehearsal, label=f"[autonomous/{chosen_account}]",
     )
-    log.info(
-        "autonomous.loop.start",
-        account=chosen_account,
-        strategy=settings.autonomous_strategy,
-        symbols=settings.autonomous_symbols_list,
-        interval=settings.autonomous_interval_seconds,
-    )
-    monitor.run_forever()
 
 
 @autonomous_app.command("tail")
@@ -1885,7 +1565,7 @@ def crypto_signal(
     """
     from .analysis.universe import CRYPTO_SLEEVE
     from .data.kraken_ohlc import kraken_ohlc
-    from .monitor.alerter import AlertConfig, Alerter
+    from .monitor.alerter import Alerter
     from .strategies import STRATEGIES
     from .strategies.base import StrategyContext
 
