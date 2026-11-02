@@ -1778,3 +1778,154 @@ cache key, the interval lexicon, the conviction clip, and the intel hooks.
 20. **`bsm_detect.py` permissions.** Its commands are not in `BSM_Spectral/.claude/settings.json`. The user
     adds these; Claude is blocked from editing its own permissions.
 21. **Unanswered question.** "Unilateral contract", said during the Kalshi work, was never explained.
+
+## 14. Order types: minimise spread and slippage  🟡 SCOPED, NOT BUILT (2026-11-01)
+
+**Why.** Every order is a market order, so every entry and exit pays the spread and takes whatever slippage comes.
+That cost is now visible rather than hidden: paper crosses the spread as of `monitor/session.py`, and
+`trading audit query fill-quality` measures slippage and fees per stream against the decision price.
+
+**What is there today, from reading the code:**
+* `execution/router.py` hard-codes `OrderType.MARKET` in `Router.submit`. `OrderIntent` cannot ask for anything else.
+* `Order` already carries `limitPrice`, `stopPrice` and `timeInForce`, and `TimeInForce` is Day, GTC or GTD.
+* Questrade: `to_questrade_payload` sends limit price and time in force. Kraken: `_order_type_wire` maps limit and
+  stop. IB socket: `IBAlgoOrderType` lists `LMT`, `MIDPRICE`, `PEG MID`, `VWAP`, `TWAP` and more. IB web sends a
+  limit price. None of this has run for real.
+* `PaperBroker` never reads `orderType`: every order fills at once and in full.
+* Nothing manages a working order. `Router.cancel` exists, but nothing watches an order that has not filled, and
+  the monitor's in-flight guard only stops a repeat entry for a few polls.
+
+**Proposed order styles**, set per venue and per asset class in `trading.yaml`, so paper and money read the same knob:
+
+| Style | Order | Cost | Risk |
+|---|---|---|---|
+| `market` | As today | Full spread plus slippage | None missed |
+| `marketable_limit` | Limit at the far touch plus a cap, IOC | Spread, slippage capped | Part-fill or miss if price runs |
+| `passive_limit` | Join the near touch, post-only, reprice up to a limit, then cross or give up | Can earn the spread and maker fees | Misses, and adverse selection: it fills when price moves against it |
+| `venue_algo` | IB `MIDPRICE` or `PEG MID`, where the venue offers it | Near the mid | Venue-specific, harder to simulate |
+
+Exits stay urgent: forced exits and anything sent under a tripped kill-switch stay marketable whatever the style.
+
+**Decisions to make first:**
+1. How far may an entry chase before it gives up? A missed trade has a cost too, and the backtests assume a fill.
+2. How long does a passive order rest, and what does it do then: cross, or drop the signal?
+3. Which style per venue and asset class? Start from what `fill-quality` measures, not from a guess.
+4. Does the card sign a limit? The signed canonical carries `entry`; a repriced order must not exceed what was
+   approved, or it must go back to the card.
+
+**Engine layers it touches:**
+* **Intent and Router:** an `order_style` on `OrderIntent`, a limit price derived from a fresh quote, and a gate
+  check that the limit still fits the size caps.
+* **Execution:** a working-order manager that polls, reprices, cancels and always leaves nothing resting when a
+  session stops. Time-in-force per venue. Check each venue's post-only and IOC support in its docs first.
+* **Paper:** a limit fills only if the market trades through it, with a haircut for queue position. Without this
+  paper would flatter passive orders and stop translating, which is the point of this work.
+* **Audit:** new ledger events (`ORDER_WORKING`, `ORDER_REPRICED`, `ORDER_UNFILLED`), added to `LedgerEvent` first;
+  recon for part-fills; `fill-quality` split by style.
+* **Monitor:** the in-flight guard and the once-per-bar level rule both have to understand a working order.
+* **Backtest:** `CostModel` by style, so research costs match.
+
+**Sequence.** (a) Accrue a baseline: at least a week of paper on two venues, then `fill-quality`, per the data-first
+rule. (b) `marketable_limit` first: it caps slippage and is the smallest change. (c) The working-order manager and
+`passive_limit`. (d) Venue algos.
+
+**Done when:** all-in cost per stream, measured by `fill-quality`, falls against the market-order baseline; the miss
+rate is reported beside it, since a cost saved by not trading is not a saving; paper and money agree within a stated
+band; no order is left working after a session stops; and every order re-verifies and replays.
+
+## 15. Engine wiring: what changed and what is left  🟢 BUILT (2026-11-01)
+
+`docs/ENGINE_WIRING.md` goes through it layer by layer. Every runner now goes through `monitor/session.py`. Closes
+section 13 items 1 (the token's environment is checked, since the practice login's token endpoint returned 404), 3
+(ledger `sizing` and `SESSION_PLAN`), 4 (CI runs the risk tests and the spectral self-test), 5 (IB prompts reject by
+default, are bounded, and an error or a missing order id no longer reads as placed) and 6 (the overlay refreshes on
+its own thread).
+
+Also new: money runners for Kraken and IB; `trading paper --venue`; `AUTONOMOUS_ACCOUNT=paper`; paper fills crossing
+the spread with per-venue costs (assumptions until measured); Kraken equity and positions covering the whole book;
+the daily budget counting only its own mode; `trading doctor`; and `fill-quality` and `session-plans` queries.
+
+**Decisions still open, yours:**
+1. A drawdown in a paper session trips the one `state/HALTED` file, which halts a money session sharing `state/`.
+   Recommended: a separate paper sentinel, with `trading kill` still stopping everything.
+2. Home currency. Questrade equity is in the account's currency and a US name is priced in USD, unconverted. A session
+   warns; the gates do not convert. This is exchange hopping level 3.
+3. Overlay outage behaviour: section 13 item 2.
+4. Paper's cost defaults are assumptions. Replace them from `fill-quality` once real fills exist.
+
+**Standing rule from the user, 2026-11-01:** no removals from this build without their express permission.
+
+## 16. Questions for the user  🔴 ANSWER FIRST (2026-11-01)
+
+Each has a recommendation; none has been acted on. Answers go here or in chat.
+
+### Before any money session
+
+1. **Should a paper drawdown be able to halt money?** Paper and money share one `state/HALTED` file, so today it can.
+   *Recommended:* a separate paper sentinel, with `trading kill` still stopping everything.
+2. **What is the home currency for the gates?** Questrade equity is in the account's currency and a US name is priced in
+   USD, unconverted, so the gates compare unlike amounts. A session warns but does not convert.
+   *Recommended:* CAD, the setting's default, converted at the Bank of Canada rate the audit layer already fetches.
+3. **How much do you plan to trade?** Set `paper_starting_equity` to it. Rounding, the minimum ticket and fees all scale
+   with account size, so results at the $100,000 default will not translate to a smaller account.
+4. **What should the overlay do in an outage?** A full vendor outage can loosen a 0.25 trim to the 0.80 cap, and at the
+   default floor its halt cannot fire (section 13, item 2).
+   *Recommended:* hold the last good read while the feed is degraded. Separately: should the halt be reachable?
+5. **Is `--allow-screened` enough for Kraken money?** The sleeve is in-sample only and marked paper-only, and that flag is
+   the only thing in the way once keys are set.
+   *Recommended:* stay on paper until the deep-history walk-forward clears it.
+6. **What should IB money be allowed to do?** The desk split says IB carries futures, but only the basket gate enforces it,
+   so `trading live --venue ib` would trade an equity. Warning prompts reject orders by default
+   (`ib_auto_confirm_prompts`).
+   *Recommended:* keep prompts off until you have seen which ones IB sends, and refuse equities on an IB money session.
+7. **Should forced exits be on?** `forced_exits` is off everywhere. Being one knob, turning it on for paper also turns it
+   on for money unless the file is changed between runs.
+   *Recommended:* on for paper now, to gather evidence; decide for money from the sweep in the risk-guard report.
+8. **What should the daemon's default account be?** `AUTONOMOUS_ACCOUNT` defaults to `practice`, which now refuses to start
+   on a real token, so the default does nothing useful. `CLAUDE.md` calls it the default and reset value.
+   *Recommended:* make `paper` the default and reset value.
+
+### Order types (section 14)
+
+9. **How far may an entry chase before it gives up?** A missed trade has a cost too, and the backtests assume a fill.
+10. **How long does a passive order rest, and then what:** cross the spread, or drop the signal?
+11. **Which style per venue and asset class?** *Recommended:* decide from a week of `fill-quality`, starting with
+    `marketable_limit`.
+12. **Does the card sign a limit?** A repriced order must not exceed what was approved. *Recommended:* the card signs the
+    worst acceptable price, and anything beyond it goes back to the card.
+
+### Sizing and costs
+
+13. **Should crypto trade fractional units?** Orders are whole units in both modes. With the 50% single-name cap, BTC cannot
+    open at all unless half the account covers one coin. *Recommended:* yes for crypto. It touches `OrderIntent.shares`
+    and the gate's trim, so it is its own piece of work.
+14. **Are the paper cost defaults acceptable until measured?** Questrade $4.95 per order, Kraken 40 bps (from memory,
+    unchecked), IB $1.00 per order, all plus 5 bps slippage. *Recommended:* check them against your actual fee schedules now,
+    then replace them from `fill-quality`.
+
+### The no-removals rule
+
+15. **What is the rule's exact scope?** Your words: "There'll be no removals from this build without my express permission
+    for reasons not statistical or those of social-policy or competition...." The sentence trails off, so it is being read
+    conservatively: nothing goes without asking, whatever the reason. Is a statistical reason ever enough on its own?
+16. **Can `test_crypto_sleeve` be updated to the 13 symbols the sleeve holds?** It expects 7 and has been failing since before
+    this work. *Recommended:* update the test and keep every symbol.
+
+### Getting it to `main`
+
+17. **Which keys will you add, and when?** `trading doctor` lists them: Questrade's two, Kraken's two, Telegram's two, and
+    `ANTHROPIC_API_KEY` for the one real agent call (section 13, item 13).
+18. **In what order do the PRs go?** PR #3 is open with Auto-fix on, and `feat/runner-parity` is committed locally on top of
+    it, not pushed. *Recommended:* merge #3, then open a PR for this branch against `main`.
+19. **Does a market-data subscription belong in the budget?** Exchange hopping level 2 needs one.
+
+### Left over from the audit work (`docs/compliance/AUDIT_SCOPE.md`)
+
+20. **Which key signs the daily anchors?** Git has none configured here. Pass `--signing-key` (or `--ssh`), or use
+    `--no-sign`. No anchor exists yet, because no session has written a ledger day.
+21. **Where does the retention archive go?** It should be outside OneDrive.
+22. **Will you supply spouse or RRSP/TFSA trades as a CSV?** The superficial-loss test cannot see them otherwise.
+23. **Who holds the copyright for a LICENSE file?** `pyproject.toml` names "pouria" as the author, so none was added.
+24. **Can `Components\BSM_Spectral.pre-subtree.git` be deleted?** It is the backup from the subtree merge. Under the
+    no-removals rule it stays until you say so.
+

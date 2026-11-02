@@ -49,7 +49,8 @@ Default flow: `uv run trading backtest --strategy NAME --symbol TICKER --years N
 ## When the user asks to "go live"
 
 Three checks before you run anything:
-1. Confirm `QUESTRADE_ENV=practice` for at least one full week of paper trading first
+1. Confirm `QUESTRADE_ENV=practice` for at least one full week of paper trading first, and that
+   `trading audit query session-plans` shows the money session's fingerprint matching those paper sessions
 2. Confirm `state/HALTED` does not exist
 3. Confirm the user has typed the live-mode confirmation phrase
 
@@ -81,7 +82,7 @@ This repo supports **two distinct ways to trade** that share the same Router and
 This repo supports a fully-autonomous Claude-driven trading loop. **Read these rules before touching anything related to it.**
 
 - The daemon process is owned by the user's system, not by Claude. Claude can start/stop/inspect it, but the loop runs in `trading_live_claude.cli:autonomous_run` as a detached process with its own pid.
-- A daemon spawned in this repo can place real Questrade orders if `AUTONOMOUS_ACCOUNT=live`. Default and reset value is `practice`.
+- A daemon spawned in this repo can place real Questrade orders if `AUTONOMOUS_ACCOUNT=live`. Default and reset value is `practice`, which refuses to start on a live token. `AUTONOMOUS_ACCOUNT=paper` rehearses the daemon: its own gates and budget on a simulated broker.
 - Autonomous router mode requires the runtime env var `AUTONOMOUS_ENABLED=true` AND `autonomous_enabled=true` in `.env`. The CLI sets the env var when calling `autonomous start`; the daemon then re-checks on every Router construction.
 - The daemon respects ALL the standard gates (kill-switch, heat, per-trade risk, max positions, min ticket) PLUS a daily trade-count and daily notional cap.
 
@@ -106,7 +107,7 @@ This repo supports a fully-autonomous Claude-driven trading loop. **Read these r
 
 An optional third gate sits between the Router's risk checks and broker dispatch: a
 physical approval card the user taps ACCEPT / DECLINE on. It's disabled by default and
-opt-in per-run via `--require-card` on `paper_ib.py` / `paper_kraken.py`.
+opt-in per-run via `--require-card` on any runner but the daemon, or `require_card` in `trading.yaml`.
 
 - **Never weakens existing gates.** `ApprovalRouter` runs `Router._gate` FIRST, and only
   publishes a prompt to the card if the router would have accepted the intent anyway.
@@ -169,13 +170,16 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
   the figures the caller passes, so a caller trading several routes must pass whole-book figures.
 - `LiveMonitor` does not span brokers yet: its equity and positions come from one broker. Summing them
   across brokers needs the numeraire decision (NEXT_SESSION.md, exchange hopping level 3).
-- Every runner builds `LiveMonitor` with `**monitor_policy(settings)`, so a new runner gets the market-hours
-  guard (`analysis/venue_calendar.py`), per-symbol `entry_triggers` and `forced_exits` from `trading.yaml`.
+- **Money runners mirror paper.** Every runner goes through `start_session` in `monitor/session.py`, so paper
+  and money are one build. A new knob goes in `config/trading.yaml` and `SessionPlan`. A paper/money difference
+  must be in `NECESSARY_DIFFERENCES` with a reason; `tests/test_session.py` fails otherwise. See
+  `docs/ENGINE_WIRING.md`. `trading doctor` shows what each layer has, without showing a secret.
+- **No removals without the user's express permission** (symbols, strategies, gates, flags, data). Move or
+  extend instead; if a test and a table disagree, ask rather than shrink the table.
+- `QUESTRADE_ENV` and `AUTONOMOUS_ACCOUNT=practice` route nothing: the token alone decides the account, and a
+  money session refuses to start when the token's environment does not match. Practise on paper.
 - `supports_level_trigger` means a strategy emits `entry_level`; `level_trigger_default` means the monitor
   acts on it unasked. Backtests read `entry` alone, so emitting the column must never change `entry`.
-- The live runner mirrors the paper runners. Build a runner from `Router.limits_from(settings)`,
-  `monitor_policy(settings)` and `preflight()`; `tests/test_live_parity.py` fails if one stops. A difference
-  between paper and live needs a reason: real broker, typed confirmation, strict ledger.
 - Gates that stop new risk must not trap the way out. An order that only reduces a position the routed
   broker holds (`reduces` in `Router._gate`, read from the broker and recorded) passes the kill-switch, the
   minimum ticket, the heat cap and the daily budget. The LLM-trader commands still refuse while halted.

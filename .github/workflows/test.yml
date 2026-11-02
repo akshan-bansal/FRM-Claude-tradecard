@@ -1,26 +1,27 @@
-# Approval-shim test suite. Runs on every push and every PR.
+# Runs on every push and PR that touches trading code.
 #
-# Intentionally narrow — only the TradeCard test surface, not the full
-# repo's pytest run (which touches network-facing IB/Kraken paths that
-# don't belong in CI). The four files below are the wire the branch adds
-# and the wire this PR is protecting.
+# Two slices: the TradeCard test surface, and the offline risk and wiring tests (the Router, its gates,
+# the session builder, the brokers against mocks, the audit trail). Not the full repo's pytest run, which
+# touches network-facing IB/Kraken paths that don't belong in CI. Nothing here calls a broker.
 name: tradecard-tests
 on:
   push:
     branches: [main, "feat/**"]
     paths:
-      - "src/trading_live_claude/execution/**"
-      - "src/trading_live_claude/intel/vs_engine.py"
-      - "tests/test_approval_*.py"
-      - "tests/test_vs_engine.py"
+      - "src/trading_live_claude/**"
+      - "scripts/**"
+      - "tests/**"
+      - "BSM_Spectral/bsm_event.py"
+      - "config/*.example.yaml"
       - "pyproject.toml"
       - ".github/workflows/test.yml"
   pull_request:
     paths:
-      - "src/trading_live_claude/execution/**"
-      - "src/trading_live_claude/intel/vs_engine.py"
-      - "tests/test_approval_*.py"
-      - "tests/test_vs_engine.py"
+      - "src/trading_live_claude/**"
+      - "scripts/**"
+      - "tests/**"
+      - "BSM_Spectral/bsm_event.py"
+      - "config/*.example.yaml"
       - "pyproject.toml"
       - ".github/workflows/test.yml"
 
@@ -42,13 +43,13 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          # We only need the shim + test deps for these four test files —
-          # skip the ib/kraken/plot extras to keep the CI slice small. quant
-          # stays: test_vs_engine imports intel, whose import chain reaches
+          # We only need the shim + test deps for these test files — skip the
+          # ib/kraken/plot extras to keep the CI slice small. quant stays:
+          # test_vs_engine imports intel, whose import chain reaches
           # models.cointegration and statsmodels.
           pip install '.[shim,quant]'
           # pytest-cov because pyproject's addopts pass --cov; --no-cov below needs it too.
-          pip install pytest pytest-cov pandas cryptography structlog pydantic
+          pip install pytest pytest-cov pytest-asyncio respx pandas cryptography structlog pydantic
 
       - name: Run tradecard tests
         run: |
@@ -58,3 +59,36 @@ jobs:
             tests/test_approval_shim.py \
             tests/test_approval_sqlite.py \
             -v --no-cov --tb=short
+
+      - name: Run risk and wiring tests
+        run: |
+          python -m pytest \
+            tests/test_router.py \
+            tests/test_router_risk_gates.py \
+            tests/test_multi_broker_router.py \
+            tests/test_risk.py \
+            tests/test_session.py \
+            tests/test_live_parity.py \
+            tests/test_broker_parity.py \
+            tests/test_monitor.py \
+            tests/test_monitor_guards.py \
+            tests/test_entry_triggers.py \
+            tests/test_intel_hooks_wiring.py \
+            tests/test_asset_class_integrity.py \
+            tests/test_venue_calendar.py \
+            tests/test_symbol_atlas.py \
+            tests/test_symbol_validation.py \
+            tests/test_kraken_broker.py \
+            tests/test_ib_web_broker.py \
+            tests/test_paper_broker_journal.py \
+            tests/test_place_order_cli.py \
+            tests/test_spectral_var.py \
+            tests/test_risk_guard_analysis.py \
+            tests/test_audit_ledger.py \
+            tests/test_audit_projection.py \
+            tests/test_audit_versioning.py \
+            tests/test_audit_trail.py \
+            -q --no-cov --tb=short
+
+      - name: Run the spectral engine's self-test
+        run: python BSM_Spectral/bsm_event.py --selftest

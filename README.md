@@ -332,3 +332,25 @@ stateDiagram-v2
 ## Disclaimer
 
 Not affiliated with Questrade or Anthropic. Educational use. No warranty. Past backtest performance does not predict future results. Read the source before running anything live.
+
+## 12. Paper and money are one build
+
+Every runner goes through `monitor/session.py`, with the same flags and the same `config/trading.yaml` knobs, so
+what you practise is what runs. `docs/ENGINE_WIRING.md` goes through it layer by layer, with what still differs.
+
+```bash
+trading paper --venue kraken
+```
+
+```bash
+trading doctor
+```
+
+```bash
+trading audit query session-plans
+```
+
+```bash
+trading audit query fill-quality
+```
+
