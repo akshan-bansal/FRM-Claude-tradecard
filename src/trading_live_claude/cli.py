@@ -103,9 +103,13 @@ _DEFAULT_REPORTS_DIR = Path("reports")
 def _intel_overlay_hooks(settings, refresh_seconds: float = 900.0):
     """``(overlay_for, interpret_for)`` over one WorldMonitor provider; ``(None, None)`` without a key.
 
-    Both only de-risk: the overlay trims or halts new entries, the theses trim, and neither touches
-    exits. The provider fails open: an outage keeps the last good read, or no overlay before the
-    first one.
+    Both only de-risk new entries and neither touches exits. The overlay trims; at the default floor
+    (0.25) its halt threshold (0.20) cannot be reached, so it does not stand a class down.
+
+    An outage fails open and can loosen the trim. When every vendor call fails the snapshot is
+    degraded and its class scalars rest on no readings, so 0.25 under stress becomes the 0.80 cap.
+    The last good read is kept only when the fetch itself raises, and there is no overlay before the
+    first read.
     """
     if not settings.worldmonitor_api_key:
         return None, None
@@ -129,7 +133,7 @@ def _intel_overlay_hooks(settings, refresh_seconds: float = 900.0):
         snap = provider.last_snapshot
         return _interpret(snap) if snap is not None else []
 
-    console.print(f"[cyan]intel overlay ON[/cyan] (refresh every {refresh_seconds:.0f}s; de-risk + halt gate).")
+    console.print(f"[cyan]intel overlay ON[/cyan] (refresh every {refresh_seconds:.0f}s; trims entry size).")
     console.print("[cyan]interpret entry-filter ON[/cyan] (theses trim conviction; advisory, never blocks or boosts).")
     return provider, _interpret_current
 
@@ -516,7 +520,7 @@ def live(
     intel_overlay: bool = typer.Option(
         True, "--intel-overlay/--no-intel-overlay",
         help="Gate entries with the WorldMonitor risk overlay when WORLDMONITOR_API_KEY is set. "
-             "On by default; an outage keeps the last good read.",
+             "On by default. If the feed fails, each class falls back to a 0.8 cap, which can loosen a tighter trim.",
     ),
     overlay_refresh: int = typer.Option(900, help="Seconds between WorldMonitor overlay refreshes."),
 ) -> None:

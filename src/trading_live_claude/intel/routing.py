@@ -4,8 +4,10 @@ The live monitor asks ``overlay_for(symbol)`` for the current de-risk decision t
 symbol. That needs two things: a map from symbol to overlay asset class (``classify_symbol``), and a
 periodically-refreshed set of :class:`~trading_live_claude.intel.overlay.OverlayDecision`s built from
 a live snapshot (:class:`OverlayProvider`). The provider is deliberately fail-safe: if a refresh
-raises (network hiccup, expired key) it keeps the last good decisions, and if it has never had a
-good read it returns ``None`` so the monitor behaves exactly as if no overlay were configured.
+raises it keeps the last good decisions, and if it has never had a good read it returns ``None`` so
+the monitor behaves exactly as if no overlay were configured. A vendor outage usually does not raise:
+``WorldMonitorClient.snapshot`` catches each failed call and returns a degraded snapshot, whose
+decisions replace the last good ones at no more than ``degraded_cap``.
 
 This module also provides :class:`PersistenceGate`, an entry-side halt built on the intel graph's
 ``edge_persistence`` query. The rule it enforces: an entry in a symbol whose overlay class is

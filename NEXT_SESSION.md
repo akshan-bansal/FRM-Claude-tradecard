@@ -1058,7 +1058,9 @@ solutions; call out and prioritize. Full agent report lives in the session trans
    LANDED 2026-11-01, with these decisions from the user. `tests/test_intel_hooks_wiring.py` pins the
    wiring on every runner.
    * Overlay: on when `WORLDMONITOR_API_KEY` is set; without one the runner starts and says it is
-     off. `live` has `--no-intel-overlay`. Fails open: an outage keeps the last good read.
+     off. `live` has `--no-intel-overlay`. Fails open. **Corrected 2026-11-01:** the user chose this on
+     the description "an outage keeps the last good read", which is wrong for a normal outage. See
+     section 13, item 2.
    * Allocator: the full 0.1×–3× range, same as paper, so one real order can be 3× larger with only
      the Router's caps and the daemon's daily budget above it. The boost side has no validation.
    * Persistence gate: every runner. It cannot fire until a poller writes `elevated_in` edges.
@@ -1682,3 +1684,97 @@ model's own simulated band (FHS-GJR), and the data, across all eight underlyings
 
 Not supported by the data: momentum or inertia (price variance ratios sit inside the model
 bands), and daily jumps beyond FHS except WTI. Microstructure is deferred by user decision.
+
+## 13. Open items after the intel-hook work  🔴 START HERE (2026-11-01)
+
+Recorded after `5b80db6` on `feat/backlog-routing-triggers`. In priority order; the spectral tail index
+is in 12.1 and the post-GBM queue in 12.2.
+
+### Fix before any live or autonomous run
+
+1. 🔴 **`QUESTRADE_ENV` selects nothing.** Worse than the audit's "runtime override is a no-op". From
+   reading the code, not tested against Questrade:
+   * `brokers/questrade.py:23` hard-codes `LOGIN_HOST`, and `from_settings` takes no environment. The
+     refresh token alone decides which account is traded.
+   * `autonomous_run` sets `os.environ["QUESTRADE_ENV"]`, and nothing reads it afterwards.
+   * `AUTONOMOUS_ACCOUNT=practice` is therefore only a label, and `live`'s "routing through practice
+     account" message is not a fact the code checks.
+   * The "confirm `QUESTRADE_ENV=practice`" go-live check in `CLAUDE.md` proves nothing until this is fixed.
+
+   Do: route to Questrade's practice login, or refuse to start when the account type can't be
+   confirmed. Check Questrade's docs for the host. This matters more now that real-money runners can
+   size an order up to 3×.
+2. 🔴 **The overlay loosens in an outage, and its halt cannot fire. Needs the user's decision.** Simulated
+   on 2026-11-01, on stub snapshots:
+   * Heaviest stress tried: scalar 0.25, `halt_new_entries` False. `OverlayConfig` floors the scalar at
+     0.25 and halts at 0.20 or below, so the halt is unreachable. "Halt gate" wording in `paper_ib.py`
+     and `live_loop.py` overstates it.
+   * Every vendor call failing: scalar 0.80. `snapshot()` catches each failure and returns a degraded
+     snapshot with no readings, and its decisions replace the last good ones. The last read is kept
+     only when the fetch itself raises.
+
+   The user chose "fail open" on the description "keeps the last good read", so ask again. Options: hold
+   the prior decisions while degraded, or take the tighter of the prior scalar and the cap; separately,
+   lower the floor below `halt_below` if the halt should be live. The wrong wording also remains in the
+   message of commit `5b80db6`, which is merged and stays as it is; the docstring and help text are fixed.
+3. 🔴 **The ledger can't explain a sized or suppressed order.** It records the final conviction and a
+   halt reason, not the overlay scalar, the allocator bias, the thesis trims or the persistence reason,
+   so a 3× boost has no recorded cause. `audit/versioning.py`, `audit/ledger.py` and `audit/replay.py`
+   never mention the hooks, so the risk-check version doesn't move when they change. This falls short of
+   the `CLAUDE.md` audit rules, on the real-money paths.
+4. 🔴 **CI skips the risk code.** `.github/workflows/test.yml` runs four TradeCard test files. A green PR
+   says nothing about the Router, the gates, `tests/test_live_parity.py` or
+   `tests/test_intel_hooks_wiring.py`, and the BSM self-tests never run in CI although the spectral gate
+   imports that engine. The workflow says it is deliberately narrow because the full run touches
+   network-facing paths, so widen it to the offline risk tests rather than to everything.
+5. 🔴 **`brokers/ib_web.py:509` auto-confirms IB warnings in an uncapped loop.** Still open. In live mode
+   it can accept margin or exchange warnings a human should see, and it can spin on a misbehaving API.
+6. 🟡 **A slow feed can hold up a real-money poll.** From reading the code, not measured. The overlay
+   refreshes inside `LiveMonitor.step`, on an entry evaluation, with about 8 vendor calls in sequence at
+   a 40-second timeout each. That could block the rest of the poll, exits included, for around 5 minutes.
+   Refresh on a background thread or between polls.
+7. 🟡 **`config/settings.py:258` caches `get_settings()`.** Still open: a change to the environment or
+   `trading.yaml` after the first call is not seen. `autonomous_run` writes to the environment after that call.
+
+The other items on the 2026-09-04 critical list were rechecked in code on 2026-11-01 or landed earlier:
+NaN ATR, `KillSwitch.evaluate` callers (paper and `risk/equity_watch.py`), the README live snippet, the
+cache key, the interval lexicon, the conviction clip, and the intel hooks.
+
+### Finish the intel-hook work
+
+8. **Stale-run warning.** `PersistenceGate` ignores a run older than `max_age_hours` silently. Log it, so
+   a dead poller is visible rather than looking like a calm market.
+9. **Dead persistence domains.** `_CLASS_TO_DOMAINS` reads `disaster` and `economy`, but `INTEL_DOMAINS`
+   writes only `conflict`, `energy` and `military`. So `fixed_income` can only halt on `conflict`. Add
+   the domains to the snapshot or drop them from the map.
+10. **Allocator weights go stale.** `_allocator_weight_bias` computes once at startup and never refreshes,
+    so a long-running daemon keeps old weights.
+11. **Hook settings aren't in `trading.yaml`.** `min_polls`, the 6-hour stale limit and the allocator range
+    are hard-coded, and the daemon's only overlay opt-out is removing the key.
+12. **Thin test coverage on the real-money paths.** `_intel_overlay_hooks` has no test with a key set, and
+    `live` and `autonomous_run` are checked by reading their source, because tests may not use live mode.
+13. **One real agent call.** Add `ANTHROPIC_API_KEY` to `.env`, then run `debate()` on two or three
+    made-up headlines with `domains=("energy",)`, at most two API calls, and record `stop_reason` and
+    usage. This is the first check of the model id and the reply parsing against the real API. The layer
+    stays unwired.
+14. **Accrue the data.** Run an overlay provider or `scripts/graph_journal.py` so `elevated_in` edges exist.
+    Until then the persistence gate cannot fire, and nothing validates the overlay, the allocator or the
+    gate on real data. Tiers 4 and 5 in section 9 need about 30 days and 21-day windows from that start.
+15. **Thesis trims cover little of the book.** `THEME_EXEMPLARS` overlaps 8 of the 32 validated symbols and
+    1 crypto pair (PAXG/USD), so most names, BTC and ETH among them, can never be trimmed by a thesis.
+
+### Housekeeping
+
+16. **Failing test.** `tests/test_crypto_sleeve.py::test_crypto_sleeve_is_well_formed` expects 7 symbols, and
+    the sleeve holds more (AAVE/USD among them; section "Live processes" says 13). Decide which is right.
+17. **Type check.** `mypy` is a dev dependency but is not in `.venv`, so `mypy --strict` has not run on
+    this work or on `risk/spectral_var.py`.
+18. **Reach `main`.** `5b80db6` merged into `feat/backlog-routing-triggers` through PR #4 as `e1072bf`, and
+    gets to `main` through PR #3, which was still open on 2026-11-01. Anything new needs its own PR: a push
+    to that branch lands directly in #3.
+19. **Check the first maturation run.** The scheduled task now runs from `BSM_Spectral/` inside this repo.
+    Its first run there is 2026-11-02 09:00, and it journals the new `-path` challengers for the first
+    time. Read `BSM_Spectral/journal/run.log` afterwards.
+20. **`bsm_detect.py` permissions.** Its commands are not in `BSM_Spectral/.claude/settings.json`. The user
+    adds these; Claude is blocked from editing its own permissions.
+21. **Unanswered question.** "Unilateral contract", said during the Kalshi work, was never explained.
