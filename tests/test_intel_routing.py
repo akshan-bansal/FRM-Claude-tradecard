@@ -187,3 +187,20 @@ def test_fx_slash_notation_is_fx_not_crypto() -> None:
     assert classify_symbol("PAXG/USD") == "crypto"
     assert classify_symbol("BTC-USD") == "crypto"
     assert classify_symbol("/ES") == "future"
+
+
+def test_a_persistent_economy_run_halts_fx_and_fixed_income_only(tmp_path: Path) -> None:
+    path = tmp_path / "intel_graph.jsonl"
+    _seed_graph(path, [["economy"]] * 6)
+    gate = PersistenceGate(min_polls=5, refresh_seconds=0.0, graph_path=path)
+    assert gate("TLT")[0] is True and "economy" in gate("TLT")[1]
+    assert gate("EURUSD")[0] is True
+    assert gate("AAPL") == (False, "")
+
+
+def test_the_persistence_gate_never_reads_disaster(tmp_path: Path) -> None:
+    assert not any("disaster" in domains for domains in _CLASS_TO_DOMAINS.values())
+    path = tmp_path / "intel_graph.jsonl"
+    _seed_graph(path, [["disaster"]] * 6)
+    gate = PersistenceGate(min_polls=5, refresh_seconds=0.0, graph_path=path)
+    assert gate("USO") == (False, "") and gate("GLD") == (False, "")

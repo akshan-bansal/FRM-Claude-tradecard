@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+# The vendor's ``get_intel_timeline`` accepts exactly these (checked 2026-11-01). Another name fails the
+# call, and any failed call marks the whole snapshot degraded. Economy is elevated in intel/graph.py.
 INTEL_DOMAINS: tuple[str, ...] = ("conflict", "military", "energy")
 
 
