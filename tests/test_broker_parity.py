@@ -101,7 +101,8 @@ def test_a_paper_halt_keeps_a_manual_reason_and_restarts_after_a_clear(tmp_path:
     assert not ks.state().halted                              # the measure restarted at the clear
     feed.bid = feed.ask = 30.0
     b.mark_to_market()
-    assert ks.state().halted
+    assert not ks.state().halted                              # a paper drawdown does not stop money
+    assert KillSwitch(tmp_path, paper=True).state().halted    # it stops paper
 
 
 # ---------------------------------------------------------------- Kraken's book

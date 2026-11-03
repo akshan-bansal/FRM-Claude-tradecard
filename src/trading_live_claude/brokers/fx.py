@@ -6,7 +6,8 @@ current rate, a constant factor per series, so signals match native while price 
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..logging_setup import get_logger
@@ -24,6 +25,9 @@ _USD_QUOTED = frozenset({"EUR", "GBP", "AUD", "NZD"})
 
 _QUOTE_PRICE_FIELDS = ("bidPrice", "askPrice", "lastTradePrice", "lastTradePriceTrHrs",
                        "openPrice", "highPrice", "lowPrice")
+
+
+_POSITION_VALUE_FIELDS = ("currentMarketValue", "currentPrice", "averageEntryPrice", "closedPnl", "openPnl", "totalCost")
 
 
 def _utc_now() -> datetime:
@@ -93,15 +97,65 @@ def ib_spot_rates(ib: IBBroker, numeraire: str, *, ttl_s: float = 60.0,
     return FxRates(fetch, numeraire, ttl_s=ttl_s, max_age_s=max_age_s)
 
 
+class BankOfCanadaRates:
+    """Bank of Canada daily rates behind ``FxRates.rate``, for a book whose gates read in one currency.
+
+    The same rates the audit layer converts tax lots with, cached under ``<state>/fx``. A daily rate is
+    enough to size and gate on, and a fill keeps its own price and currency. Recent observations are
+    fetched at most once per ``ttl_s``; a failed fetch falls back to the cache, which covers 7 days.
+    """
+
+    def __init__(self, cache_dir: Path, numeraire: str = "CAD", *, ttl_s: float = 3600.0,
+                 clock: Callable[[], datetime] = _utc_now) -> None:
+        from ..audit.semantics import BankOfCanadaFX
+        self.fx = BankOfCanadaFX(cache_dir)
+        self.numeraire = numeraire.upper()
+        self.ttl_s = ttl_s
+        self._clock = clock
+        self._fetched: dict[str, datetime] = {}
+
+    def _refresh(self, ccy: str, now: datetime) -> None:
+        last = self._fetched.get(ccy)
+        if last is not None and (now - last).total_seconds() < self.ttl_s:
+            return
+        self._fetched[ccy] = now
+        try:
+            self.fx.fetch(ccy, now.date() - timedelta(days=10), now.date())
+        except Exception as e:                       # the cache may still cover it
+            log.warning("fx.boc_fetch_failed", currency=ccy, error=str(e))
+
+    def _cad_per(self, ccy: str) -> float:
+        from ..audit.semantics import USD_PEGGED
+        if ccy == "CAD":
+            return 1.0
+        now = self._clock()
+        self._refresh("USD" if ccy in USD_PEGGED else ccy, now)
+        rate = self.fx.rate(ccy, now.date())
+        if rate.rate is None:
+            raise FxUnavailable(f"no Bank of Canada rate for {ccy}: {rate.source}")
+        return rate.rate
+
+    def rate(self, ccy: str) -> float:
+        """Numeraire units per one unit of ``ccy``."""
+        ccy = ccy.upper()
+        if ccy == self.numeraire:
+            return 1.0
+        return self._cad_per(ccy) / self._cad_per(self.numeraire)
+
+
 class CurrencyNormalizingBroker:
     def __init__(
         self,
         inner: Broker,
-        rates: FxRates,
+        rates: FxRates | BankOfCanadaRates,
         *,
         currency_for: Callable[[str], str] = currency_of,
         multiplier_for: Callable[[str], float] = lambda _s: 1.0,
+        native_equity: str | None = None,
     ) -> None:
+        # The currency ``inner.equity`` should be asked for and converted from. None asks for the
+        # caller's: Questrade reports the whole account in the currency it is asked for.
+        self._native_equity = native_equity
         self.inner = inner
         self.rates = rates
         self.name = inner.name
@@ -149,15 +203,26 @@ class CurrencyNormalizingBroker:
             })
         return self.inner.place_order(order)
 
-    # Account data stays in the broker's native currencies; only the paper book is converted.
+    def __getattr__(self, name: str) -> object:
+        # A broker's own extras (executions, lot_rules, verify_environment) pass straight through.
+        # Executions keep their native price and currency: the audit layer converts them by trade date.
+        return getattr(self.inner, name)
+
     def accounts(self) -> list[Account]:
         return self.inner.accounts()
 
     def positions(self, account_number: str) -> list[Position]:
-        return self.inner.positions(account_number)
+        """A real book's positions, in the numeraire, so the gates read them with the same units as a quote."""
+        out = []
+        for p in self.inner.positions(account_number):
+            f = self._factor(p.symbol)
+            out.append(p if f == 1.0 else p.model_copy(update={k: getattr(p, k) * f for k in _POSITION_VALUE_FIELDS}))
+        return out
 
     def equity(self, account_number: str, currency: str = "CAD") -> float:
-        return self.inner.equity(account_number, currency)
+        if self._native_equity is None or self._native_equity == currency.upper():
+            return self.inner.equity(account_number, currency)
+        return self.inner.equity(account_number, self._native_equity) * self.rates.rate(self._native_equity)
 
     def cancel_order(self, account_number: str, order_id: int) -> None:
         self.inner.cancel_order(account_number, order_id)

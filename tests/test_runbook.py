@@ -151,10 +151,13 @@ def test_the_one_shots_refuse_a_real_book(opts: SessionOptions) -> None:
 
 # ---------------------------------------------------------------- the desk's venue policy
 
-def test_ib_refuses_equities_unless_told_otherwise() -> None:
-    with pytest.raises(SessionError, match="ib_futures_only"):
+def test_ib_takes_derivatives_and_overseas_listings_but_not_north_american_equities() -> None:
+    with pytest.raises(SessionError, match="trade on Questrade"):
         start_session(_settings(), venue="ib", mode="paper", symbols="AAPL", strategy="bollinger")
-    sess._check_ib_policy(["GC", "MGC"], ["GC", "MGC"], "USD")       # roots are futures by definition
+    sess._check_ib_policy(["GC", "MGC"], ["GC", "MGC"])              # roots are futures by definition
+    sess._check_ib_policy(["7203.T", "VOD.L", "0700.HK"], [])        # overseas listings are IB's too
+    with pytest.raises(SessionError, match="not IB"):
+        sess._check_ib_policy(["7203.T"], [], futures_only=True)     # the knob narrows it back to futures
 
 
 # ---------------------------------------------------------------- built, on the paper broker
@@ -177,7 +180,7 @@ def test_kraken_sizes_in_its_own_lots(tmp_path: Path, monkeypatch: pytest.Monkey
     settings = _settings(tmp_path)
     session = build_session(settings, _kraken_plan(settings), feed=_KrakenFeed(), book=StrategyBook(default=EmaCrossover()))
     assert session.monitor.sizing_policy is not None
-    assert session.router.quantity_rule_for("AAA") is _KrakenFeed.rules["AAA"]
+    assert session.router.quantity_rule_for("AAA") == _KrakenFeed.rules["AAA"]
     assert session.exec_broker._cost_model.commission_bps == 26.0  # type: ignore[attr-defined]
 
 
@@ -201,7 +204,8 @@ def test_every_session_watches_for_a_stop_and_reads_guarded_quotes(tmp_path: Pat
     settings = _settings(tmp_path)
     session = build_session(settings, _plan(settings), feed=_Feed(), book=StrategyBook(default=EmaCrossover()))
     assert session.monitor.stop_sentinel_dir == Path(settings.state_dir)
-    assert session.exec_broker._feed.__class__.__name__ == "FreshQuoteBroker"  # type: ignore[attr-defined]
+    priced = session.exec_broker._feed  # type: ignore[attr-defined]
+    assert priced.__class__.__name__ == "CurrencyNormalizingBroker" and priced.inner.__class__.__name__ == "FreshQuoteBroker"
     assert session.router.position_cap_pct_for is not None
 
 

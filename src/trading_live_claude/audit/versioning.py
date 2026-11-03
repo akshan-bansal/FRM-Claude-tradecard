@@ -113,6 +113,7 @@ def gate_thresholds(router: object) -> dict[str, Any]:
         "force_exit_atr_mult": getattr(router, "force_exit_atr_mult", None),
         "on_size_cap_breach": getattr(router, "on_size_cap_breach", None),
         "heat_cap_pct": getattr(heat, "cap_pct", None),
+        "halt_scope": "paper" if getattr(ks, "paper", False) else "all",
         "max_drawdown_pct": getattr(ks, "max_drawdown_pct", None),
         "daily_loss_limit_pct": getattr(ks, "daily_loss_limit_pct", None),
     }

@@ -190,6 +190,7 @@ class Router:
         self.society_view: Callable[[str], tuple[float, str] | None] | None = None
         # Tradeable quantity per symbol for size-cap trims; whole units unless supplied.
         self.quantity_rule_for = quantity_rule_for or whole_units
+        self.price_currency = ""       # what the gate's prices are in, when a session normalises them
         # Per-name notional cap as a function of the symbol (e.g. volatility-scaled); falls back
         # to the flat max_position_notional_pct when not supplied.
         self.position_cap_pct_for = position_cap_pct_for
@@ -994,6 +995,7 @@ class Router:
             self._ledger_event("RISK_TRIMMED", trim, intent=intent)
         self._ledger_event("RISK_CHECK" if decision.accepted else "RISK_REJECTED", {
             "accepted": decision.accepted, "rejected_reasons": decision.rejected_reasons, "via": via,
+            "price_currency": self.price_currency or None,
             "symbol": intent.symbol, "action": intent.action.value, "broker": intent.broker,
             "requested_shares": requested_shares, "shares": intent.shares,
             "entry": intent.entry, "stop": intent.stop, "target": intent.target,
@@ -1089,7 +1091,10 @@ class Router:
         ledger: Ledger | None = None,
     ) -> "Router":
         journal = OrderJournal(state_dir)
-        ks = KillSwitch(state_dir, max_drawdown_pct=max_drawdown_pct, daily_loss_limit_pct=daily_loss_limit_pct)
+        # A simulated book's own drawdown stops paper, not money (risk/kill_switch.py).
+        simulated = mode in ("paper", "dry-run") or getattr(broker, "name", "") == "paper"
+        ks = KillSwitch(state_dir, max_drawdown_pct=max_drawdown_pct, daily_loss_limit_pct=daily_loss_limit_pct,
+                        paper=simulated)
         heat = PortfolioHeat(cap_pct=cap_pct)
         gate_kwargs: GateKwargs = {
             "ledger": ledger,

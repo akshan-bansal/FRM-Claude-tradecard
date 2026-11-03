@@ -64,7 +64,7 @@ def _portfolio(state: Path, root: Path, now: datetime) -> dict[str, Reading]:
 
 
 def _gates(state: Path, root: Path, now: datetime) -> dict[str, Reading]:
-    out: dict[str, Reading] = {"RG.HALT": (1.0 if (state / "HALTED").exists() else 0.0, now, "state/HALTED")}
+    out: dict[str, Reading] = {"RG.HALT": (1.0 if ((state / "HALTED").exists() or (state / "HALTED_PAPER").exists()) else 0.0, now, "state/HALTED")}
     rej = state / "rejected.jsonl"
     if rej.exists():
         rows = list(read_jsonl(rej))

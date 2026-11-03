@@ -75,8 +75,8 @@ stays as a thin layer over it, or is kept beside it when they do different jobs.
 | Gross leverage | Caller passes open notional, tracked within a poll | Gate reads the book itself (`_book_notional`) | Theirs in the gate, recorded for replay; my same-poll tracking stays for the heat and position counts |
 | Same-poll sizing | Tracks room as entries go | Parallel allocation sizes them jointly | Theirs for sizing; my tracking remains the safety net |
 | Whole-unit sizing | Open question 13 | `QuantityRule` | **Answered by theirs** |
-| Home currency | Open question 2, warns only | `CurrencyNormalizingBroker` in CAD, used by `paper_global.py` only | **Still open for the session runners**: their QT and IB paths did not convert either. The tool now exists |
-| IB on equities | Open question 6 | `desk_policy.assert_ib_futures_only` | **Answered by theirs**: enforced in paper and money. `ib_futures_only: false` undoes it |
+| Home currency | Open question 2, warns only | `CurrencyNormalizingBroker` in CAD, used by `paper_global.py` only | Decided 2026-11-03: CAD on every runner, at the Bank of Canada's rate |
+| IB on equities | Open question 6 | `desk_policy.assert_ib_futures_only` | Decided 2026-11-03: derivatives and overseas listings, never North American equities. `ib_futures_only: true` narrows it to futures |
 | IB prompts | Reject by default, capped | Auto-confirm, capped at a limit | Mine: this path only runs with real money. Their cap constant goes away only as a duplicate |
 | Kraken order ids | SHA-256 fold, `broker_ref`, real-txid cancel | SHA-256 fold | Same fix. Mine keeps the txid map |
 | Kraken order size | None | `lot_rules` | Theirs added |
@@ -99,7 +99,7 @@ These arrive with their code, and are the things most likely to move results:
 - **Basket gate:** on whenever the card is on, as theirs. A card session needs a card-signed basket before it enters.
 - **Paper fills:** every runner fills at the touch here. Their runners filled at the mid by default, so paper results here
   will read slightly worse than the same session there.
-- **IB:** refuses North American equities unless `ib_futures_only: false`. `DEFAULT_IB_SYMBOLS` is kept but needs that setting.
+- **IB:** refuses North American equities, so `DEFAULT_IB_SYMBOLS` is kept but refused. Pass `--symbols` or `--futures`.
 - **Flatten on exit:** their `signal` defaults to closing all positions when a paper session stops. Your runbook passes
   `--no-flatten-on-exit`. It is paper-only and stays so; a money session never flattens by itself.
 

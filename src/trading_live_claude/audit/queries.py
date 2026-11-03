@@ -112,36 +112,59 @@ def by_version(rows: Iterable[Mapping[str, Any]], version: str) -> list[dict[str
             or str(r.get("session_id")) in sessions]
 
 
-def fill_quality(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _fx_factor(frm: object, to: object, ts: object, fx: Any) -> float | None:
+    """What one unit of ``frm`` is worth in ``to`` on the row's day. None when it cannot be said."""
+    if not frm or not to or str(frm).upper() == str(to).upper():
+        return 1.0
+    if fx is None:
+        return None
+    try:
+        on = datetime.fromisoformat(str(ts)).date()
+    except ValueError:
+        return None
+    a, b = fx.rate(str(frm), on).rate, fx.rate(str(to), on).rate
+    return a / b if a and b else None
+
+
+def fill_quality(rows: Iterable[Mapping[str, Any]], fx: Any = None) -> list[dict[str, Any]]:
     """What fills actually cost, per stream, against the price the gate saw when it decided.
 
     Slippage is signed against the trader, so it covers half the spread as well as any move. Fees come from
     the execution report. Compare a paper stream with its money stream to see whether paper's costs
-    are honest, then set ``paper_costs`` to what was measured.
+    are honest, then set ``paper_costs`` to what was measured. A money fill reports its listing currency
+    while the gate decided in the home currency, so it is converted at that day's rate. One that cannot be
+    converted is counted in ``unconverted``, not read as an enormous slippage.
     """
     rows = list(rows)
-    reference = {r.get("intent_id"): float((r.get("payload") or {}).get("entry") or 0.0)
-                 for r in rows if r.get("event") == "RISK_CHECK"}
+    reference = {r.get("intent_id"): (r.get("payload") or {}) for r in rows if r.get("event") == "RISK_CHECK"}
     groups: dict[tuple[str, str], dict[str, float]] = {}
     for r in rows:
         if r.get("event") != "EXECUTION_REPORTED":
             continue
         p = r.get("payload") or {}
-        entry = reference.get(r.get("intent_id")) or 0.0
+        ref = reference.get(r.get("intent_id")) or {}
+        entry = float(ref.get("entry") or 0.0)
         qty, price = float(p.get("quantity") or 0.0), float(p.get("price") or 0.0)
         if entry <= 0 or qty <= 0 or price <= 0:
             continue
         g = groups.setdefault((str(r.get("stream")), str(r.get("mode"))),
-                              {"fills": 0, "notional": 0.0, "slip": 0.0, "fees": 0.0})
+                              {"fills": 0, "notional": 0.0, "slip": 0.0, "fees": 0.0, "unconverted": 0})
+        factor = _fx_factor(p.get("currency"), ref.get("price_currency"), r.get("ts"), fx)
+        if factor is None:
+            g["unconverted"] += 1
+            continue
+        price *= factor
         against = (price - entry) if p.get("side") == "Buy" else (entry - price)
         g["fills"] += 1
         g["notional"] += qty * price
         g["slip"] += against / entry * 10_000.0 * qty * price
-        g["fees"] += float(p.get("fee") or 0.0)
+        g["fees"] += float(p.get("fee") or 0.0) * factor
     return [{"stream": s, "mode": m, "fills": int(g["fills"]), "notional": round(g["notional"], 2),
-             "slippage_bps": round(g["slip"] / g["notional"], 2),
-             "fee_bps": round(g["fees"] / g["notional"] * 10_000.0, 2),
-             "all_in_bps": round(g["slip"] / g["notional"] + g["fees"] / g["notional"] * 10_000.0, 2)}
+             "slippage_bps": round(g["slip"] / g["notional"], 2) if g["notional"] else 0.0,
+             "fee_bps": round(g["fees"] / g["notional"] * 10_000.0, 2) if g["notional"] else 0.0,
+             "all_in_bps": (round(g["slip"] / g["notional"] + g["fees"] / g["notional"] * 10_000.0, 2)
+                            if g["notional"] else 0.0),
+             "unconverted": int(g["unconverted"])}
             for (s, m), g in sorted(groups.items())]
 
 

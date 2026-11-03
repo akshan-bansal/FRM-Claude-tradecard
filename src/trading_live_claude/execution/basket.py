@@ -40,13 +40,14 @@ def normalize(symbols: list[str] | tuple[str, ...] | frozenset[str]) -> tuple[st
 
 
 def ib_refusal(symbol: str, universe_path: Path = Path("config/futures_universe.json")) -> str | None:
-    """Why ``symbol`` cannot be in an IB basket: the IB book carries listed futures only.
+    """Why ``symbol`` cannot be in an IB basket. IB carries derivatives and overseas listings.
 
-    A symbol qualifies when its root has a roll calendar (``ROOT_CALENDARS``, the registry
-    ``classify_instrument`` reads to call an IB symbol a future) or is a contract in the futures
-    universe, spelled with or without the leading slash. Equities trade on Questrade (desk venue split).
+    A root with a roll calendar (``ROOT_CALENDARS``, the registry ``classify_instrument`` reads to call
+    an IB symbol a future) or in the futures universe qualifies, spelled with or without the leading
+    slash. North American equities trade on Questrade and crypto on Kraken (desk venue split).
     """
     from ..data.futures_calendar import ROOT_CALENDARS
+    from ..desk_policy import VenuePolicyError, assert_ib_no_questrade_equities, is_crypto
     root = symbol.strip().upper().lstrip("/")
     if root in ROOT_CALENDARS:
         return None
@@ -57,7 +58,13 @@ def ib_refusal(symbol: str, universe_path: Path = Path("config/futures_universe.
         roots = set()
     if root in roots:
         return None
-    return f"{symbol} has no futures roll calendar; IB carries futures only (equities trade on Questrade)"
+    if is_crypto(symbol.strip().upper()):
+        return f"{symbol} trades on Kraken, not IB (desk venue split)"
+    try:
+        assert_ib_no_questrade_equities([symbol.strip().upper()])
+    except VenuePolicyError as err:
+        return str(err)
+    return None
 
 
 def analysis_hash(analysis: Any) -> str:

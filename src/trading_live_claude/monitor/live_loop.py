@@ -148,7 +148,10 @@ class LiveMonitor:
         oversold_entry_only: frozenset[str] | set[str] | None = None,
         parallel_sizing: bool = False,
         mute_symbols: frozenset[str] | set[str] | None = None,
+        weight_bias_range: tuple[float, float] = (0.1, 3.0),
     ) -> None:
+        self.weight_bias_range = weight_bias_range
+        self._halt_noted = False
         # Warm-up cadence: poll faster for the first ``warmup_minutes`` after launch, then fall back
         # to ``interval_seconds`` without a restart (a restart would flatten the book). Used to
         # re-establish positions quickly after a flatten-on-exit. None/0 disables it.
@@ -744,7 +747,7 @@ class LiveMonitor:
                         weight_bias = float(self.weight_bias_for(symbol))
                     except Exception:                         # never break the poll on allocator I/O
                         weight_bias = 1.0
-                    weight_bias = max(0.1, min(3.0, weight_bias))
+                    weight_bias = max(self.weight_bias_range[0], min(self.weight_bias_range[1], weight_bias))
                     if weight_bias != 1.0:
                         conviction *= weight_bias
                         self._weight_bias_last[symbol] = weight_bias
@@ -1212,6 +1215,17 @@ class LiveMonitor:
 
         inner.strategy_version_for = resolve
 
+    def _note_halt(self) -> None:
+        """Alert once when this session's kill-switch trips, and again if it clears and trips again."""
+        ks = getattr(getattr(self.router, "inner", self.router), "kill_switch", None)
+        state = ks.state() if ks is not None else None
+        halted = bool(state is not None and state.halted)
+        if halted and not self._halt_noted:
+            paper_only = bool(getattr(ks, "paper", False)) and ks.paper_only_halt()
+            self.on_event(MonitorEvent(datetime.now(UTC), "*", "halt", 0.0,
+                                       {"reason": state.reason, "paper_only": paper_only}))
+        self._halt_noted = halted
+
     def request_stop(self) -> None:
         """Ask ``run_forever`` to leave the loop after the current poll.
 
@@ -1545,7 +1559,12 @@ class LiveMonitor:
                 return
             while not self._stop_requested:
                 try:
+                    self._note_halt()
                     self.step()
+                    # Between polls and on this thread: a refresh reads candles through the same broker.
+                    refresh = getattr(self.weight_bias_for, "maybe_refresh", None)
+                    if callable(refresh):
+                        refresh()
                 except Exception as e:  # pragma: no cover
                     log.exception("monitor.step.error", error=str(e))
                 i += 1

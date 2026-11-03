@@ -179,7 +179,7 @@ def analyse(state_dir: Path, *, src: Path | None = None) -> Report:
     rep.venues = sorted({str(r["venue"]) for r in [*fills, *paper_orders] if r.get("venue")})
     rep.sessions = sorted({str(r["session_id"]) for r in [*fills, *paper_orders, *equity] if r.get("session_id")})
     rep.accepted_entries = sum(1 for o in orders if o.get("accepted") and o.get("action") == "Buy")
-    rep.halted_now = (state_dir / "HALTED").exists()
+    rep.halted_now = (state_dir / "HALTED").exists() or (state_dir / "HALTED_PAPER").exists()
 
     seen: set[tuple[Any, str]] = set()
     for r in rejected:

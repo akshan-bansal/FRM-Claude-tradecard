@@ -281,7 +281,7 @@ def test_kill_switch_auto_halt_on_drawdown_breach(tmp_path: Path) -> None:
 
     # First journal write — establishes baseline; sentinel absent
     pb._journal_equity()
-    ks = KillSwitch(journal_dir)
+    ks = KillSwitch(journal_dir, paper=True)
     assert not ks.state().halted
 
     # Simulate a drawdown that beats whatever the current setting is by 2x, guaranteeing

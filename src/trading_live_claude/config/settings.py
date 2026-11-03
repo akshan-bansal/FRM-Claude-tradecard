@@ -16,7 +16,7 @@ Precedence:
 from __future__ import annotations
 
 import os
-from functools import lru_cache
+import threading
 from pathlib import Path
 from typing import Any, Literal
 
@@ -173,7 +173,13 @@ class Settings(BaseSettings):
     max_round_trip_cost_ratio: float = Field(default=0.0, ge=0.0)  # 0 = off
     params: Literal["default", "wf", "calibrated"] = "default"     # where strategy parameters come from
     sizing_v2: bool = True                   # Kraken's own lot rules; refuses to start without them
-    ib_futures_only: bool = True             # desk_policy: IB carries futures; equities trade on Questrade
+    ib_futures_only: bool = False            # True narrows IB to futures. North American equities never go there
+    # The hooks' own settings (intel/routing.py, monitor/live_loop.py).
+    persistence_min_polls: int = Field(default=5, ge=1)
+    persistence_max_age_hours: float = Field(default=6.0, gt=0.0)   # an older run counts as no run, and is logged
+    allocator_refresh_seconds: float = Field(default=3600.0, ge=0.0)  # weights recomputed between polls; 0 = boot only
+    allocator_bias_floor: float = Field(default=0.1, gt=0.0)
+    allocator_bias_cap: float = Field(default=3.0, gt=0.0)
     spectral_var_cap: float | None = Field(default=None, gt=0.0, le=1.0)  # None = gate off
     spectral_var_level: float = Field(default=0.99, gt=0.5, lt=1.0)
     spectral_var_horizon: int = Field(default=1, ge=1, le=60)
@@ -321,6 +327,11 @@ _TRADING_KNOB_FIELDS: tuple[str, ...] = (
     "params",
     "sizing_v2",
     "ib_futures_only",
+    "persistence_min_polls",
+    "persistence_max_age_hours",
+    "allocator_refresh_seconds",
+    "allocator_bias_floor",
+    "allocator_bias_cap",
     "require_basket",
     "spectral_var_cap",
     "spectral_var_level",
@@ -397,9 +408,44 @@ def write_trading_yaml(updates: dict[str, Any], path: Path | None = None) -> Non
     tmp.replace(resolved)
 
 
-@lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    yaml_data = _load_trading_yaml()
-    s = Settings(**yaml_data)
-    s.ensure_dirs()
-    return s
+def _file_stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+class _SettingsCache:
+    """``get_settings()``: one ``Settings``, rebuilt when something it was built from changes.
+
+    Those are ``trading.yaml``, ``.env`` and the environment variables it reads. Until 2026-11-03 this
+    was a plain cache, so ``autonomous_run`` writing to the environment after the first call changed
+    nothing. A session keeps the object it started with: nothing here changes a running book.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._stamp: object = None
+        self._value: Settings | None = None
+
+    @staticmethod
+    def _current_stamp() -> object:
+        env = tuple(os.environ.get(name.upper()) for name in Settings.model_fields)
+        return _file_stamp(_resolve_yaml_path()), _file_stamp(Path(".env")), env
+
+    def __call__(self) -> Settings:
+        stamp = self._current_stamp()
+        with self._lock:
+            if self._value is None or stamp != self._stamp:
+                value = Settings(**_load_trading_yaml())
+                value.ensure_dirs()
+                self._value, self._stamp = value, stamp
+            return self._value
+
+    def cache_clear(self) -> None:
+        with self._lock:
+            self._value, self._stamp = None, None
+
+
+get_settings = _SettingsCache()

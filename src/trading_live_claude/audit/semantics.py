@@ -42,7 +42,8 @@ VOCAB_VERSION = 1
 WINDOW = timedelta(days=30)
 CA_SUFFIXES = (".TO", ".V", ".CN", ".NE", ".TSX", ".TSXV")
 BOC_SERIES = {"USD": "FXUSDCAD", "EUR": "FXEURCAD", "GBP": "FXGBPCAD", "JPY": "FXJPYCAD",
-              "CHF": "FXCHFCAD", "AUD": "FXAUDCAD"}
+              "CHF": "FXCHFCAD", "AUD": "FXAUDCAD", "HKD": "FXHKDCAD", "NZD": "FXNZDCAD",
+              "SGD": "FXSGDCAD", "SEK": "FXSEKCAD", "NOK": "FXNOKCAD", "KRW": "FXKRWCAD"}
 # Stablecoins the venue quotes in are converted at the USD rate, and the row says so.
 USD_PEGGED = {"USDT", "USDC"}
 

@@ -22,6 +22,7 @@ import hashlib
 import json
 import signal
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -31,14 +32,14 @@ from ..analysis.params import PARAMS_MODES, build_strategy, running_params
 from ..analysis.symbol_validation import preflight
 from ..analysis.universe import CRYPTO_SLEEVE, validated_for
 from ..audit.ledger import Ledger
-from ..audit.semantics import instrument_currency
 from ..audit.versioning import session_provenance
 from ..brokers.base import Broker, BrokerError
 from ..brokers.fresh import guard_feed
+from ..brokers.fx import BankOfCanadaRates, CurrencyNormalizingBroker
 from ..brokers.paper import PaperBroker
 from ..data.cache import CandleCache
 from ..data.market import MarketData
-from ..desk_policy import VenuePolicyError, assert_ib_futures_only, assert_single_currency
+from ..desk_policy import VenuePolicyError, assert_ib_futures_only, assert_ib_no_questrade_equities
 from ..execution.approval import wire_card_approval
 from ..execution.approval_asgi import BookRef
 from ..execution.basket import attach_basket_gate
@@ -64,6 +65,7 @@ from ..signals.oversold_entry import OversoldEntry
 from ..signals.profit_lock import ProfitLock
 from ..strategies import STRATEGIES
 from ..strategies.base import Strategy
+from ..venues import currency_of
 from .alerter import AlertConfig, Alerter
 from .live_loop import LiveMonitor, MonitorEvent, monitor_policy
 
@@ -86,6 +88,8 @@ NECESSARY_DIFFERENCES = frozenset({"mode", "money", "stream", "strict_ledger", "
 DEFAULT_PAPER_COSTS: dict[str, dict[str, Any]] = {v: asdict(VenueCostModel.for_venue(v)) for v in VENUES}
 _BASKET_VENUES = {"questrade": "qt", "kraken": "kraken", "ib": "ib"}
 _ASSET_CLASSES = {"questrade": "equity", "kraken": "crypto", "ib": "multi"}
+# The currency a venue's own equity figure is in, where it cannot be asked for the home currency.
+_NATIVE_EQUITY = {"kraken": "USD", "ib": "USD"}
 _STREAMS: dict[tuple[str, bool], str] = {
     ("questrade", False): "qt-paper", ("questrade", True): "qt-live",
     ("kraken", False): "kraken", ("kraken", True): "kraken-live",
@@ -185,6 +189,9 @@ class SessionPlan:
     strategy_params: dict[str, dict[str, Any]]
     account_currency: str
     interval_seconds: int
+    allocator_refresh_seconds: float
+    allocator_bias_range: tuple[float, float]
+    persistence: dict[str, Any]
     warmup_interval_seconds: int
     warmup_minutes: float
     emit_on_change_only: bool
@@ -308,7 +315,7 @@ def resolve_symbols(settings: Any, venue: str, symbols: str | Sequence[str] | No
         wanted = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     else:
         wanted = [s.strip().upper() for s in (symbols or ())]
-    if not wanted:
+    if not wanted and not futures:     # a futures run names its whole book
         wanted = {"kraken": list(CRYPTO_SLEEVE), "ib": list(DEFAULT_IB_SYMBOLS)}.get(venue, settings.symbols_list)
     return list(dict.fromkeys([*wanted, *book.per_symbol, *(s.upper() for s in futures)]))
 
@@ -344,8 +351,11 @@ def plan_session(settings: Any, *, venue: str, mode: RouterMode, symbols: Sequen
         strategy_map={s: v.name for s, v in book.per_symbol.items()},
         params=str(pick(o.params, settings.params)),
         strategy_params={s: running_params(book.strategy_for(s)) for s in symbols},
-        account_currency=(o.account_currency or ("USD" if venue in ("kraken", "ib") else settings.account_currency)),
+        account_currency=o.account_currency or settings.account_currency,
         interval_seconds=int(pick(o.interval, interval)),
+        allocator_refresh_seconds=float(settings.allocator_refresh_seconds),
+        allocator_bias_range=(float(settings.allocator_bias_floor), float(settings.allocator_bias_cap)),
+        persistence={"min_polls": settings.persistence_min_polls, "max_age_hours": settings.persistence_max_age_hours},
         warmup_interval_seconds=int(pick(o.warmup_interval, settings.warmup_interval_seconds)),
         warmup_minutes=float(pick(o.warmup_minutes, settings.warmup_minutes)),
         emit_on_change_only=not bool(pick(o.level, False)),
@@ -598,6 +608,45 @@ def venue_weight_bias(venue: str, market: Any, symbols: Sequence[str], overlay_f
     return allocator_weight_bias(market, symbols, overlay_for, emit=emit)
 
 
+class RefreshingBias:
+    """A venue's allocator bias, recomputed on a cadence so a long session's sizing follows the book.
+
+    ``LiveMonitor`` calls ``maybe_refresh`` between polls. A recompute that fails or finds nothing keeps
+    the last good weights, and each new set goes to the ledger, so an order's size can be traced to it.
+    """
+
+    def __init__(self, compute: Callable[[], Any], initial: Any, refresh_seconds: float, *, symbols: Sequence[str],
+                 ledger: Ledger | None = None, clock: Callable[[], float] = time.monotonic) -> None:
+        self._compute, self._current, self._every = compute, initial, float(refresh_seconds)
+        self._symbols, self._ledger, self._clock = list(symbols), ledger, clock
+        self._at = clock()
+
+    @property
+    def applies_overlay(self) -> bool:
+        return bool(getattr(self._current, "applies_overlay", False))
+
+    def __call__(self, symbol: str) -> float:
+        return float(self._current(symbol)) if self._current is not None else 1.0
+
+    def maybe_refresh(self) -> None:
+        if self._clock() - self._at < self._every:
+            return
+        self._at = self._clock()
+        try:
+            fresh = self._compute()
+        except Exception as e:
+            log.warning("session.allocator.refresh_failed", error=str(e))
+            return
+        if fresh is None:
+            log.warning("session.allocator.refresh_empty")
+            return
+        self._current = fresh
+        weights = {s: round(self(s), 4) for s in self._symbols}
+        log.info("session.allocator.refreshed", weights=weights)
+        if self._ledger is not None:
+            self._ledger.append("ALLOCATION_REFRESHED", {"weights": weights})
+
+
 # ---------------------------------------------------------------- alerts
 
 def build_alerter(settings: Any) -> Alerter:
@@ -607,7 +656,7 @@ def build_alerter(settings: Any) -> Alerter:
                                email_to=settings.alert_email_to))
 
 
-def alert_emitter(alerter: Alerter, book: StrategyBook, *, label: str = "",
+def alert_emitter(alerter: Alerter, book: StrategyBook, *, label: str = "", currency: str = "",
                   emit: Emit = _quiet) -> Callable[[MonitorEvent], None]:
     """The ``on_event`` for a monitor: echo each event, then format and send entries, exits and hedges."""
     from ..intel.notification import format_entry, format_exit, format_hedge
@@ -616,7 +665,12 @@ def alert_emitter(alerter: Alerter, book: StrategyBook, *, label: str = "",
         state = "NEW" if ev.is_transition else f"persisting ({ev.poll_count})"
         emit(f"{label} {ev.kind.upper()} {ev.symbol} @ {ev.price:.4f} ({state}) detail={ev.detail}".strip())
         message: tuple[str, str] | None = None
-        if ev.kind == "hedge":
+        if ev.kind == "halt":
+            next_step = ("Paper has stopped taking new risk. Money sessions keep running. To stop them too: "
+                         'trading kill --from-paper --confirm "HALT MONEY"' if ev.detail.get("paper_only")
+                         else "No new risk until a human clears it. Closing orders still pass.")
+            message = ("KILL-SWITCH", f"{ev.detail.get('reason')}\n{next_step}")
+        elif ev.kind == "hedge":
             message = format_hedge(symbol=ev.symbol, detail=ev.detail)
         elif ev.kind == "entry":
             # wf_record says whether this symbol cleared walk-forward; without it the alert says so.
@@ -631,7 +685,8 @@ def alert_emitter(alerter: Alerter, book: StrategyBook, *, label: str = "",
                                   detail=ev.detail if isinstance(ev.detail, dict) else None)
         if message is not None:
             # The label says which session this is: a phone alert must show whether real money moved.
-            alerter.send(f"{label} {message[0]}".strip(), message[1])
+            prices = f"Prices in {currency}.\n" if currency and ev.kind != "halt" else ""
+            alerter.send(f"{label} {message[0]}".strip(), prices + message[1])
     return _on_event
 
 
@@ -740,8 +795,13 @@ def _card_thesis(engine: VSInvestmentEngine, overlay_for: Any, weight_bias: Any,
     return _thesis
 
 
+def _home_rates(settings: Any, currency: str) -> BankOfCanadaRates:
+    """Rates into the home currency, from the Bank of Canada series the audit layer already keeps."""
+    return BankOfCanadaRates(Path(settings.state_dir) / "fx", currency)
+
+
 def _sizing_policy(plan: SessionPlan, feed: Broker, router: Any, state_dir: Path, session_id: str | None,
-                   emit: Emit) -> SizingPolicy | None:
+                   rates: Any, emit: Emit) -> SizingPolicy | None:
     """Kraken sizes in its own lots, and the Router's trim has to round to the same ones.
 
     Without its real lot rules a pair would be sized on guesses, so the session refuses instead.
@@ -753,6 +813,8 @@ def _sizing_policy(plan: SessionPlan, feed: Broker, router: Any, state_dir: Path
     missing = sorted(set(wanted) - set(rules))
     if missing:
         raise SessionError(f"No Kraken lot rules for {missing}; not starting. sizing_v2 off falls back to whole units.")
+    # Kraken states a pair's minimum value in its quote currency; the sizer works in the home currency.
+    rules = {s: replace(r, min_notional=r.min_notional * rates.rate(currency_of(s))) for s, r in rules.items()}
     getattr(router, "inner", router).quantity_rule_for = rules.__getitem__
     emit("sizing v2 ON. Kraken lot rules:")
     for sym, rule in rules.items():
@@ -763,6 +825,9 @@ def _sizing_policy(plan: SessionPlan, feed: Broker, router: Any, state_dir: Path
 
 def _announce(plan: SessionPlan, session_id: str | None, state_dir: Path, emit: Emit) -> None:
     """Say which optional behaviour this session is running with."""
+    emit(f"prices in {plan.account_currency}: every quote, position and gate figure is converted at the Bank of "
+         "Canada's daily rate. A fill keeps its own currency.")
+    emit(f"allocator weights: {'every ' + format(plan.allocator_refresh_seconds, 'g') + 's' if plan.allocator_refresh_seconds else 'once at startup'}.")
     emit(f"sizing: {'parallel (joint allocation per poll)' if plan.parallel_sizing else 'sequential'}.")
     if plan.profit_lock:
         emit(f"profit lock ON: arms at +1 ATR, giveback 3 -> 1 ATR by +4 ATR. Exempt: {', '.join(plan.profit_lock_exempt) or 'none'}.")
@@ -804,13 +869,15 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
 
     # Execution. The one thing that makes a session paper: its broker simulates fills against the feed.
     # Everything downstream is the same object graph, and both read quotes through the stale-quote guard.
-    guarded = guard_feed(feed, settings)
+    rates = _home_rates(settings, plan.account_currency)
+    guarded = CurrencyNormalizingBroker(guard_feed(feed, settings), rates, native_equity=_NATIVE_EQUITY.get(plan.venue))
     exec_broker: Broker = guarded
     cost_model = VenueCostModel(**plan.paper_costs) if plan.paper_costs else None
     if plan.paper_equity is not None:
         paper = PaperBroker(feed=guarded, starting_equity=plan.paper_equity, journal_dir=state_dir,
                             slippage_bps=cost_model.slippage_bps if cost_model else 5.0, cost_model=cost_model,
-                            fill_model="touch", session_id=plan.resume_session or None)
+                            fill_model="touch", session_id=plan.resume_session or None,
+                            book_currency=plan.account_currency)
         if plan.resume_session:
             try:
                 restored = paper.resume()
@@ -824,12 +891,8 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
 
     # Data.
     preflight(feed, symbols, emit=emit)
-    mixed = [s for s in symbols if instrument_currency(s) not in (None, plan.account_currency)]
-    if mixed:
-        emit(f"WARNING: {', '.join(mixed)} not priced in the account's {plan.account_currency}. The gates compare "
-             "notional in the listing currency with equity in the account's, unconverted. A paper account is "
-             "single-currency and will not show this.")
-    market = MarketData(exec_broker, cache=CandleCache(settings.data_cache_dir))
+    # Converted bars in a cache of their own: the same path holds native bars from other runners.
+    market = MarketData(exec_broker, cache=CandleCache(Path(settings.data_cache_dir) / f"numeraire_{plan.account_currency}"))
 
     # Audit, before anything can trade.
     ledger = _open_ledger(settings, plan, getattr(exec_broker, "session_id", None))
@@ -843,6 +906,9 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
     if overlay_for is None:
         emit("intel overlay OFF " + ("(no WORLDMONITOR_API_KEY)." if plan.intel_overlay else "(turned off)."))
     weight_bias = venue_weight_bias(plan.venue, market, symbols, overlay_for, emit=emit)
+    if plan.allocator_refresh_seconds > 0:
+        weight_bias = RefreshingBias(lambda: venue_weight_bias(plan.venue, market, symbols, overlay_for), weight_bias,
+                                     plan.allocator_refresh_seconds, symbols=symbols, ledger=ledger)
 
     # Risk gates.
     budget: dict[str, Any] = {}
@@ -862,7 +928,8 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
                                     horizon_days=plan.spectral_var_horizon)
     if spectral is not None:
         emit(f"spectral VaR gate ON: {spectral.thresholds()}")
-    sizing_policy = _sizing_policy(plan, feed, router, state_dir, session_id, emit)
+    router.price_currency = plan.account_currency
+    sizing_policy = _sizing_policy(plan, feed, router, state_dir, session_id, rates, emit)
     monitor_ref: list[LiveMonitor] = []
     if plan.require_card:
         wiring = wire_card_approval(
@@ -901,10 +968,14 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
     monitor = LiveMonitor(
         broker=exec_broker, market=market, strategy=book.default, sizer=PositionSizer(risk_pct=plan.risk_per_trade),
         router=router, account_number=account, symbols=symbols, interval_seconds=plan.interval_seconds,
-        on_event=alert_emitter(alerter, book, label=label, emit=emit), account_currency=plan.account_currency,
+        on_event=alert_emitter(alerter, book, label=label, currency=plan.account_currency, emit=emit),
+        account_currency=plan.account_currency, weight_bias_range=plan.allocator_bias_range,
         emit_on_change_only=plan.emit_on_change_only, strategy_map=dict(book.per_symbol) or None,
         hedge_symbol=plan.hedge_symbol or None, overlay_for=overlay_for, interpret_for=interpret_for,
-        weight_bias_for=weight_bias, persistence_for=PersistenceGate(class_overrides=class_overrides),
+        weight_bias_for=weight_bias,
+        persistence_for=PersistenceGate(min_polls=plan.persistence["min_polls"],
+                                        max_age_hours=plan.persistence["max_age_hours"],
+                                        class_overrides=class_overrides),
         sizing_policy=sizing_policy, flatten_on_exit=plan.flatten_on_exit, stop_sentinel_dir=state_dir,
         warmup_interval_seconds=plan.warmup_interval_seconds or None, warmup_minutes=plan.warmup_minutes,
         profit_lock=ProfitLock() if plan.profit_lock else None, profit_lock_exempt=set(plan.profit_lock_exempt),
@@ -941,8 +1012,8 @@ def start_session(settings: Any, *, venue: str, mode: RouterMode, symbols: str |
     plan = plan_session(settings, venue=venue, mode=mode, symbols=wanted, book=book, options=o, rehearsal=rehearsal)
     if plan.paper_equity is None and (o.resume_session or o.close_symbols or o.trim_to_slots):
         raise SessionError("--resume-session, --close-symbols and --trim-to-slots act on a simulated book only.")
-    if venue == "ib" and settings.ib_futures_only:
-        _check_ib_policy(wanted, futures, plan.account_currency)
+    if venue == "ib":
+        _check_ib_policy(wanted, futures, futures_only=settings.ib_futures_only)
     feed, keepalive = venue_feed(settings, venue, money=plan.money, transport=transport, futures=futures)
     return build_session(settings, plan, feed=feed, book=book, account_number=account_number,
                          live_confirmation=live_confirmation, expected_env=expected_env,
@@ -952,15 +1023,15 @@ def start_session(settings: Any, *, venue: str, mode: RouterMode, symbols: str |
                          trim_to_slots=o.trim_to_slots, label=label or f"{venue}-{mode}", emit=emit)
 
 
-def _check_ib_policy(symbols: Sequence[str], futures: Sequence[str], currency: str) -> None:
-    """The desk's split (desk_policy.py): IB carries futures, equities trade on Questrade, one currency a book."""
+def _check_ib_policy(symbols: Sequence[str], futures: Sequence[str], *, futures_only: bool = False) -> None:
+    """The desk's split (desk_policy.py): IB carries derivatives and overseas listings; North American
+    equities trade on Questrade. ``ib_futures_only`` narrows it to futures."""
     roots = {r.upper().lstrip("/") for r in futures}
     named = [f"/{s.lstrip('/')}" if s.lstrip("/") in roots else s for s in symbols]
     try:
-        assert_ib_futures_only(named)
-        assert_single_currency(named, currency)
+        (assert_ib_futures_only if futures_only else assert_ib_no_questrade_equities)(named)
     except VenuePolicyError as e:
-        raise SessionError(f"{e} Set ib_futures_only: false in trading.yaml to run equities on IB anyway.") from e
+        raise SessionError(str(e)) from e
 
 
 def add_session_args(ap: argparse.ArgumentParser) -> None:

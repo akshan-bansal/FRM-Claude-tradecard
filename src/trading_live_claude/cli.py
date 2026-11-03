@@ -555,21 +555,33 @@ def doctor() -> None:
 
 
 @app.command()
-def kill(reason: str = typer.Option("manual", help="Reason recorded in state/HALTED")) -> None:
+def kill(
+    reason: str = typer.Option("manual", help="Reason recorded in state/HALTED"),
+    from_paper: bool = typer.Option(False, "--from-paper", help="Approve a paper halt stopping money too. Needs --confirm."),
+    confirm: str = typer.Option("", help='With --from-paper, must equal: HALT MONEY'),
+) -> None:
     """Trip the kill-switch immediately. While tripped the router takes nothing but closing orders."""
     settings = get_settings()
-    KillSwitch(settings.state_dir).trip(reason=reason)
+    if from_paper:
+        try:
+            reason = KillSwitch(settings.state_dir).promote_paper_halt(confirm)
+        except (PermissionError, ValueError) as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=2) from e
+    else:
+        KillSwitch(settings.state_dir).trip(reason=reason)
     console.print(f"[red]Kill-switch tripped: {reason}[/red]")
 
 
 @app.command("clear-kill")
 def clear_kill(
     ack: str = typer.Option(..., help='Must equal: I HAVE INVESTIGATED'),
+    paper: bool = typer.Option(False, "--paper", help="Clear only the paper halt (state/HALTED_PAPER)."),
 ) -> None:
     """Clear the kill-switch. Requires explicit ack phrase."""
     settings = get_settings()
     try:
-        KillSwitch(settings.state_dir).clear(ack)
+        KillSwitch(settings.state_dir, paper=paper).clear(ack)
         console.print("[yellow]Kill-switch cleared.[/yellow]")
     except PermissionError as e:
         console.print(f"[red]{e}[/red]")
@@ -627,6 +639,9 @@ def risk_report() -> None:
     t.add_row("kill switch", "HALTED" if ks.halted else "ok")
     if ks.halted:
         t.add_row("reason", ks.reason)
+    paper_halt = KillSwitch(settings.state_dir, paper=True)
+    if paper_halt.paper_only_halt():
+        t.add_row("paper halt", f"{paper_halt.state().reason} (money still running)")
     console.print(t)
 
 
@@ -1524,11 +1539,10 @@ def autonomous_run() -> None:
     if not settings.autonomous_enabled:
         console.print("[red]AUTONOMOUS_ENABLED is false. Aborting.[/red]")
         raise typer.Exit(code=2)
-    if KillSwitch(settings.state_dir).state().halted:
+    chosen_account = os.environ.get("AUTONOMOUS_ACCOUNT_RUNTIME", settings.autonomous_account).lower()
+    if KillSwitch(settings.state_dir, paper=chosen_account == "paper").state().halted:
         console.print("[red]Kill-switch tripped. Aborting.[/red]")
         raise typer.Exit(code=2)
-
-    chosen_account = os.environ.get("AUTONOMOUS_ACCOUNT_RUNTIME", settings.autonomous_account).lower()
     if chosen_account not in {"paper", "practice", "live"}:
         console.print(f"[red]Invalid AUTONOMOUS_ACCOUNT_RUNTIME='{chosen_account}'.[/red]")
         raise typer.Exit(code=2)

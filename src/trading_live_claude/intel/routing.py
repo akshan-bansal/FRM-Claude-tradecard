@@ -19,11 +19,14 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from trading_live_claude.data.futures_calendar import ROOT_CALENDARS
 from trading_live_claude.intel.graph import (
+    Edge,
+    _age_hours,
     default_graph_journal,
     edge_persistence,
     load_edges,
@@ -278,6 +281,7 @@ class PersistenceGate:
         # Precomputed per-domain persistence, refreshed on cadence. None → not yet read.
         self._persistence_by_domain: dict[str, int] | None = None
         self._ts = 0.0
+        self._stale_noted: str | None = None       # the newest poll we already warned about
 
     def refresh(self, *, force: bool = False) -> None:
         if not force and self._persistence_by_domain is not None and (
@@ -292,11 +296,27 @@ class PersistenceGate:
                 for doms in _CLASS_TO_DOMAINS.values() for dom in doms
             }
             self._ts = time.monotonic()
+            self._warn_if_stale(edges)
             log.info("persistence_gate.refreshed",
                      persistence=self._persistence_by_domain, min_polls=self.min_polls)
         except Exception as e:                          # fail-open: never halt on graph I/O errors
             log.warning("persistence_gate.refresh_failed", error=str(e))
             self._persistence_by_domain = {}
+
+    def _warn_if_stale(self, edges: Sequence[Edge]) -> None:
+        """A run older than the limit counts as no run, which looks just like a calm market. Say so,
+        once per poll it is stuck on, so a dead poller is visible."""
+        if self._max_age_hours is None:
+            return
+        polls = [e for e in edges if "poll" in (e.subject[0], e.object[0]) and e.as_of]
+        if not polls:
+            return
+        newest = max(polls, key=lambda e: e.as_of)
+        age_hours = _age_hours(newest, datetime.now(UTC))
+        if age_hours is not None and age_hours > self._max_age_hours and newest.as_of != self._stale_noted:
+            self._stale_noted = newest.as_of
+            log.warning("persistence_gate.stale_run", age_hours=round(age_hours, 1),
+                        max_age_hours=self._max_age_hours, graph=str(self._graph_path))
 
     def __call__(self, symbol: str) -> tuple[bool, str]:
         self.refresh()

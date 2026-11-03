@@ -216,7 +216,7 @@ def query_cmd(name: str = typer.Argument(..., help="superficial | approved-vs-ex
     elif name == "breaks":
         res = q.breaks(rows)
     elif name == "fill-quality":
-        res = q.fill_quality(rows)
+        res = q.fill_quality(rows, fx=BankOfCanadaFX(_state() / "fx"))
     elif name == "session-plans":
         res = q.session_plans(rows)
     else:

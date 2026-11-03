@@ -61,7 +61,10 @@ class PaperBroker(Broker):
         venue: str | None = None,
         fill_model: Literal["mid", "touch"] = "mid",
         cost_model: VenueCostModel | None = None,
+        book_currency: str | None = None,
     ) -> None:
+        # Set when the feed prices everything in one currency, so an execution says what its price is in.
+        self._book_currency = book_currency
         self._feed = feed
         # "touch" fills buys at the ask and sells at the bid (then slippage), so a wide spread
         # costs what it would in a real book instead of being hidden by a mid-price fill. Off for a
@@ -530,6 +533,7 @@ class PaperBroker(Broker):
                     d,
                     max_drawdown_pct=_s.max_drawdown_kill_switch,
                     daily_loss_limit_pct=_s.daily_loss_limit_pct,
+                    paper=True,
                 )
             # Same rule as a live book (risk/equity_watch.py): nothing is evaluated while tripped, so a
             # manual stop keeps its reason, and a human clear restarts the measure from here.
@@ -561,11 +565,12 @@ class PaperBroker(Broker):
         for f in self._fills:
             if since is not None and f.fill_time < since:
                 continue
-            ccy = instrument_currency(f.symbol, self._venue)
+            ccy = self._book_currency or instrument_currency(f.symbol, self._venue)
+            source = "book (paper fill)" if self._book_currency else "listing (paper fill)"
             out.append(Execution(
                 exec_id=f"paper:{self.session_id}:{f.order_id}", order_id=str(f.order_id),
                 symbol=f.symbol, side="Buy" if str(f.side) == "Buy" else "Sell",
                 quantity=f.quantity, price=f.price, fee=f.commission, fee_currency=ccy,
-                currency=ccy, currency_source="listing (paper fill)" if ccy else "unknown",
+                currency=ccy, currency_source=source if ccy else "unknown",
                 time=f.fill_time, venue=f"paper:{self._venue}", account=account_number))
         return out

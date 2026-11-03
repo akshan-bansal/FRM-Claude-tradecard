@@ -86,7 +86,12 @@ mute_alerts: ""                   # comma-separated symbols: still traded and jo
 max_round_trip_cost_ratio: 0      # 0 = off. Kraken's fee alone is ~52 bps round trip
 params: default                   # default, wf or calibrated
 sizing_v2: true                   # Kraken's own lot rules; refuses to start without them
-ib_futures_only: true             # desk_policy: IB carries futures; equities trade on Questrade
+ib_futures_only: false            # true narrows IB to futures. North American equities never go there
+persistence_min_polls: 5
+persistence_max_age_hours: 6      # an older run counts as no run, and is logged
+allocator_refresh_seconds: 3600   # weights recomputed between polls; 0 = boot only
+allocator_bias_floor: 0.1
+allocator_bias_cap: 3.0
 spectral_var_cap: null            # e.g. 0.005 turns the gate on
 spectral_var_level: 0.99
 spectral_var_horizon: 1

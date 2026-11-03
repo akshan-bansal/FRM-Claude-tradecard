@@ -83,6 +83,8 @@ def test_a_money_plan_differs_from_paper_only_where_it_must(venue: str) -> None:
     {"max_round_trip_cost_ratio": 0.02}, {"warmup_interval_seconds": 60}, {"warmup_minutes": 30.0},
     {"card_shim_host": "10.0.0.2"}, {"card_attach": True}, {"position_cap_mode": "static"},
     {"position_cap_ref_vol": 0.3}, {"stale_quote_frozen_s": 60.0}, {"on_stale_quote": "warn"}, {"params": "wf"},
+    {"persistence_min_polls": 3}, {"persistence_max_age_hours": 12.0}, {"allocator_refresh_seconds": 600.0},
+    {"allocator_bias_floor": 0.2}, {"allocator_bias_cap": 2.0}, {"account_currency": "USD"},
 ])
 def test_every_knob_reaches_paper_and_money_alike(knob: dict[str, Any]) -> None:
     """A practised setting has to be the setting that runs. Moving one must move both plans, and equally."""
@@ -168,7 +170,9 @@ def test_bad_strategy_inputs_say_what_is_wrong() -> None:
 def test_ib_defaults_and_futures_join_the_symbols() -> None:
     book = resolve_book(_settings(), "ib")
     assert book.default.name == "bollinger"
-    assert resolve_symbols(_settings(), "ib", "", book, ["es"]) == [*sess.DEFAULT_IB_SYMBOLS, "ES"]
+    assert resolve_symbols(_settings(), "ib", "", book) == list(sess.DEFAULT_IB_SYMBOLS)
+    assert resolve_symbols(_settings(), "ib", "", book, ["es"]) == ["ES"]        # a futures run names its whole book
+    assert resolve_symbols(_settings(), "ib", "7203.T", book, ["es"]) == ["7203.T", "ES"]
 
 
 # ---------------------------------------------------------------- what must be true before real money
@@ -293,13 +297,10 @@ def test_a_paper_session_is_built_and_runs_with_every_layer_wired(tmp_path: Path
     assert plan.fingerprint() in capsys.readouterr().out
 
 
-def test_a_session_warns_when_a_symbol_is_not_in_the_accounts_currency(tmp_path: Path) -> None:
-    settings = _settings(tmp_path, account_currency="CAD")
-    said: list[str] = []
-    plan = plan_session(settings, venue="questrade", mode="paper", symbols=["VOO", "XIC.TO"], book=_book())
-    build_session(settings, plan, feed=_Feed(), book=_book(), emit=said.append)  # type: ignore[arg-type]
-    warning = next(s for s in said if s.startswith("WARNING"))
-    assert "VOO" in warning and "XIC.TO" not in warning
+def test_a_session_says_its_prices_are_in_the_home_currency(tmp_path: Path, capsys: Any) -> None:
+    settings = _settings(tmp_path)
+    build_session(settings, _plan(settings), feed=_Feed(), book=_book(), emit=print)  # type: ignore[arg-type]
+    assert "prices in CAD" in capsys.readouterr().out
 
 
 def test_a_refused_symbol_stops_the_session_before_anything_opens(tmp_path: Path) -> None:

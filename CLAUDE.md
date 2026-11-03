@@ -94,7 +94,7 @@ This repo supports a fully-autonomous Claude-driven trading loop. **Read these r
 ### What Claude is NOT allowed to do
 - Flip `AUTONOMOUS_ENABLED` in `.env`. The user does that themselves.
 - Flip `AUTONOMOUS_ACCOUNT` from `practice` to `live` in `.env`. The user does that themselves.
-- Clear the kill-switch under any circumstance.
+- Clear the kill-switch, or the paper halt, under any circumstance. Promote a paper halt to money.
 - Edit the Router's gate list, the DailyBudget caps, or the strategy code while the daemon is running.
 
 ### Failure modes to watch for
@@ -196,6 +196,10 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
   extend instead; if a test and a table disagree, ask rather than shrink the table.
 - `tests/test_runbook.py` pins the desk's actual commands. `docs/PORT_FRM_CLAUDE.md` records what the merge with
   `FRM-Claude` decided, and what was kept beside rather than merged.
+- **A paper drawdown stops paper.** A simulated book trips `state/HALTED_PAPER`; money reads only `state/HALTED`. Stopping money for
+  it is the human's express call: `trading kill --from-paper --confirm "HALT MONEY"`. Claude neither promotes a halt nor clears either file.
+- **The gates read the home currency.** Every runner prices quotes, positions and equity in `account_currency` (CAD) at the Bank of
+  Canada's daily rate (`brokers/fx.py`). A fill keeps its own currency; the audit layer converts it by trade date.
 - `QUESTRADE_ENV` and `AUTONOMOUS_ACCOUNT=practice` route nothing: the token alone decides the account, and a
   money session refuses to start when the token's environment does not match. Practise on paper.
 - `supports_level_trigger` means a strategy emits `entry_level`; `level_trigger_default` means the monitor
