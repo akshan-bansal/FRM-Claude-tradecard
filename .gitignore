@@ -44,6 +44,8 @@ state/paper_orders.jsonl
 state/paper_equity.csv
 state/intel_overlay.jsonl
 state/intel_graph.jsonl
+state/intel_graph.sqlite*
+state/l2/
 state/autonomous.pid
 state/HALTED
 
