@@ -338,13 +338,15 @@ def test_approval_db_verdicts_are_reconciled(tmp_path: Path) -> None:
 
 def test_the_qt_signal_command_exposes_the_audit_ledger_flag() -> None:
     """Guards the wiring: if the flag disappears, the QT book silently stops recording."""
-    from typer.testing import CliRunner
+    import typer
 
     from trading_live_claude.cli import app
 
-    out = CliRunner().invoke(app, ["signal", "--help"]).output
-    assert "--audit-ledger" in out and "--no-audit-ledger" in out
-    assert "state/ledger" in out.replace("\n", "")
+    # The command's own options, not its help text: colour and terminal width break that up.
+    signal = typer.main.get_command(app).commands["signal"]
+    flag = next(p for p in signal.params if "--audit-ledger" in p.opts)
+    assert "--no-audit-ledger" in flag.secondary_opts
+    assert "state/ledger" in flag.help
 
 
 def test_both_paper_runners_default_the_ledger_on() -> None:
