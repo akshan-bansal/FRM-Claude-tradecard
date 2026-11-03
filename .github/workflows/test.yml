@@ -47,7 +47,7 @@ jobs:
           # ib/kraken/plot extras to keep the CI slice small. quant stays:
           # test_vs_engine imports intel, whose import chain reaches
           # models.cointegration and statsmodels.
-          pip install '.[shim,quant]'
+          pip install '.[shim,quant,graph]'
           # pytest-cov because pyproject's addopts pass --cov; --no-cov below needs it too.
           pip install pytest pytest-cov pytest-asyncio respx pandas cryptography structlog pydantic
 
@@ -80,6 +80,9 @@ jobs:
             tests/test_monitor_guards.py \
             tests/test_entry_triggers.py \
             tests/test_intel_hooks_wiring.py \
+            tests/test_graph_store.py \
+            tests/test_graph_search.py \
+            tests/test_l2_recorder.py \
             tests/test_asset_class_integrity.py \
             tests/test_venue_calendar.py \
             tests/test_symbol_atlas.py \
