@@ -12,7 +12,6 @@ coroutine on a fresh event loop inside the thread.
 from __future__ import annotations
 
 import asyncio
-import secrets
 import sys
 import threading
 from datetime import datetime
@@ -20,7 +19,7 @@ from pathlib import Path
 
 from ..intel.vs_engine import DEFAULT_WRITEUP_DIR
 from .approval import CardRegistry, InMemoryApprovalStore
-from .approval_asgi import create_app, mint_auth_token  # noqa: F401 (re-export)
+from .approval_asgi import BookRef, create_app, mint_auth_token  # noqa: F401 (re-export)
 
 
 def run_shim(
@@ -31,14 +30,22 @@ def run_shim(
     port: int = 8787,
     writeup_dir: Path = DEFAULT_WRITEUP_DIR,
     auth_token: str | None = None,
-    state_dir: Path | None = None,
-    session_id: str | None = None,
+    desk_page: Path | None = None,   # built desk panel served at /desk
+    state_dir: Path | None = None,   # journals the panel reads equity and meters from
+    session_id: str | None = None,   # the book this shim reports on
+    session_started_at: datetime | None = None,   # scopes the live strip's prompt counts
+    account_currency: str = "USD",
+    books: list[BookRef] | None = None,   # several books on one port
+    journal=None,                # Optional OrderJournal for metrics
+    router=None,                 # Optional Router for metrics
 ) -> None:
     """Blocking uvicorn.run() — call from the main thread only."""
     import uvicorn
     app = create_app(store, registry,
-                     writeup_dir=writeup_dir, auth_token=auth_token, state_dir=state_dir,
-                     session_id=session_id)
+                     writeup_dir=writeup_dir, auth_token=auth_token,
+                     desk_page=desk_page, state_dir=state_dir, session_id=session_id,
+                     session_started_at=session_started_at,
+                     account_currency=account_currency, books=books, journal=journal, router=router)
     sys.stderr.write(
         f"approval shim listening on http://{host}:{port}"
         f"{' (auth required)' if auth_token else ' (OPEN — loopback only)'}\n"
@@ -54,17 +61,28 @@ def start_shim_thread(
     port: int,
     writeup_dir: Path | None = None,
     auth_token: str | None = None,
-    state_dir: Path | None = None,
-    session_id: str | None = None,
-    session_started_at: datetime | None = None,
+    desk_page: Path | None = None,   # built desk panel served at /desk
+    state_dir: Path | None = None,   # journals the panel reads equity and meters from
+    session_id: str | None = None,   # the book this shim is attached to
+    session_started_at: datetime | None = None,   # scopes the live strip's prompt counts
+    account_currency: str = "USD",
+    books: list[BookRef] | None = None,
+    journal=None,                # Optional OrderJournal for metrics
+    router=None,                 # Optional Router for metrics
 ) -> threading.Thread:
     """Daemon-thread wrapper. Runs uvicorn.Server on its own event loop so
-    it doesn't compete with the main thread's signal handling."""
+    it doesn't compete with the main thread's signal handling.
+
+    When journal and router are provided, metrics endpoints (/v1/stats,
+    /v1/conviction-matrix) will use live data; otherwise they fall back
+    to demo data or store-only calculations.
+    """
     import uvicorn
     resolved = writeup_dir if writeup_dir is not None else DEFAULT_WRITEUP_DIR
     app = create_app(store, registry, writeup_dir=resolved, auth_token=auth_token,
-                     state_dir=state_dir, session_id=session_id,
-                     session_started_at=session_started_at)
+                     desk_page=desk_page, state_dir=state_dir, session_id=session_id,
+                     session_started_at=session_started_at,
+                     account_currency=account_currency, books=books, journal=journal, router=router)
     config = uvicorn.Config(app, host=host, port=port,
                             log_level="warning", access_log=False,
                             lifespan="off")

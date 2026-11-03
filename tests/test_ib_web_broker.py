@@ -64,6 +64,15 @@ def test_tickle_is_a_noop_for_oauth2_which_uses_token_refresh_instead() -> None:
 
 # ---- contract resolution -------------------------------------------------------------------
 
+@respx.mock
+def test_resolve_conid_picks_the_hong_kong_listing_without_leading_zeros() -> None:
+    route = respx.post(f"{_CP_BASE}/iserver/secdef/search").mock(return_value=httpx.Response(200, json=[
+        {"conid": 1, "sections": [{"exchange": "NASDAQ"}]},
+        {"conid": 2, "sections": [{"exchange": "SEHK"}]},
+    ]))
+    assert _mk_broker().resolve_conid("0700.HK") == 2
+    assert b'"symbol":"700"' in route.calls[0].request.content.replace(b" ", b"")
+
 
 @respx.mock
 def test_resolve_conid_caches_after_the_first_lookup() -> None:
@@ -290,8 +299,8 @@ def test_place_order_needs_account_id_even_when_gate_open() -> None:
 
 
 @respx.mock
-def test_place_order_auto_confirms_the_precheck_prompt() -> None:
-    """Web API returns a warning prompt on some orders; auto-confirm so paper flow doesn't hang."""
+def test_place_order_confirms_the_prompt_only_when_told_to() -> None:
+    """Web API returns a warning prompt on some orders. Confirming them is opt-in."""
     respx.post(f"{_CP_BASE}/iserver/secdef/search").mock(
         return_value=httpx.Response(200, json=[{"conid": 265598, "symbol": "AAPL"}]))
     orders_route = respx.post(f"{_CP_BASE}/iserver/account/DU111/orders").mock(
@@ -304,10 +313,53 @@ def test_place_order_auto_confirms_the_precheck_prompt() -> None:
             {"order_id": "917531", "order_status": "PreSubmitted"},
         ])
     )
-    filled = _mk_broker(enable_live=True).place_order(_order())
+    broker = _mk_broker(enable_live=True)
+    broker._auto_confirm_prompts = True
+    filled = broker.place_order(_order())
     assert orders_route.call_count == 1
     assert confirm_route.call_count == 1
     assert filled.id == 917531
+
+
+def _search_and_orders(answer: object) -> None:
+    respx.post(f"{_CP_BASE}/iserver/secdef/search").mock(
+        return_value=httpx.Response(200, json=[{"conid": 265598, "symbol": "AAPL"}]))
+    respx.post(f"{_CP_BASE}/iserver/account/DU111/orders").mock(return_value=httpx.Response(200, json=answer))
+
+
+@respx.mock
+def test_a_prompt_rejects_the_order_by_default_and_says_why() -> None:
+    _search_and_orders([{"id": "p1", "message": ["Order would exceed margin"]}])
+    confirm = respx.post(f"{_CP_BASE}/iserver/reply/p1").mock(return_value=httpx.Response(200, json=[]))
+    with pytest.raises(OrderRejected, match="exceed margin"):
+        _mk_broker(enable_live=True).place_order(_order())
+    assert confirm.call_count == 0
+
+
+@respx.mock
+def test_prompts_cannot_loop_forever() -> None:
+    _search_and_orders([{"id": "p1", "message": ["again"]}])
+    confirm = respx.post(f"{_CP_BASE}/iserver/reply/p1").mock(
+        return_value=httpx.Response(200, json=[{"id": "p1", "message": ["again"]}]))
+    broker = _mk_broker(enable_live=True)
+    broker._auto_confirm_prompts = True
+    with pytest.raises(BrokerError, match="order state unknown"):
+        broker.place_order(_order())
+    assert confirm.call_count == 5
+
+
+@respx.mock
+def test_an_error_answer_is_a_rejection_not_a_placed_order() -> None:
+    _search_and_orders({"error": "Insufficient buying power"})
+    with pytest.raises(OrderRejected, match="Insufficient buying power"):
+        _mk_broker(enable_live=True).place_order(_order())
+
+
+@respx.mock
+def test_an_answer_with_no_order_id_is_order_state_unknown() -> None:
+    _search_and_orders([{"unexpected": True}])
+    with pytest.raises(BrokerError, match="order state unknown"):
+        _mk_broker(enable_live=True).place_order(_order())
 
 
 def test_cancel_order_is_gated_off_by_default() -> None:
@@ -338,3 +390,34 @@ def test_ib_web_broker_exports_from_package_namespace() -> None:
     assert ExportedCP is CPGatewayAuth
     assert ExportedOAuth is OAuth2JWTAuth
     assert IBWebAuth is not None
+
+
+@respx.mock
+def test_place_order_stops_confirming_an_endless_prompt_chain() -> None:
+    """The auto-confirm loop is capped (2026-09-18); before, an endless chain looped forever."""
+    from trading_live_claude.brokers.ib_web import MAX_ORDER_CONFIRMATIONS
+
+    respx.post(f"{_CP_BASE}/iserver/secdef/search").mock(
+        return_value=httpx.Response(200, json=[{"conid": 265598, "symbol": "AAPL"}]))
+    respx.post(f"{_CP_BASE}/iserver/account/DU111/orders").mock(
+        return_value=httpx.Response(200, json=[{"id": "p0", "message": ["warning"]}]))
+    replies = respx.post(url__regex=rf"{_CP_BASE}/iserver/reply/.*").mock(
+        return_value=httpx.Response(200, json=[{"id": "p-next", "message": ["another warning"]}]))
+    broker = IBWebBroker(auth=CPGatewayAuth(verify_ssl=False), enable_live_orders=True, auto_confirm_prompts=True)
+    with pytest.raises(BrokerError, match="kept prompting"):
+        broker.place_order(_order())
+    assert replies.call_count == MAX_ORDER_CONFIRMATIONS
+
+
+def test_unverified_tls_is_only_allowed_for_a_loopback_gateway() -> None:
+    """verify_ssl=False is for the local Gateway's self-signed cert only (2026-09-18)."""
+    from trading_live_claude.brokers.ib_web import CPGatewayAuth
+    CPGatewayAuth()                                          # localhost default
+    CPGatewayAuth(host="127.0.0.1")
+    CPGatewayAuth(host="::1")
+    CPGatewayAuth(host="gw.example.com", verify_ssl=True)    # remote with verification is fine
+    with pytest.raises(ValueError, match="loopback"):
+        CPGatewayAuth(host="gw.example.com")
+    remote = CPGatewayAuth(host="10.0.0.5", verify_ssl=True)
+    with pytest.raises(ValueError, match="unverified"):
+        remote.new_client(verify=False)

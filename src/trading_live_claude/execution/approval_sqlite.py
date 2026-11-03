@@ -24,6 +24,7 @@ ever changes, revisit before scaling up.
 """
 from __future__ import annotations
 
+import contextlib
 import secrets
 import sqlite3
 import threading
@@ -38,7 +39,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 from ..logging_setup import get_logger
-from .approval import PassbookEntry, Prompt, Verdict, canonical_bytes
+from .approval import PassbookEntry, Prompt, Verdict, canonical_bytes, fingerprint
 from .router import OrderIntent
 
 log = get_logger(__name__)
@@ -66,7 +67,12 @@ CREATE TABLE IF NOT EXISTS intents (
     broker          TEXT NOT NULL,
     symbol          TEXT NOT NULL,
     action          TEXT NOT NULL,
-    shares          INTEGER NOT NULL,
+    -- REAL, not INTEGER: the crypto sleeve sizes fractionally (sizing v2 routinely
+    -- produces e.g. 4.18347861 PAXG). 2026-09-17: this column was INTEGER and both
+    -- decoders cast with int(), so every rehydrated prompt and every passbook row
+    -- truncated the quantity — the audit record disagreed with the fill, and a prompt
+    -- reloaded after a restart would have DISPLAYED a size the card never signed.
+    shares          REAL NOT NULL,
     entry           REAL NOT NULL,
     stop            REAL NOT NULL,
     target          REAL,
@@ -140,14 +146,28 @@ class SqliteCardRegistry:
         self._cache: dict[str, Ed25519PublicKey] = {}
         self._reload_cache()
 
-    def close(self) -> None:
-        with self._lock:
-            self._conn.close()
 
-    def __enter__(self) -> SqliteCardRegistry:
+    # -- lifecycle ---------------------------------------------------------- #
+    # These classes hold a sqlite connection for the life of the process, which is right for a
+    # long-running shim but left every short-lived instance to be reclaimed by the GC with its
+    # connection still open — 45 ResourceWarnings across a test run, and on Windows an open handle
+    # can also keep the .db file locked against a later rmtree. close() is explicit, the context
+    # manager covers scoped use, and __del__ is the backstop for callers that do neither.
+
+    def close(self) -> None:
+        """Close the underlying connection. Safe to call twice."""
+        conn, self._conn = getattr(self, "_conn", None), None
+        if conn is not None:
+            with contextlib.suppress(Exception):       # best-effort teardown
+                conn.close()
+
+    def __enter__(self):
         return self
 
-    def __exit__(self, *exc: object) -> None:
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:                         # pragma: no cover - GC timing
         self.close()
 
     def _reload_cache(self) -> None:
@@ -227,6 +247,9 @@ class SqliteCardRegistry:
 # store                                                                       #
 # --------------------------------------------------------------------------- #
 
+_SIG_ALG = "ed25519"
+
+
 _INTENT_COLS = (
     "intent_id, issued_at, expires_at, broker, symbol, action, shares, entry, "
     "stop, target, notional_usd, risk_dollars, strategy, account, mode, thesis, "
@@ -242,7 +265,7 @@ def _row_to_prompt(row: tuple) -> Prompt:
         broker=row[3],
         symbol=row[4],
         action=row[5],
-        shares=int(row[6]),
+        shares=float(row[6]),   # never int(): fractional crypto sizes
         entry=float(row[7]),
         stop=float(row[8]),
         target=(float(row[9]) if row[9] is not None else None),
@@ -277,6 +300,30 @@ class SqliteApprovalStore:
         # (unset) Event so `wait()` can still be called on it. Nothing was
         # actually blocked when we crashed, so this loses no state.
         self._rehydrate_pending_events()
+
+
+    # -- lifecycle ---------------------------------------------------------- #
+    # These classes hold a sqlite connection for the life of the process, which is right for a
+    # long-running shim but left every short-lived instance to be reclaimed by the GC with its
+    # connection still open — 45 ResourceWarnings across a test run, and on Windows an open handle
+    # can also keep the .db file locked against a later rmtree. close() is explicit, the context
+    # manager covers scoped use, and __del__ is the backstop for callers that do neither.
+
+    def close(self) -> None:
+        """Close the underlying connection. Safe to call twice."""
+        conn, self._conn = getattr(self, "_conn", None), None
+        if conn is not None:
+            with contextlib.suppress(Exception):       # best-effort teardown
+                conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:                         # pragma: no cover - GC timing
+        self.close()
 
     def _rehydrate_pending_events(self) -> None:
         with self._lock:
@@ -475,13 +522,16 @@ class SqliteApprovalStore:
 
         with self._lock:
             now = datetime.now(UTC).isoformat()
-            self._conn.execute(
+            cur = self._conn.execute(
                 "UPDATE intents SET verdict = ?, consumed = 1, "
                 "resolved_at = ?, signer_card_id = ?, signature = ?, signature_alg = ? "
                 "WHERE intent_id = ? AND verdict IS NULL",
                 (decision, now, card_id, b64encode(signature).decode("ascii"), _SIG_ALG,
                  intent_id),
             )
+            if cur.rowcount != 1:
+                log.warning("approval.response_replay", intent_id=intent_id)
+                return False
             ev = self._events.pop(intent_id, None)
             if ev is not None:
                 ev.set()
@@ -506,7 +556,9 @@ class SqliteApprovalStore:
             return None
         keys = ("intent_id", "verdict", "issued_at", "resolved_at", "canonical", "signature",
                 "signature_alg", "signer_card_id", "pubkey_pem", "revoked_at")
-        return dict(zip(keys, row, strict=True))
+        rec = dict(zip(keys, row, strict=True))
+        rec["card_revoked_at"] = rec["revoked_at"]  # the name the other approval records use
+        return rec
 
     def passbook(self, *, limit: int = 50, offset: int = 0) -> list[PassbookEntry]:
         if limit <= 0:
@@ -517,7 +569,7 @@ class SqliteApprovalStore:
             rows = self._conn.execute(
                 "SELECT intent_id, resolved_at, verdict, broker, symbol, action, "
                 "  shares, notional_usd, strategy, thesis, intel_ref, "
-                "  signer_card_id "
+                "  signer_card_id, canonical, issued_at "
                 "FROM intents WHERE verdict IS NOT NULL "
                 "ORDER BY resolved_at DESC LIMIT ? OFFSET ?",
                 (limit, offset),
@@ -530,12 +582,16 @@ class SqliteApprovalStore:
                 broker=r[3],
                 symbol=r[4],
                 action=r[5],
-                shares=int(r[6]),
+                shares=float(r[6]),     # never int(): fractional crypto sizes
                 notional_usd=float(r[7]),
                 strategy=r[8],
                 thesis=r[9],
                 intel_ref=r[10],
                 card_id=r[11],
+                # Phase 6: derived from the stored canonical bytes, so the history view shows the
+                # same value the card displayed when it signed.
+                fingerprint=fingerprint(str(r[12]).encode("utf-8")) if r[12] else "",
+                issued_at=datetime.fromisoformat(r[13]) if r[13] else None,
             )
             for r in rows
         ]

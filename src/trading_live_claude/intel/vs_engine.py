@@ -154,6 +154,9 @@ class Writeup:
     overlay_snapshot: dict[str, float]
     market_context: dict[str, object]
     warnings: list[str]
+    # Same rows the Telegram entry alert prints under "Sizing chain" (notification.format_entry),
+    # composed by the caller from the state it already holds. Empty when the caller had none.
+    sizing_chain: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         d = asdict(self)
@@ -182,6 +185,7 @@ class VSInvestmentEngine:
         market: MarketContext | None = None,
         overlay_snapshot: "IntelSnapshot | None" = None,
         overlay_decisions: "list[OverlayDecision] | None" = None,
+        sizing_chain: list[str] | None = None,
     ) -> tuple[str, str]:
         """Return ``(thesis, intel_ref)``. Persists a JSON writeup as a side effect."""
         market = market or MarketContext()
@@ -189,11 +193,13 @@ class VSInvestmentEngine:
         overlay_clause, overlay_map, overlay_warnings = self._overlay_clauses(
             broker, intent.symbol, overlay_snapshot, overlay_decisions
         )
-        # Priority order (least droppable first): core -> overlay risk -> notes.
-        # Risk signals must never be truncated in favor of user-supplied notes.
-        clauses: list[str] = list(core)
+        # Priority order (least droppable first): headline -> overlay risk ->
+        # remaining core -> notes. Truncation pops from the end, so risk must sit
+        # ahead of the cosmetic indicator clauses or it is the first thing lost.
+        clauses: list[str] = core[:1]
         if overlay_clause:
             clauses.append(overlay_clause)
+        clauses.extend(core[1:])
         clauses.extend(notes)
 
         thesis = self._compose_thesis(clauses)
@@ -212,6 +218,7 @@ class VSInvestmentEngine:
             overlay_snapshot=overlay_map,
             market_context=self._market_to_dict(market),
             warnings=overlay_warnings,
+            sizing_chain=list(sizing_chain or []),
         )
         self._persist(writeup)
         return thesis, intel_ref
@@ -380,4 +387,5 @@ class VSInvestmentEngine:
             overlay_snapshot=dict(data.get("overlay_snapshot", {})),
             market_context=dict(data.get("market_context", {})),
             warnings=list(data.get("warnings", [])),
+            sizing_chain=list(data.get("sizing_chain", [])),
         )

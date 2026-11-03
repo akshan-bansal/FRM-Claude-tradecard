@@ -120,7 +120,7 @@ def wiring_checks(src: Path) -> dict[str, bool]:
     paper = (src / "brokers" / "paper.py").read_text(encoding="utf-8")
     return {
         "monitor can call Router.check_forced_exits (needs `forced_exits: true`)": "check_forced_exits(" in monitor,
-        "monitor passes open notional to the gross-leverage gate": "current_open_notional=open_notional" in monitor,
+        "monitor passes open notional to the gross-leverage gate": "current_open_notional=book[" in monitor,
         "card path passes open notional through": "current_open_notional=current_open_notional" in approval,
         "place-order passes open notional": "current_open_notional=open_notional" in cli,
         "paper broker auto-trips the kill-switch (KillSwitch.evaluate)": "_kill_switch.evaluate(" in paper,
@@ -179,7 +179,7 @@ def analyse(state_dir: Path, *, src: Path | None = None) -> Report:
     rep.venues = sorted({str(r["venue"]) for r in [*fills, *paper_orders] if r.get("venue")})
     rep.sessions = sorted({str(r["session_id"]) for r in [*fills, *paper_orders, *equity] if r.get("session_id")})
     rep.accepted_entries = sum(1 for o in orders if o.get("accepted") and o.get("action") == "Buy")
-    rep.halted_now = (state_dir / "HALTED").exists()
+    rep.halted_now = (state_dir / "HALTED").exists() or (state_dir / "HALTED_PAPER").exists()
 
     seen: set[tuple[Any, str]] = set()
     for r in rejected:

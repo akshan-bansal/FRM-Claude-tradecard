@@ -312,6 +312,8 @@ def build(state: Path) -> dict[str, Any]:
     # ---- header chips: read, not asserted -------------------------------------------------- #
     from trading_live_claude.config.settings import get_settings
     halted = state / "HALTED"
+    if not halted.exists():
+        halted = state / "HALTED_PAPER"     # a paper drawdown stops paper only
     data["kill_switch"] = {"halted": halted.exists(),
                            "reason": (halted.read_text(encoding="utf-8").strip()[:80]
                                       if halted.exists() else ""),

@@ -27,6 +27,39 @@ def _isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     gs.cache_clear()
 
 
+class LogRecorder:
+    """Stands in for a module's ``log``. structlog caches a logger once used, so ``capture_logs`` depends on run order."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.rows: list[dict] = []
+
+    def __getattr__(self, _level: str):
+        def record(event: str, **kw: object) -> None:
+            self.events.append(event)
+            self.rows.append({"event": event, **kw})
+        return record
+
+
+@pytest.fixture
+def record_log(monkeypatch: pytest.MonkeyPatch):
+    """``record_log(module)`` swaps that module's ``log`` for a recorder and returns it."""
+    def attach(module: object) -> LogRecorder:
+        rec = LogRecorder()
+        monkeypatch.setattr(module, "log", rec)
+        return rec
+    return attach
+
+
+@pytest.fixture(autouse=True)
+def _no_fx_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session prices in the home currency. No test reaches the Bank of Canada, and 1:1 keeps prices as written."""
+    from types import SimpleNamespace
+
+    from trading_live_claude.monitor import session
+    monkeypatch.setattr(session, "_home_rates", lambda *_a, **_k: SimpleNamespace(rate=lambda _c: 1.0))
+
+
 @pytest.fixture()
 def random_walk_df() -> pd.DataFrame:
     rng = np.random.default_rng(seed=42)

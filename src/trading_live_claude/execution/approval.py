@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
+    from .approval_asgi import BookRef
     from .approval_sqlite import SqliteApprovalStore, SqliteCardRegistry
 
 from cryptography.exceptions import InvalidSignature
@@ -46,7 +47,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
-from ..brokers.models import Order
+from ..brokers.models import Order, plain_decimal
 from ..logging_setup import get_logger
 from .router import OrderIntent, Router
 
@@ -64,7 +65,7 @@ def canonical_bytes(
     broker: str,
     action: str,
     symbol: str,
-    shares: int,
+    shares: float,
     entry: float,
     notional_usd: float,
     account: str,
@@ -81,7 +82,9 @@ def canonical_bytes(
         broker,
         action,
         symbol,
-        str(int(shares)),
+        # Whole quantities keep the historical "12" form, so deployed-card
+        # signatures are unchanged; fractional crypto must not truncate to 0.
+        plain_decimal(shares),
         f"{float(entry):.4f}",
         f"{float(notional_usd):.2f}",
         account,
@@ -121,7 +124,7 @@ class Prompt:
     broker: str            # "ib" | "kraken" | "questrade" — destination brokerage
     symbol: str
     action: str
-    shares: int
+    shares: float
     entry: float
     stop: float
     target: float | None
@@ -186,12 +189,19 @@ class PassbookEntry:
     broker: str
     symbol: str
     action: str
-    shares: int
+    shares: float
     notional_usd: float
     strategy: str
     thesis: str
     intel_ref: str
     card_id: str | None       # who signed the ACCEPT / DECLINE; None for EXPIRED
+    # Phase 6: the fingerprint of the canonical bytes this verdict covered. Empty only for a row
+    # recorded before the canonical string was kept alongside the passbook entry.
+    fingerprint: str = ""
+    # When the prompt was put in front of the card. Carried so response time is computable from a
+    # passbook row alone: without it a reader can only see when a verdict landed, not how long the
+    # holder took, and the metric that needed it was returning a constant instead.
+    issued_at: datetime | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -207,6 +217,7 @@ class PassbookEntry:
             "thesis": self.thesis,
             "intel_ref": self.intel_ref,
             "card_id": self.card_id,
+            "fingerprint": self.fingerprint,
         }
 
 
@@ -322,7 +333,7 @@ class InMemoryApprovalStore:
 
     @staticmethod
     def _entry_to_passbook(
-        entry: "_PendingEntry", *, card_id: str | None, at: datetime,
+        entry: _PendingEntry, *, card_id: str | None, at: datetime,
     ) -> PassbookEntry:
         p = entry.prompt
         assert entry.verdict is not None
@@ -339,6 +350,8 @@ class InMemoryApprovalStore:
             thesis=p.thesis,
             intel_ref=p.intel_ref,
             card_id=card_id,
+            fingerprint=p.fingerprint,
+            issued_at=p.issued_at,
         )
 
     # -- ApprovalStore ---------------------------------------------------- #
@@ -455,6 +468,12 @@ class InMemoryApprovalStore:
             return False
 
         with self._lock:
+            # Re-check: the lock was released during verify, so a concurrent
+            # response may have resolved this prompt in the meantime.
+            if entry.consumed or entry.verdict is not None:
+                log.warning("approval.response_replay", intent_id=intent_id,
+                            prior_verdict=entry.verdict)
+                return False
             entry.consumed = True
             entry.verdict = decision
             entry.signature = signature
@@ -502,7 +521,8 @@ class InMemoryApprovalStore:
 ThesisFn = "Callable[[OrderIntent, str], tuple[str, str]]"  # (intent, broker) -> (thesis, intel_ref)
 
 # The brokers a card prompt can name: the shim's ``Broker`` literal, which is also in the signed bytes.
-_CARD_BROKERS = {"ib": "ib", "ib_web": "ib", "kraken": "kraken", "questrade": "questrade"}
+_CARD_BROKERS = {"ib": "ib", "ib_web": "ib", "kraken": "kraken", "questrade": "questrade",
+                 "paper": "paper", "global": "global"}
 
 
 def card_broker(broker: object) -> str:
@@ -575,7 +595,7 @@ class ApprovalRouter:
         # begin at INTENT_SENT, and a rejection here would leave no gate record at all.
         self.inner.record_gate(intent, decision, requested_shares=requested_shares, equity=equity,
                                existing_risk=existing_risk, open_positions=open_positions,
-                               current_open_notional=current_open_notional)
+                               current_open_notional=current_open_notional, via="approval-router")
         if not decision.accepted:
             self.inner.journal.order_intent(
                 {
@@ -681,8 +701,10 @@ def verify_audit_record(record: Mapping[str, object]) -> tuple[bool, str]:
     failure with the reason named.
     """
     canonical, sig, pem = record.get("canonical"), record.get("signature"), record.get("pubkey_pem")
+    if record.get("verdict") == "EXPIRED":
+        return False, "nothing signed it (verdict=EXPIRED)"
     if not sig:
-        return False, "no signature recorded"
+        return False, "no signature recorded (the approval predates signature storage, or was never signed)"
     if not pem:
         return False, "signing card's public key not on record"
     if not canonical:
@@ -710,10 +732,10 @@ def verify_audit_record(record: Mapping[str, object]) -> tuple[bool, str]:
 class CardWiring:
     """The pieces the paper scripts need to hold onto when --require-card is on."""
 
-    router: "ApprovalRouter"
-    store: "InMemoryApprovalStore"
-    registry: "CardRegistry"
-    shim_thread: "threading.Thread | None"
+    router: ApprovalRouter
+    store: InMemoryApprovalStore
+    registry: CardRegistry
+    shim_thread: threading.Thread | None
     shim_url: str
     auth_token: str | None = None
 
@@ -733,8 +755,11 @@ def wire_card_approval(
     thesis_fn: object | None = None,
     auth_token: str | None = "auto",
     db_path: "Path | None" = None,
+    desk_page: "Path | None" = None,
     state_dir: "Path | None" = None,
     session_id: str | None = None,
+    account_currency: str = "USD",
+    books: "list[BookRef] | None" = None,
 ) -> CardWiring:
     """Build the card-approval layer around ``inner`` and (optionally) spin the shim.
 
@@ -757,9 +782,17 @@ def wire_card_approval(
     ``state_dir`` / ``session_id`` tell the shim which journals and which book it reports on, so the
     desk panel's live strip, basket tab and atlas readings describe this session. Without them those
     routes answer with what they cannot source rather than guessing a book.
+    **One port, several brokers.** Every loop points ``db_path`` at the same
+    ``state/approval.db``, so the store is already shared: one card approves the QT, Kraken and IB
+    books alike. What collided was the HTTP surface — all three loops default to port 8787 and each
+    minted its own token. Pass ``start_shim=False`` (the loops expose it as ``--card-attach``) to
+    wrap the router without binding a port, and run one shim yourself
+    (``scripts/approval_shim.py --db state/approval.db --book ...``). ``books`` declares which books
+    a shim reports on for ``/v1/books``; it is ignored when ``start_shim`` is False, because the
+    process that owns the port owns that declaration.
     """
-    registry: "CardRegistry | SqliteCardRegistry"
-    store: "InMemoryApprovalStore | SqliteApprovalStore"
+    registry: CardRegistry | SqliteCardRegistry
+    store: InMemoryApprovalStore | SqliteApprovalStore
     if db_path is not None:
         # Local import so the sqlite module isn't loaded when not asked for.
         from .approval_sqlite import SqliteApprovalStore, SqliteCardRegistry
@@ -784,8 +817,10 @@ def wire_card_approval(
         from .approval_server import start_shim_thread
         shim_thread = start_shim_thread(
             store, registry, shim_host, shim_port, auth_token=resolved_token,
-            state_dir=state_dir, session_id=session_id,
+            desk_page=desk_page, state_dir=state_dir, session_id=session_id,
             session_started_at=datetime.now(UTC) if session_id else None,
+            account_currency=account_currency, books=books,
+            journal=inner.journal, router=inner,
         )
 
     return CardWiring(

@@ -169,4 +169,4 @@ def test_a_future_matches_with_or_without_the_leading_slash(tmp_path: Path) -> N
 def test_ib_basket_accepts_futures_roots_and_refuses_equities() -> None:
     from trading_live_claude.execution.basket import ib_refusal
     assert ib_refusal("GC") is None and ib_refusal("/SIL") is None
-    assert "futures only" in (ib_refusal("AAPL") or "")
+    assert "trade on Questrade" in (ib_refusal("AAPL") or "")

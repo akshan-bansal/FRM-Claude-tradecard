@@ -26,11 +26,83 @@ heat_aggregation: corr              # how open positions combine for the heat ga
                                     #   corr = covariance-aware, credits diversification (default)
                                     #   sum  = naive total, correlation-blind
 daily_loss_limit_pct: 0.03          # -3% halts new entries today
-max_drawdown_kill_switch: 0.08      # -8% trips kill-switch automatically
+max_drawdown_kill_switch: 0.03      # -3% trips kill-switch automatically (tightened 2026-09-08)
 max_open_positions: 3
 min_ticket_usd: 100.0
+max_position_notional_pct: 0.50     # per-name cap at the reference vol (flat cap in 'static' mode)
+position_cap_mode: vol_scaled       # vol_scaled | static (paper paths; live keeps the flat cap)
+position_cap_ref_vol: 0.20          # a name at 20% annual vol gets max_position_notional_pct
+position_cap_floor_pct: 0.05        # never below; also used when vol is unknown
+position_cap_ceiling_pct: 0.75      # never above, however calm the name
+
+# === Stale-quote guard (paper feeds) ===
+stale_quote_frozen_s: 900           # quote unchanged this long = stale (0 disables)
+stale_quote_max_trade_age_s: 0      # last trade older than this = stale (0 disables; Questrade only)
+on_stale_quote: raise               # raise = skip symbol + reject paper fill | warn = log only
+
+# === Exchange hopping ===
+# account_currency (above) is the numeraire every IB-paper price and risk gate is measured in.
+skip_closed_venues: true            # don't poll or trade a symbol outside its exchange hours
+fx_rate_ttl_s: 60                   # refresh IB spot FX at most this often
+fx_max_rate_age_s: 900              # older than this with no fresh rate -> quote treated as stale
+
+# === 24h global book (scripts/paper_global.py) ===
+scheduler_open_buffer_min: 5        # no orders in the first N min of each session (auction/first prints)
+scheduler_close_buffer_min: 10      # nor in the last N min (closing auction)
+scheduler_intent_ttl_min: 30        # queued intent expires this long after its release time
+max_spread_bps_equity: 50           # entries refused above this spread; exits are never blocked
+max_spread_bps_crypto: 30
+board_lots: {}                      # per-symbol lot size, required for .HK names, e.g. {"0700.HK": 100}
+corr_lead_lag: 1                    # Dimson lags for cross-venue correlation in the heat gate
+futures_roll_bdays: 5               # roll N business days before min(last trade, contract month start)
 
 # === Monitor policy (every runner reads these) ===
+# What you practise on paper is what runs with money: every runner reads these. A flag overrides one for a run.
+# `trading doctor` shows what each layer has, and `trading audit query session-plans` compares sessions.
+poll_interval_seconds: 300
+strategy_map: ""                  # SYM=strategy,SYM=strategy
+intel_overlay: true               # on whenever WORLDMONITOR_API_KEY is set
+intel_refresh_seconds: 900
+require_card: false
+card_shim_port: 8787
+card_shim_host: 127.0.0.1         # a LAN address reaches the card or desk from a device
+card_attach: false                # wrap for the card but bind no port: a shim is already running
+card_ttl_seconds: 90
+require_basket: null              # null: on whenever require_card is on
+flatten_on_exit: true             # paper only: close the book on stop. A money session never closes itself
+warmup_interval_seconds: 0        # poll this fast for warmup_minutes after launch; 0 = off
+warmup_minutes: 60
+# Exits and adds on a held position. Comma-separated strategy names in the exempt and only lists.
+profit_lock: false
+profit_lock_exempt: ts_momentum
+candle_exit: false
+candle_exit_exempt: ""
+overbought_exit: false
+overbought_exit_exempt: ""
+oversold_entry: false
+oversold_entry_only: ts_momentum
+parallel_sizing: true             # each poll's entries sized jointly
+mute_alerts: ""                   # comma-separated symbols: still traded and journaled
+max_round_trip_cost_ratio: 0      # 0 = off. Kraken's fee alone is ~52 bps round trip
+params: default                   # default, wf or calibrated
+sizing_v2: true                   # Kraken's own lot rules; refuses to start without them
+ib_futures_only: false            # true narrows IB to futures. North American equities never go there
+persistence_min_polls: 5
+persistence_max_age_hours: 6      # an older run counts as no run, and is logged
+allocator_refresh_seconds: 3600   # weights recomputed between polls; 0 = boot only
+allocator_bias_floor: 0.1
+allocator_bias_cap: 3.0
+spectral_var_cap: null            # e.g. 0.005 turns the gate on
+spectral_var_level: 0.99
+spectral_var_horizon: 1
+hedge_symbol: ""                  # UUP runs the dollar-hedge overlay
+# Set this to the money you plan to trade: rounding, the minimum ticket and fees all scale with it.
+paper_starting_equity: 100000
+# Paper's costs per venue, over each venue's own fee shape (execution/venue_costs.py). Replace them
+# with what `trading audit query fill-quality` measures, e.g.:
+# paper_costs: {kraken: {commission_bps: 26, slippage_bps: 5}}
+paper_costs: {}
+ib_auto_confirm_prompts: false    # off: an IB warning prompt rejects the order
 # Skip a symbol while its venue is outside regular hours. No holiday calendar: a holiday reads as open.
 respect_market_hours: true
 # Act on Router.check_forced_exits. Off by default: it sends SELL orders with no strategy signal behind

@@ -13,13 +13,19 @@ import pandas as pd
 
 from trading_live_claude.data.kraken_ohlc import kraken_ohlc
 from trading_live_claude.logging_setup import get_logger
-from trading_live_claude.portfolio.allocator import PortfolioAllocator
+from trading_live_claude.portfolio.allocator import AllocationResult, PortfolioAllocator
 
 log = get_logger(__name__)
 
 
 def sleeve_conviction_bias(pairs: Mapping[str, Any], *,
                            fetch: Callable[..., pd.DataFrame] = kraken_ohlc) -> dict[str, float]:
+    """Per-symbol conviction bias alone; see :func:`sleeve_allocation`."""
+    return sleeve_allocation(pairs, fetch=fetch)[0]
+
+
+def sleeve_allocation(pairs: Mapping[str, Any], *, fetch: Callable[..., pd.DataFrame] = kraken_ohlc
+                      ) -> tuple[dict[str, float], AllocationResult | None, float]:
     """Run the correlation-aware allocator over the sleeve and return per-symbol conviction bias.
 
     Bias = allocator_weight / equal_weight_baseline. A pair the allocator concentrates on gets
@@ -30,6 +36,9 @@ def sleeve_conviction_bias(pairs: Mapping[str, Any], *,
     ``.screen_score``. Fetches shallow Kraken daily OHLC (~720 bars/pair); a correlation matrix needs
     refreshing weekly at most, so a start-of-session compute is fine. If a pair's fetch fails, its bias
     is 1.0 (neutral) rather than dropping it from the sleeve.
+
+    Also returns the allocation and the equal-weight baseline, so the live overlay can be applied to
+    the book through ``apply_overlay``; ``None`` and 0.0 when the allocator had nothing to work with.
     """
     returns: dict[str, pd.Series] = {}
     scores: dict[str, float] = {}
@@ -41,14 +50,15 @@ def sleeve_conviction_bias(pairs: Mapping[str, Any], *,
         except Exception as e:
             log.warning("allocator.fetch_failed", symbol=routed, error=str(e), bias=1.0)
     if not returns:
-        return {r: 1.0 for r in pairs}
+        return {r: 1.0 for r in pairs}, None, 0.0
     # Cap per-name at 0.30 so no single pair dominates; sleeve-level is one sleeve so it doesn't
     # matter. min_score=0 so every positive-scoring pair gets a slot.
     allocator = PortfolioAllocator(max_weight=0.30, max_sleeve_weight=1.0, min_score=0.0)
     result = allocator.allocate(returns, scores, regime_scalar=1.0)
     if not result.weights:
-        return {r: 1.0 for r in pairs}
+        return {r: 1.0 for r in pairs}, None, 0.0
     equal_weight = 1.0 / len(returns)
     # A pair whose fetch failed has no weight because it was never scored, not because the allocator
     # trimmed it: it stays neutral. (Before 2026-10-30 it got 0.0, which zeroed its sizing.)
-    return {r: result.weights.get(r, 0.0) / equal_weight if r in returns else 1.0 for r in pairs}
+    bias = {r: result.weights.get(r, 0.0) / equal_weight if r in returns else 1.0 for r in pairs}
+    return bias, result, equal_weight

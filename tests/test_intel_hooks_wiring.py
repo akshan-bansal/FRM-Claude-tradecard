@@ -17,7 +17,6 @@ import pytest
 import respx
 
 from tests.test_monitor import _Broker, _EntryStrategy, _Market, _Router
-from trading_live_claude import cli
 from trading_live_claude.intel.agents import _domain_slice, debate
 from trading_live_claude.intel.graph import (
     append_edges,
@@ -31,6 +30,7 @@ from trading_live_claude.intel.graph import (
 from trading_live_claude.intel.interpret import enrich_with_agents
 from trading_live_claude.intel.overlay import IntelSnapshot
 from trading_live_claude.intel.routing import PersistenceGate
+from trading_live_claude.monitor import session
 from trading_live_claude.monitor.live_loop import LiveMonitor, MonitorEvent
 from trading_live_claude.risk.sizing import PositionSizer
 
@@ -49,22 +49,12 @@ def _monitor_kwargs(path: Path, function: str | None = None) -> set[str]:
     return {k.arg for k in calls[0].keywords if k.arg}
 
 
-@pytest.mark.parametrize("function", ["live", "autonomous_run", "signal"])
-def test_the_cli_runners_pass_every_intel_hook(function: str) -> None:
-    assert _monitor_kwargs(REPO / "src" / "trading_live_claude" / "cli.py", function) >= ALL_HOOKS
-
-
-@pytest.mark.parametrize("script", ["paper_ib.py", "paper_kraken.py"])
-def test_the_paper_scripts_pass_every_intel_hook(script: str) -> None:
-    assert _monitor_kwargs(REPO / "scripts" / script) >= ALL_HOOKS
-
-
-def test_trading_paper_reads_the_persistence_gate() -> None:
-    assert "persistence_for" in _monitor_kwargs(REPO / "src" / "trading_live_claude" / "cli.py", "paper")
+def test_the_one_monitor_every_runner_gets_has_every_intel_hook() -> None:
+    assert _monitor_kwargs(REPO / "src" / "trading_live_claude" / "monitor" / "session.py", "build_session") >= ALL_HOOKS
 
 
 def test_no_key_leaves_the_overlay_off_and_the_runner_running() -> None:
-    assert cli._intel_overlay_hooks(SimpleNamespace(worldmonitor_api_key="")) == (None, None)
+    assert session.intel_overlay_hooks(SimpleNamespace(worldmonitor_api_key="")) == (None, None)
 
 
 # ---------------------------------------------------------------- allocator bias
@@ -79,7 +69,7 @@ class _CloseMarket:
 def test_a_symbol_outside_the_validated_list_stays_neutral(monkeypatch: pytest.MonkeyPatch) -> None:
     validated = {"AAA": SimpleNamespace(oos_score=1.0), "BBB": SimpleNamespace(oos_score=1.0)}
     monkeypatch.setattr("trading_live_claude.analysis.universe.WALK_FORWARD_VALIDATED", validated)
-    bias = cli._allocator_weight_bias(_CloseMarket(), ["AAA", "BBB", "UNVALIDATED"])
+    bias = session.allocator_weight_bias(_CloseMarket(), ["AAA", "BBB", "UNVALIDATED"])
     assert bias is not None
     assert bias("UNVALIDATED") == 1.0
     assert bias("AAA") > 0.0 and bias("BBB") > 0.0
@@ -87,7 +77,7 @@ def test_a_symbol_outside_the_validated_list_stays_neutral(monkeypatch: pytest.M
 
 def test_no_validated_symbol_means_no_bias(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("trading_live_claude.analysis.universe.WALK_FORWARD_VALIDATED", {})
-    assert cli._allocator_weight_bias(_CloseMarket(), ["UNVALIDATED"]) is None
+    assert session.allocator_weight_bias(_CloseMarket(), ["UNVALIDATED"]) is None
 
 
 # ---------------------------------------------------------------- hooks on the monitor

@@ -20,6 +20,9 @@ from .base import Broker, BrokerError, OrderRejected, TokenExpired
 from .models import Account, Candle, Execution, Order, Position, Quote
 from .token_store import TokenSet, TokenStore
 
+# The one login host that answers. practicelogin.questrade.com's token endpoint returned 404 on
+# 2026-11-01 where this one returns 400 to a bad token, so a practice login cannot be routed to; the
+# refresh token alone decides which account is traded. verify_environment checks that before real orders.
 LOGIN_HOST = "https://login.questrade.com"
 
 # Canonical interval → Questrade REST wire word. Every other broker's canonical lexicon
@@ -30,6 +33,11 @@ TOKEN_PATH = "/oauth2/token"
 API_VERSION = "v1"
 
 log = get_logger(__name__)
+
+
+def environment_of(api_server: str) -> str:
+    """Which Questrade environment an ``api_server`` from a token exchange belongs to."""
+    return "practice" if "practice" in api_server.lower() else "live"
 
 
 class QuestradeBroker(Broker):
@@ -85,6 +93,16 @@ class QuestradeBroker(Broker):
         self._store.save(tokens)
         log.info("questrade.token.refresh.ok", api_server=tokens.api_server)
         return tokens
+
+    def verify_environment(self, expected: str) -> None:
+        """Refuse unless the stored token really is for ``expected``; call before any real order."""
+        actual = environment_of(self._ensure_token().api_server)
+        if actual != expected:
+            raise BrokerError(
+                f"This Questrade token is for the {actual} environment, but the session expects {expected}. "
+                f"Nothing here can route it elsewhere, so real orders would reach the {actual} account. "
+                "To practise, use a paper session (trading paper, or AUTONOMOUS_ACCOUNT=paper)."
+            )
 
     def _ensure_token(self) -> TokenSet:
         # Locked so only one thread refreshes; others wait, then see the fresh token.

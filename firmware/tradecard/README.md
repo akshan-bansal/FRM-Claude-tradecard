@@ -25,8 +25,9 @@ Skeleton firmware for the approval card. Speaks the same REST protocol as
 
 | File | Purpose |
 |---|---|
-| `main/main.c` | Wi-Fi bring-up, Ed25519 keys (NVS), passbook, PCD8544 driver, 5-key input, long-poll, sign + respond |
-| `main/Kconfig.projbuild` | menuconfig entries for SSID / PSK / shim URL / card_id |
+| `main/main.c` | Wi-Fi bring-up, Ed25519 keys (NVS), passbook, PCD8544 driver, text rendering, 5-key input, long-poll, sign + respond |
+| `main/font5x7.h` | 5×7 column-major bitmap font, ASCII 0x20–0x7E (475 bytes of `.rodata`) |
+| `main/Kconfig.projbuild` | menuconfig entries for SSID / PSK / shim URL / shim token / card_id |
 | `main/CMakeLists.txt` | Component deps: `esp_http_client`, `json`, `libsodium`, `driver`, `nvs_flash` |
 | `sdkconfig.defaults` | Target esp32s3, 8MB flash, TLS via mbedTLS |
 | `CMakeLists.txt` | Top-level project file |
@@ -61,17 +62,57 @@ idf.py build flash monitor
 
 ## Protocol contract (must match `src/trading_live_claude/execution/approval.py`)
 
+- Auth: every `/v1` call carries `Authorization: Bearer <token>` — set
+  `TRADECARD_SHIM_TOKEN` in menuconfig to the token the shim prints at startup.
+  Without it the default shim answers 401 to register, poll and respond.
 - Register: `POST /v1/card/register` with `{card_id, pubkey_pem}` — Ed25519 SPKI PEM.
 - Poll: `GET /v1/intents/pending` → `{prompts: [Prompt]}`.
-- Prompt fields the card should display: `broker`, `action`, `symbol`,
-  `shares`, `notional_usd`, `thesis` (and `intel_ref` for a full writeup
-  the phone bridge can fetch). The `expires_at` field drives the countdown.
 - Sign: exactly the `canonical` string field of the prompt, as bytes.
-  Canonical order is `broker|action|symbol|shares|entry|notional|account|intent_id|nonce`.
+  Canonical order is `broker|action|symbol|shares|entry|notional|account|intent_id|nonce`;
+  `shares` is `12` for whole quantities and e.g. `0.05` for fractional crypto.
+- **Display only what is signed.** Order details (broker, action, symbol, shares,
+  notional) are parsed from `canonical`, never from the prompt's separate JSON
+  fields, and the card refuses to sign unless `canonical` has exactly nine
+  non-empty fields and its `intent_id` matches the prompt's. `thesis` is shown as
+  unsigned context. The countdown is `expires_at − issued_at`, minus a small
+  network margin.
 - Respond: `POST /v1/intents/{id}/response` with
   `{decision: "ACCEPT"|"DECLINE", card_id, signature: base64(ed25519_sig)}`.
 
 The shim rejects unknown cards, bad signatures, expired intents, and replays.
+
+## Screen layout (14 columns x 6 rows)
+
+The panel is 84x48 with a 5x7 font on a 6px advance, so every screen is a
+14-column grid. `lcd_puts` paints into `s_fb`; `lcd_puts_inv` renders a row
+inverted, which is the only emphasis a 1-bit panel offers.
+
+**Prompt** — rows 0-4 are drawn *only* from the parsed `canonical`, one signed
+value per row. They each get their own row deliberately: a combined
+`$notional @entry` line overflows 14 columns on anything priced like BTC, and a
+silently clipped price is what WYSIWYS exists to prevent. Any string that still
+cannot fit has its last character replaced with `~`, so a truncated value never
+reads as the whole one.
+
+```
++--------------+
+|paper     118s|   inverse: broker + countdown
+|Buy LINK/USD  |   action + symbol
+|15.11713215sh |   shares
+|@12.2342      |   entry
+|$184.95       |   notional
+|L=NO     R=OK |   inverse: key legend (alternates with the thesis)
++--------------+
+```
+
+Row 5 alternates every three seconds between the key legend and the `thesis`,
+which is unsigned context and usually wider than the panel, so it pans one
+step at a time. The countdown ticks against a fixed deadline, so no keypress
+can extend the window the shim granted.
+
+Non-ASCII bytes render as `?`. A thesis carrying a UTF-8 em dash therefore
+shows three of them — the VS engine emits one today, so prefer ASCII
+punctuation in the `<=140` char thesis.
 
 ## Passbook layout on the LCD
 
@@ -84,15 +125,17 @@ X quest  BUY VFV.TO 4sh $520
 UP/DN scroll
 ```
 
-`A` = accepted, `D` = declined, `X` = expired. Broker column tells you at
+`A` = accepted, `D` = declined, `X` = expired, `R` = refused (malformed canonical). Broker column tells you at
 a glance which brokerage the trade went to.
 
 ## What this skeleton is NOT
 
+- **Not compiled.** No ESP-IDF toolchain has been run against this tree yet,
+  so everything here is source-level only. Run `idf.py build` before trusting
+  any of it. The font table and the screen layouts were checked by porting
+  `lcd_puts_ex` / `fit` to a host harness and rendering real canonical strings.
 - Not TLS-pinned. Add `esp_transport_ssl_set_client_cert_data` and pin the
   shim's cert if the card ever crosses an untrusted network.
-- No real font. `lcd_puts` currently mirrors to UART; wire in a 5×7 font
-  (Adafruit-GFX / u8g2 style) to actually paint pixels into `s_fb`.
 - Not power-managed. Real card needs `esp_pm_lock` and deep-sleep between
   polls to hit a card-form-factor battery budget.
 - Not tamper-hardened. Storing `g_sk` in NVS is fine for breadboard; move

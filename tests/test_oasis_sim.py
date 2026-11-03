@@ -301,4 +301,6 @@ def test_the_sim_layer_is_outside_the_trading_path() -> None:
     for f in (Path(__file__).resolve().parent.parent / "src" / "trading_live_claude" / "sim").glob("*.py"):
         mods = {n.module for n in ast.walk(ast.parse(f.read_text(encoding="utf-8")))
                 if isinstance(n, ast.ImportFrom) and n.module}
+        # The cost model is plain arithmetic: the society's cost check prices with it and places nothing.
+        mods -= {"execution.venue_costs", "..execution.venue_costs", "trading_live_claude.execution.venue_costs"}
         assert not {m for m in mods for x in forbidden if f".{x}" in f".{m}"}, f.name

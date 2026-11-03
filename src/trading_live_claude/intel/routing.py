@@ -4,8 +4,10 @@ The live monitor asks ``overlay_for(symbol)`` for the current de-risk decision t
 symbol. That needs two things: a map from symbol to overlay asset class (``classify_symbol``), and a
 periodically-refreshed set of :class:`~trading_live_claude.intel.overlay.OverlayDecision`s built from
 a live snapshot (:class:`OverlayProvider`). The provider is deliberately fail-safe: if a refresh
-raises (network hiccup, expired key) it keeps the last good decisions, and if it has never had a
-good read it returns ``None`` so the monitor behaves exactly as if no overlay were configured.
+raises it keeps the last good decisions, and if it has never had a good read it returns ``None`` so
+the monitor behaves exactly as if no overlay were configured. A vendor outage usually does not raise:
+``WorldMonitorClient.snapshot`` catches each failed call and returns a degraded snapshot, whose
+decisions replace the last good ones at no more than ``degraded_cap``.
 
 This module also provides :class:`PersistenceGate`, an entry-side halt built on the intel graph's
 ``edge_persistence`` query. The rule it enforces: an entry in a symbol whose overlay class is
@@ -15,12 +17,16 @@ polls. This turns the difference between "one 6x event-acceleration spike is noi
 """
 from __future__ import annotations
 
+import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from trading_live_claude.data.futures_calendar import ROOT_CALENDARS
 from trading_live_claude.intel.graph import (
+    Edge,
+    _age_hours,
     default_graph_journal,
     edge_persistence,
     load_edges,
@@ -74,7 +80,12 @@ def classify_symbol(symbol: str, overrides: Mapping[str, OverlayClass] | None = 
         return {k.upper(): v for k, v in overrides.items()}[s]
     if s.startswith("/"):
         return "future"   # futures root notation (/ES) — before the crypto "/" check
-    if "/" in s or s.split("-")[0] in _CRYPTO_BASES:
+    if "/" in s:
+        # BASE/QUOTE is crypto (Kraken) unless both legs are fiat codes: EUR/USD is FX. Checked
+        # here because the 6-letter FX test below never sees the slash form (fixed 2026-09-18).
+        base, _, quote = s.partition("/")
+        return "fx" if base in _FX_CODES and quote in _FX_CODES else "crypto"
+    if s.split("-")[0] in _CRYPTO_BASES:
         return "crypto"
     if len(s) == 6 and s[:3] in _FX_CODES and s[3:] in _FX_CODES:
         return "fx"
@@ -120,13 +131,23 @@ class OverlayProvider:
     ``snapshot_fn`` is a *synchronous* zero-arg callable returning a fresh :class:`IntelSnapshot`
     (the CLI wraps the async WorldMonitor client in one). Decisions are recomputed at most every
     ``refresh_seconds``; failures are swallowed so the monitor loop never breaks on intel I/O.
+
+    ``background=True`` refreshes stale decisions on a daemon thread and keeps serving the previous
+    ones until it lands (stale-while-revalidate). Only the very first fetch blocks, since there is
+    nothing to serve yet. 2026-09-18: synchronous refresh ran inside the trading loop's first entry
+    evaluation after each TTL, stalling the whole poll for the snapshot fetch (measured 3.2 s).
+    Default False keeps the synchronous behaviour for existing callers.
     """
 
     def __init__(self, snapshot_fn: Callable[[], IntelSnapshot], *, refresh_seconds: float = 900.0,
                  overlay: RiskOverlay | None = None,
                  class_overrides: Mapping[str, OverlayClass] | None = None,
-                 journal: bool = True) -> None:
+                 journal: bool = True,
+                 background: bool = False) -> None:
         self._snapshot_fn = snapshot_fn
+        self._background = background
+        self._inflight_lock = threading.Lock()
+        self._inflight = False
         self._refresh = refresh_seconds
         self._overlay = overlay or RiskOverlay()
         self._overrides = class_overrides
@@ -134,6 +155,26 @@ class OverlayProvider:
         self._decisions: dict[OverlayClass, OverlayDecision] | None = None
         self._last_snapshot: IntelSnapshot | None = None
         self._ts = 0.0
+        self._own_loop = False       # start_background: refreshes come from its thread, never a poll
+
+    def start_background(self) -> threading.Thread:
+        """Read once now, then refresh on a daemon thread, so a slow vendor cannot hold up a poll.
+
+        Otherwise the refresh runs inside ``LiveMonitor.step`` on an entry evaluation, and several vendor
+        calls in sequence could delay the rest of the poll, exits included. The first read is synchronous
+        so a session's first entries are not evaluated with no overlay at all.
+        """
+        self.refresh(force=True)
+        self._background = self._own_loop = True
+
+        def _loop() -> None:
+            while True:
+                time.sleep(self._refresh)
+                self.refresh(force=True)
+
+        thread = threading.Thread(target=_loop, daemon=True, name="overlay-refresh")
+        thread.start()
+        return thread
 
     @property
     def last_snapshot(self) -> IntelSnapshot | None:
@@ -148,6 +189,23 @@ class OverlayProvider:
     def refresh(self, *, force: bool = False) -> None:
         if not force and self._decisions is not None and (time.monotonic() - self._ts) < self._refresh:
             return
+        if self._background and self._decisions is not None:
+            with self._inflight_lock:
+                if self._inflight:
+                    return
+                self._inflight = True
+            threading.Thread(target=self._refresh_bg, name="overlay-refresh", daemon=True).start()
+            return
+        self._fetch()
+
+    def _refresh_bg(self) -> None:
+        try:
+            self._fetch()
+        finally:
+            with self._inflight_lock:
+                self._inflight = False
+
+    def _fetch(self) -> None:
         try:
             snap = self._snapshot_fn()
             self._decisions = self._overlay.evaluate(snap)
@@ -163,7 +221,8 @@ class OverlayProvider:
             log.warning("overlay.refresh_failed", error=str(e))
 
     def __call__(self, symbol: str) -> OverlayDecision | None:
-        self.refresh()
+        if not self._own_loop:
+            self.refresh()
         if self._decisions is None:
             return None
         return self._decisions.get(classify_symbol(symbol, self._overrides))
@@ -222,6 +281,7 @@ class PersistenceGate:
         # Precomputed per-domain persistence, refreshed on cadence. None → not yet read.
         self._persistence_by_domain: dict[str, int] | None = None
         self._ts = 0.0
+        self._stale_noted: str | None = None       # the newest poll we already warned about
 
     def refresh(self, *, force: bool = False) -> None:
         if not force and self._persistence_by_domain is not None and (
@@ -236,11 +296,27 @@ class PersistenceGate:
                 for doms in _CLASS_TO_DOMAINS.values() for dom in doms
             }
             self._ts = time.monotonic()
+            self._warn_if_stale(edges)
             log.info("persistence_gate.refreshed",
                      persistence=self._persistence_by_domain, min_polls=self.min_polls)
         except Exception as e:                          # fail-open: never halt on graph I/O errors
             log.warning("persistence_gate.refresh_failed", error=str(e))
             self._persistence_by_domain = {}
+
+    def _warn_if_stale(self, edges: Sequence[Edge]) -> None:
+        """A run older than the limit counts as no run, which looks just like a calm market. Say so,
+        once per poll it is stuck on, so a dead poller is visible."""
+        if self._max_age_hours is None:
+            return
+        polls = [e for e in edges if "poll" in (e.subject[0], e.object[0]) and e.as_of]
+        if not polls:
+            return
+        newest = max(polls, key=lambda e: e.as_of)
+        age_hours = _age_hours(newest, datetime.now(UTC))
+        if age_hours is not None and age_hours > self._max_age_hours and newest.as_of != self._stale_noted:
+            self._stale_noted = newest.as_of
+            log.warning("persistence_gate.stale_run", age_hours=round(age_hours, 1),
+                        max_age_hours=self._max_age_hours, graph=str(self._graph_path))
 
     def __call__(self, symbol: str) -> tuple[bool, str]:
         self.refresh()

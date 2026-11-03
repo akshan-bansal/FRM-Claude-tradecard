@@ -338,13 +338,15 @@ def test_approval_db_verdicts_are_reconciled(tmp_path: Path) -> None:
 
 def test_the_qt_signal_command_exposes_the_audit_ledger_flag() -> None:
     """Guards the wiring: if the flag disappears, the QT book silently stops recording."""
-    from typer.testing import CliRunner
+    import typer
 
     from trading_live_claude.cli import app
 
-    out = CliRunner().invoke(app, ["signal", "--help"]).output
-    assert "--audit-ledger" in out and "--no-audit-ledger" in out
-    assert "state/ledger" in out.replace("\n", "")
+    # The command's own options, not its help text: colour and terminal width break that up.
+    signal = typer.main.get_command(app).commands["signal"]
+    flag = next(p for p in signal.params if "--audit-ledger" in p.opts)
+    assert "--no-audit-ledger" in flag.secondary_opts
+    assert "state/ledger" in flag.help
 
 
 def test_both_paper_runners_default_the_ledger_on() -> None:
@@ -356,18 +358,14 @@ def test_both_paper_runners_default_the_ledger_on() -> None:
     sig = inspect.signature(cli.signal)
     assert sig.parameters["audit_ledger"].default.default is True
 
-    kraken = Path(__file__).resolve().parents[1] / "scripts" / "paper_kraken.py"
-    src = kraken.read_text(encoding="utf-8")
+    session = Path(__file__).resolve().parents[1] / "src" / "trading_live_claude" / "monitor" / "session.py"
+    src = session.read_text(encoding="utf-8")
     assert '"--audit-ledger"' in src and "default=True" in src
 
 
 def test_every_runner_uses_its_own_stream() -> None:
     """One shared chain across processes would interleave; separate streams is the whole design."""
-    root = Path(__file__).resolve().parents[1]
-    for rel, stream in (("src/trading_live_claude/cli.py", "qt"),
-                        ("scripts/paper_kraken.py", "kraken"),
-                        ("scripts/paper_ib.py", "ib")):
-        src = (root / rel).read_text(encoding="utf-8")
-        assert f'stream="{stream}"' in src, rel
-        assert "ledger=ledger" in src, rel
-        assert '"--audit-ledger"' in src or '"--audit-ledger/--no-audit-ledger"' in src, rel
+    from trading_live_claude.monitor.session import _STREAMS
+    assert len(set(_STREAMS.values())) == len(_STREAMS)
+    assert _STREAMS[("kraken", False)] == "kraken" and _STREAMS[("ib", False)] == "ib"
+    assert 'stream="qt"' in (Path(__file__).resolve().parents[1] / "src/trading_live_claude/cli.py").read_text(encoding="utf-8")

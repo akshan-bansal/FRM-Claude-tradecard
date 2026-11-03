@@ -10,7 +10,9 @@
       "Bash(python bsm_proto.py validate *)",
       "Bash(python bsm_proto.py export *)",
       "Bash(python bsm_proto.py compile *)",
-      "Bash(cmd //c \"C:\\Users\\PC\\OneDrive\\Desktop\\Components\\BSM_Spectral\\run_maturation.cmd\")"
+      "Bash(python bsm_detect.py --selftest)",
+      "Bash(python bsm_detect.py --demo *)",
+      "Bash(cmd //c \"C:\\Users\\PC\\OneDrive\\Desktop\\Components\\FRM-Claude-tradecard\\BSM_Spectral\\run_maturation.cmd\")"
     ]
   }
 }

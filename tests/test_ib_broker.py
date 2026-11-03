@@ -216,6 +216,124 @@ def test_place_order_still_defaults_us_ticker_to_smart_usd(monkeypatch: pytest.M
     assert captured == {"symbol": "AAPL", "exchange": "SMART", "currency": "USD"}
 
 
+def test_infer_stock_venue_asia() -> None:
+    assert _infer_stock_venue("7203.T") == ("7203", "TSEJ", "JPY")
+    assert _infer_stock_venue("0700.HK") == ("700", "SEHK", "HKD")
+
+
+def test_quotes_and_candles_route_to_the_listing_venue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Quotes and candles used to hardcode SMART/USD even after place_order learned suffixes."""
+    built: list[tuple[str, str, str]] = []
+
+    class _FakeStock:
+        def __init__(self, symbol, exchange, currency):
+            built.append((symbol, exchange, currency))
+            self.conId = 1
+
+    class _FakeIB:
+        def reqTickers(self, *contracts):
+            return [SimpleNamespace(contract=c, bid=1.0, ask=1.1, last=1.05) for c in contracts]
+
+        def reqHistoricalData(self, contract, **kw):
+            return []
+
+        def reqContractDetails(self, contract):
+            return [SimpleNamespace(priceMagnifier=1, sizeIncrement=1.0)]
+
+    monkeypatch.setitem(sys.modules, "ib_insync", SimpleNamespace(Stock=_FakeStock))
+    b = IBBroker()
+    monkeypatch.setattr(b, "_require_ib", lambda: _FakeIB())
+    from datetime import UTC, datetime, timedelta
+    now = datetime.now(UTC)
+    b.quotes(["XIC.TO", "0700.HK"])
+    b.candles("7203.T", now - timedelta(days=5), now)
+    # Each listing is built once for its (cached) contract details, then for the data request.
+    assert list(dict.fromkeys(built)) == [("XIC", "TSE", "CAD"), ("700", "SEHK", "HKD"),
+                                          ("7203", "TSEJ", "JPY")]
+
+
+class _DetailsIB:
+    """Fake IB returning per-symbol contract details, quotes and bars in IB's quoted units."""
+
+    def __init__(self, details: dict[str, SimpleNamespace], px: float) -> None:
+        self.details, self.px, self.detail_calls = details, px, 0
+
+    def reqContractDetails(self, contract):
+        self.detail_calls += 1
+        d = self.details.get(contract.symbol)
+        return [d] if d is not None else []
+
+    def reqTickers(self, *contracts):
+        return [SimpleNamespace(contract=c, bid=self.px - 1, ask=self.px + 1, last=self.px)
+                for c in contracts]
+
+    def reqHistoricalData(self, contract, **kw):
+        from datetime import date
+        return [SimpleNamespace(date=date(2026, 9, 21), open=self.px, high=self.px + 2,
+                                low=self.px - 2, close=self.px, volume=10)]
+
+
+def _stock_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Stock:
+        def __init__(self, symbol, exchange, currency):
+            self.symbol, self.exchange, self.currency, self.conId = symbol, exchange, currency, 1
+    monkeypatch.setitem(sys.modules, "ib_insync", SimpleNamespace(Stock=_Stock))
+
+
+def test_pence_quoted_lse_prices_are_rescaled_to_pounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BP. quotes in GBX (priceMagnifier 100): 450p must reach the book as GBP 4.50, not 450."""
+    _stock_stub(monkeypatch)
+    fake = _DetailsIB({"BP.": SimpleNamespace(priceMagnifier=100, sizeIncrement=1.0)}, px=450.0)
+    b = IBBroker()
+    monkeypatch.setattr(b, "_require_ib", lambda: fake)
+    q = b.quote("BP..L")
+    assert (q.bidPrice, q.askPrice, q.lastTradePrice) == pytest.approx((4.49, 4.51, 4.50))
+    from datetime import UTC, datetime, timedelta
+    now = datetime.now(UTC)
+    bar = b.candles("BP..L", now - timedelta(days=5), now)[0]
+    assert (bar.open, bar.high, bar.low, bar.close) == pytest.approx((4.50, 4.52, 4.48, 4.50))
+    assert fake.detail_calls == 1                          # cached after the first lookup
+
+
+def test_missing_contract_details_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No details = unknown magnifier; a quote that might be 100x off must not be returned."""
+    _stock_stub(monkeypatch)
+    b = IBBroker()
+    monkeypatch.setattr(b, "_require_ib", lambda: _DetailsIB({}, px=450.0))
+    with pytest.raises(BrokerError, match="cannot scale"):
+        b.quote("BP..L")
+
+
+def test_board_lot_comes_from_the_size_increment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Probe 2026-09-21: 1306.T trades in 10s, 7203.T in 100s, 2800 HK in 500s, IOZ in 1s."""
+    _stock_stub(monkeypatch)
+    fake = _DetailsIB({"1306": SimpleNamespace(priceMagnifier=1, sizeIncrement=10.0),
+                       "7203": SimpleNamespace(priceMagnifier=1, sizeIncrement=100.0),
+                       "2800": SimpleNamespace(priceMagnifier=1, sizeIncrement=500.0),
+                       "IOZ": SimpleNamespace(priceMagnifier=1, sizeIncrement=1.0),
+                       "SPY": SimpleNamespace(priceMagnifier=1, sizeIncrement=0.0001)}, px=1.0)
+    b = IBBroker()
+    monkeypatch.setattr(b, "_require_ib", lambda: fake)
+    assert b.stock_details("1306.T").board_lot == 10
+    assert b.stock_details("7203.T").board_lot == 100
+    assert b.stock_details("2800.HK").board_lot == 500
+    assert b.stock_details("IOZ.AX").board_lot is None      # lot of 1 = no rounding needed
+    assert b.stock_details("SPY").board_lot is None         # fractional shares
+
+
+def test_live_login_is_refused_unless_explicitly_used_as_data_only() -> None:
+    from trading_live_claude.brokers.ib import require_paper_or_data_only
+
+    assert require_paper_or_data_only(["DU123", "DU456"], live_data_only=False) == "paper"
+    with pytest.raises(BrokerError, match="LIVE account"):
+        require_paper_or_data_only(["U123"], live_data_only=False)
+    with pytest.raises(BrokerError, match="LIVE account"):
+        require_paper_or_data_only(["DU123", "U123"], live_data_only=False)
+    assert require_paper_or_data_only(["U123"], live_data_only=True) == "live-data-only"
+    with pytest.raises(BrokerError, match="no accounts"):
+        require_paper_or_data_only([], live_data_only=True)
+
+
 def test_ib_broker_exports_from_package_namespace() -> None:
     """Registration check — IBBroker + its dataclasses must be importable from brokers/."""
     from trading_live_claude.brokers import (

@@ -36,12 +36,10 @@ RUNNERS = [REPO / "src" / "trading_live_claude" / "cli.py", REPO / "scripts" / "
 # ---------------------------------------------------------------- one policy, every runner
 
 @pytest.mark.parametrize("path", RUNNERS, ids=lambda p: p.name)
-def test_every_runner_builds_from_the_shared_policy(path: Path) -> None:
+def test_every_runner_builds_from_the_shared_session(path: Path) -> None:
     src = path.read_text(encoding="utf-8")
-    assert src.count("LiveMonitor(") == src.count("**monitor_policy(settings)") > 0
-    assert src.count("Router.build_default(") == src.count("**Router.limits_from(settings)") > 0
+    assert "LiveMonitor(" not in src and "start_session(" in src
     assert "cap_pct=settings.portfolio_heat_cap" not in src     # no runner hand-lists its own limits
-    assert "preflight(" in src
 
 
 def test_limits_from_carries_every_risk_knob(tmp_path: Path) -> None:
@@ -56,15 +54,12 @@ def test_limits_from_carries_every_risk_knob(tmp_path: Path) -> None:
     assert (r.force_exit_atr_mult, r.on_size_cap_breach) == (2.5, "reject")
 
 
-def test_live_takes_what_the_paper_runners_take() -> None:
-    params = inspect.signature(cli.live).parameters
-    for name in ("strategy_map", "level", "require_card", "card_shim_port", "card_ttl", "require_basket",
-                 "spectral_var_cap", "spectral_var_level", "spectral_var_horizon"):
-        assert name in params, name
-    source = inspect.getsource(cli.live)
-    for needed in ("preflight(", "_alert_emitter(", "attach_basket_gate(", "attach_spectral_gate(",
-                   "wire_card_approval(", "strict=True"):
-        assert needed in source, needed
+def test_live_takes_exactly_what_paper_takes() -> None:
+    live = set(inspect.signature(cli.live).parameters)
+    paper = set(inspect.signature(cli.paper).parameters)
+    assert live - paper == {"confirm", "allow_screened"}
+    # A simulated book's own: its balance, closing itself on stop, resuming, and the one-shots.
+    assert paper - live == {"starting_equity", "flatten_on_exit", "resume_session", "close_symbols", "trim_to_slots"}
 
 
 # ---------------------------------------------------------------- a halt lets exits out
@@ -204,14 +199,16 @@ def test_unreadable_holding_gets_no_exemption(tmp_path: Path) -> None:
 
 
 def test_a_failed_read_does_not_stop_a_new_entry(tmp_path: Path) -> None:
-    """An entry was never exempt, so a positions outage must not change how it is gated."""
+    """An entry was never exempt, so a positions outage must not change how it is gated: the caller's
+    figure for the book stands in. With neither, the leverage cap has nothing to read, so it refuses."""
     r = _holding(tmp_path, 0.0)
 
     def boom(_a: str) -> list[Position]:
         raise BrokerError("positions unavailable")
 
     r.broker.positions = boom  # type: ignore[method-assign]
-    assert r._gate(_intent(OrderAction.BUY, 5), **BOOK).accepted
+    assert r._gate(_intent(OrderAction.BUY, 5), **BOOK, current_open_notional=0.0).accepted
+    assert "open notional unavailable" in r._gate(_intent(OrderAction.BUY, 5), **BOOK).rejected_reasons[0]
 
 
 def test_exempted_decisions_replay(tmp_path: Path) -> None:

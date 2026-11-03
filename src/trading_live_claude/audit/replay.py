@@ -2,7 +2,8 @@
 
 A ``RISK_CHECK`` / ``RISK_REJECTED`` row records the intent as it reached the gate, every input
 ``Router._gate`` read (equity, existing risk, open positions, open notional), every observation it
-took from outside the intent (kill-switch, basket, daily budget, spectral VaR), and the thresholds.
+took from outside the intent (kill-switch, basket, daily budget, spectral VaR, the book, the size
+rule and cap for the symbol, a society's influence), and the thresholds.
 Replay builds a Router with those thresholds, stubs the outside observations with the recorded
 values, runs ``_gate`` and compares the outcome: accepted, reasons, and the size it left.
 
@@ -23,8 +24,10 @@ from ..brokers.base import BrokerError
 from ..brokers.models import OrderAction
 from ..execution.daily_budget import DailyBudgetState
 from ..execution.router import OrderIntent, Router
+from ..execution.venue_costs import VenueCostModel
 from ..risk.heat import PortfolioHeat
 from ..risk.kill_switch import KillState
+from ..risk.quantity import QuantityRule
 from ..risk.spectral_var import (
     SpectralCheck,
     short_reason,
@@ -40,7 +43,7 @@ class _NullJournal:
 
 
 class _NullBroker:
-    name = "replay"
+    name = venue = "replay"
 
     def __init__(self, symbol: str = "", held: float | None = None) -> None:
         self._symbol, self._held = symbol, held
@@ -93,7 +96,7 @@ class _Spectral:
     def thresholds(self) -> dict[str, Any]:
         return self.thr
 
-    def check(self, symbol: str, *, shares: int, entry: float, equity: float) -> SpectralCheck:
+    def check(self, symbol: str, *, shares: float, entry: float, equity: float) -> SpectralCheck:
         o, t = self.observed, self.thr
         if "error" in o:
             return SpectralCheck(unavailable_reason(symbol, str(o["error"])), None, "", o)
@@ -103,7 +106,7 @@ class _Spectral:
         summary = summary_text(float(t["level"]), int(t["horizon_days"]), float(o["var_usd"]),
                                float(o["loss_fraction"]), float(o["cap_usd"]),
                                float(t["cap_pct"]))
-        return SpectralCheck(None, int(o["max_shares"]), summary, o)
+        return SpectralCheck(None, float(o["max_shares"]), summary, o)
 
 
 def gate_version_now(thresholds: Mapping[str, Any]) -> str:
@@ -132,10 +135,21 @@ def replay_row(row: Mapping[str, Any]) -> dict[str, Any]:
                     heat=PortfolioHeat(cap_pct=float(thr["heat_cap_pct"])),
                     max_open_positions=int(thr["max_open_positions"]),
                     min_ticket_usd=float(thr["min_ticket_usd"]),
+                    max_round_trip_cost_ratio=float(thr.get("max_round_trip_cost_ratio") or 0.0),
+                    cost_model=VenueCostModel(**thr["cost_model"]) if thr.get("cost_model") else None,
                     max_gross_leverage=float(thr["max_gross_leverage"]),
                     max_position_notional_pct=float(thr["max_position_notional_pct"]),
                     force_exit_atr_mult=float(thr["force_exit_atr_mult"]),
                     on_size_cap_breach=thr["on_size_cap_breach"])
+    book = observed.get("book") or {}
+    # Everything the gate read off the book or for the symbol, answered from the record.
+    router._book_notional = lambda *_a, **_k: (  # type: ignore[method-assign]
+        (book.get("open_notional", 0.0), book.get("held_in_symbol", 0.0)) if book.get("readable", True) else None)
+    router._cost_reserve = lambda *_a: book.get("cost_reserve", 0.0)  # type: ignore[method-assign]
+    if book:
+        router.position_cap_pct_for = lambda _s: float(book["position_cap_pct"])
+        rule = QuantityRule(**book["quantity_rule"])
+        router.quantity_rule_for = lambda _s: rule
     if thr.get("basket_gate"):
         router.basket_gate = _Basket(thr["basket_gate"], observed.get("basket_reason"))  # type: ignore[assignment]
     if "daily_budget" in observed:
@@ -144,16 +158,21 @@ def replay_row(row: Mapping[str, Any]) -> dict[str, Any]:
         router.spectral_gate = _Spectral(observed["spectral_var"], thr["spectral_var"],  # type: ignore[assignment]
                                          str(p["symbol"]))
     intent = OrderIntent(symbol=str(p["symbol"]), action=OrderAction(p["action"]),
-                         shares=int(p["requested_shares"]), entry=float(p["entry"]),
+                         shares=float(p["requested_shares"]), entry=float(p["entry"]),
                          stop=float(p["stop"]),
                          target=float(p["target"]) if p.get("target") is not None else None,
                          strategy=str(row.get("strategy_id") or ""),
                          risk_dollars=float(p["risk_dollars"]), account_number="replay",
                          timestamp=datetime.now(UTC), broker=str(p.get("broker") or ""))
+    society = observed.get("society")
+    if society:
+        intent.society_influence = float(society["influence"])
+        intent.society_run_id = str(society.get("run_id") or "")
+    notional_in = inputs["current_open_notional"]
     decision = router._gate(intent, equity=float(inputs["equity"]),
                             existing_risk=float(inputs["existing_risk"]),
                             open_positions=int(inputs["open_positions"]),
-                            current_open_notional=float(inputs["current_open_notional"]))
+                            current_open_notional=None if notional_in is None else float(notional_in))
     diffs = {}
     if decision.accepted != bool(p["accepted"]):
         diffs["accepted"] = {"recorded": p["accepted"], "replayed": decision.accepted}

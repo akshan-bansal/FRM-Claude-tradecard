@@ -34,6 +34,7 @@ from typing import Any, cast
 import httpx
 
 from ..logging_setup import get_logger
+from ..risk.quantity import QuantityRule
 from .base import Broker, BrokerError, OrderRejected
 from .kraken_auth import KRAKEN_REST, KrakenAuthError, private_post
 from .models import (
@@ -45,6 +46,7 @@ from .models import (
     OrderType,
     Position,
     Quote,
+    plain_decimal,
 )
 
 log = get_logger(__name__)
@@ -64,8 +66,12 @@ _KRAKEN_PAIRS: dict[str, str] = {
 
 
 def to_kraken_pair(symbol: str) -> str:
-    """Routed symbol (``BTC/USD``) → Kraken wire pair (``XBTUSD``). Pass through for unknowns."""
-    return _KRAKEN_PAIRS.get(symbol, symbol)
+    """Routed symbol (``BTC/USD``) → Kraken wire pair (``XBTUSD``).
+
+    Unlisted pairs drop the slash (``SOL/USD`` → ``SOLUSD``): Kraken's REST pair codes carry no
+    separator, and the slashed form made AssetPairs lookups for SOL/ADA/POL/UNI/AAVE/ZEC miss.
+    """
+    return _KRAKEN_PAIRS.get(symbol, symbol.replace("/", ""))
 
 
 class KrakenBroker(Broker):
@@ -95,12 +101,14 @@ class KrakenBroker(Broker):
         self._owns_client = client is None
         self._enable_live_orders = enable_live_orders
         self._txids: dict[int, str] = {}       # integer order handle -> Kraken order txid
+        self._marks: dict[str, float] = {}     # last price seen per symbol
+        self._entries: dict[str, tuple[float, float]] = {}  # symbol -> (quantity, average entry)
 
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
 
-    def __enter__(self) -> "KrakenBroker":
+    def __enter__(self) -> KrakenBroker:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -113,7 +121,7 @@ class KrakenBroker(Broker):
         return [Account(type="Cash", number="KRAKEN", status="Active", isPrimary=True)]
 
     def positions(self, account_number: str) -> list[Position]:
-        """Non-zero spot balances, translated into ``Position`` entries.
+        """Non-zero spot balances as ``Position`` entries, marked and with their average entry.
 
         Kraken's ``Balance`` endpoint returns every asset held on the account keyed by its Kraken
         asset code (``XXBT``, ``XETH``, ``ZUSD``). USD/fiat balances are cash and are surfaced
@@ -121,28 +129,62 @@ class KrakenBroker(Broker):
         """
         if not (self._api_key and self._api_secret):
             return []
+        holdings = _holdings(self._balances())
+        marks = self._marks_for(list(holdings))
+        out: list[Position] = []
+        for symbol, amount in holdings.items():
+            price = marks[symbol]
+            entry = self._average_entry(symbol, amount, account_number)
+            out.append(Position(
+                symbol=symbol, symbolId=0, openQuantity=amount, currentPrice=price,
+                currentMarketValue=amount * price, averageEntryPrice=entry, totalCost=amount * entry,
+                openPnl=(price - entry) * amount if entry else 0.0,
+            ))
+        return out
+
+    def _balances(self) -> dict[str, Any]:
         try:
-            balances = private_post(
-                "/0/private/Balance",
-                key=self._api_key, secret=self._api_secret, client=self._client,
-            )
+            return cast(dict[str, Any], private_post(
+                "/0/private/Balance", key=self._api_key, secret=self._api_secret, client=self._client))
         except KrakenAuthError as e:
             raise BrokerError(f"Kraken Balance failed: {e}") from e
 
-        out: list[Position] = []
-        for asset, amount_str in balances.items():
-            amount = float(amount_str)
-            if amount == 0 or _is_fiat_asset(asset):
+    def _marks_for(self, symbols: list[str]) -> dict[str, float]:
+        """Mid price per symbol. Equity feeds the kill-switch, so a quote gap must not look like a loss:
+        a symbol that cannot be priced now keeps its last mark. One never priced counts as zero, and
+        then it is in neither the peak nor the mark."""
+        for sym in symbols:
+            try:
+                mid = self.quote(sym).mid
+            except BrokerError as e:
+                log.warning("kraken.mark_failed", symbol=sym, error=str(e))
                 continue
-            symbol = _asset_to_routed_symbol(asset)
-            out.append(Position(
-                symbol=symbol, symbolId=0,
-                openQuantity=amount,
-                # Kraken Balance does not include a mark-to-market; leave price fields at 0 and let
-                # the caller pull a fresh quote if it needs current value.
-                currentPrice=0.0, averageEntryPrice=0.0, totalCost=0.0,
-            ))
-        return out
+            if mid:
+                self._marks[sym] = mid
+            else:
+                log.warning("kraken.mark_missing", symbol=sym)
+        return {s: self._marks.get(s, 0.0) for s in symbols}
+
+    def _average_entry(self, symbol: str, quantity: float, account_number: str) -> float:
+        """Average cost of what is held, from trade history; 0.0 if it cannot be read. Re-read only when
+        the holding changes, since ``TradesHistory`` counts against the private rate limit."""
+        cached = self._entries.get(symbol)
+        if cached is not None and cached[0] == quantity:
+            return cached[1]
+        try:
+            rows = self.executions(account_number)
+        except BrokerError as e:
+            log.warning("kraken.entry_unknown", symbol=symbol, error=str(e))
+            return 0.0
+        qty = avg = 0.0
+        for e in sorted((r for r in rows if r.symbol == symbol), key=lambda r: r.time):
+            if e.side == "Buy":
+                avg = (avg * qty + e.price * e.quantity) / (qty + e.quantity)
+                qty += e.quantity
+            else:
+                qty = max(qty - e.quantity, 0.0)
+        self._entries[symbol] = (quantity, avg)
+        return avg
 
     def quote(self, symbol: str) -> Quote:
         return self.quotes([symbol])[0]
@@ -207,23 +249,20 @@ class KrakenBroker(Broker):
         return out
 
     def equity(self, account_number: str, currency: str = "CAD") -> float:
-        """Total cash in ``currency`` (USD by convention on Kraken — CAD default is protocol parity).
+        """Cash in ``currency`` plus every holding at its mark, USD by convention on Kraken.
 
-        Sums Kraken's fiat balances. The router's exposure math cares about ``equity`` monotonically
-        — a rough number here is safe; a wrong-currency number is not — so we intentionally return
-        only the requested-currency fiat rather than trying to mark crypto positions in real time.
+        Holdings count: buying moves money from cash into a position, and an equity of cash alone would
+        read that as a loss and trip the kill-switch on the first fill. A failed balance read raises
+        rather than returning zero, for the same reason.
         """
         if not (self._api_key and self._api_secret):
             return 0.0
-        try:
-            balances = private_post(
-                "/0/private/Balance",
-                key=self._api_key, secret=self._api_secret, client=self._client,
-            )
-        except KrakenAuthError:
-            return 0.0
+        balances = self._balances()
         target = f"Z{currency.upper()}"           # Kraken fiat prefix (ZUSD, ZCAD, ZEUR, ...)
-        return float(balances.get(target, 0.0))
+        cash = float(balances.get(target, balances.get(currency.upper(), 0.0)))
+        holdings = _holdings(balances)
+        marks = self._marks_for(list(holdings))
+        return cash + sum(amount * marks[sym] for sym, amount in holdings.items())
 
     # ---- order surface -------------------------------------------------------
 
@@ -248,12 +287,12 @@ class KrakenBroker(Broker):
             "pair": to_kraken_pair(order.symbol),
             "type": "buy" if order.action == OrderAction.BUY else "sell",
             "ordertype": _order_type_wire(order.orderType),
-            "volume": str(order.totalQuantity),
+            "volume": plain_decimal(order.totalQuantity),
         }
         if order.orderType in (OrderType.LIMIT, OrderType.STOP_LIMIT) and order.limitPrice is not None:
-            body["price"] = str(order.limitPrice)
+            body["price"] = plain_decimal(order.limitPrice)
         if order.orderType in (OrderType.STOP, OrderType.STOP_LIMIT) and order.stopPrice is not None:
-            body["price2"] = str(order.stopPrice)
+            body["price2"] = plain_decimal(order.stopPrice)
 
         try:
             result = private_post(
@@ -330,6 +369,23 @@ class KrakenBroker(Broker):
                 time=datetime.fromtimestamp(float(t["time"]), tz=UTC), venue="kraken",
                 account=account_number))
         return out
+    def lot_rules(self, symbols: list[str]) -> dict[str, QuantityRule]:
+        """Tradeable quantity rules per routed symbol from Kraken's public AssetPairs.
+
+        ``lot_decimals`` sets the step, ``ordermin`` the minimum size and ``costmin`` the minimum
+        order value. Symbols Kraken does not answer for are left out, so callers keep their default.
+        """
+        rules: dict[str, QuantityRule] = {}
+        for sym in symbols:
+            try:
+                result = self._get_public("/0/public/AssetPairs", {"pair": to_kraken_pair(sym)})["result"]
+            except (httpx.HTTPError, BrokerError, KeyError) as e:
+                log.warning("kraken.lot_rules.miss", symbol=sym, error=str(e))
+                continue
+            row = _find_ticker(result, to_kraken_pair(sym)) or (next(iter(result.values())) if len(result) == 1 else None)
+            if row is not None:
+                rules[sym] = lot_rule_from_asset_pair(row)
+        return rules
 
     # ---- helpers -------------------------------------------------------------
 
@@ -376,8 +432,26 @@ _KRAKEN_ASSET_TO_ROUTED: dict[str, str] = {
 
 
 def _asset_to_routed_symbol(asset: str) -> str:
-    """Kraken asset code (``XXBT``) → routed symbol (``BTC/USD``). Pass through unknown assets."""
-    return _KRAKEN_ASSET_TO_ROUTED.get(asset, asset)
+    """Kraken asset code (``XXBT``) → routed symbol (``BTC/USD``), paired against USD. An asset not in the
+    table is its own code (``SOL``, ``AAVE``), so it routes as ``SOL/USD``, the form the sleeve trades."""
+    return _KRAKEN_ASSET_TO_ROUTED.get(asset, f"{asset}/USD")
+
+
+def _holdings(balances: dict[str, Any]) -> dict[str, float]:
+    """Tradable non-fiat balances by routed symbol. A dotted code (``SOL.S``, ``ETH.F``) is staked or earning
+    and cannot be sold from the spot book, so it is not a position."""
+    out: dict[str, float] = {}
+    for asset, amount in balances.items():
+        qty = float(amount)
+        if qty and not _is_fiat_asset(asset) and "." not in asset:
+            out[_asset_to_routed_symbol(asset)] = qty
+    return out
+
+
+def lot_rule_from_asset_pair(row: dict[str, Any]) -> QuantityRule:
+    decimals = int(row.get("lot_decimals", 8))
+    return QuantityRule(step=10.0 ** -decimals, min_qty=float(row.get("ordermin") or 0.0),
+                        min_notional=float(row.get("costmin") or 0.0))
 
 
 def _find_ticker(result: dict[str, Any], wire_pair: str) -> dict[str, Any] | None:

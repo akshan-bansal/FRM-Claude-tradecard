@@ -43,8 +43,10 @@ class DailyBudget:
         state_dir: Path,
         max_trades_per_day: int = 10,
         max_notional_per_day_usd: float = 10_000.0,
-    ) -> None:
+            mode: str | None = None,
+) -> None:
         self.state_dir = state_dir
+        self.mode = mode
         self.max_trades = max_trades_per_day
         self.max_notional = max_notional_per_day_usd
 
@@ -67,6 +69,9 @@ class DailyBudget:
                         except json.JSONDecodeError:
                             continue
                         if not row.get("accepted", False):
+                            continue
+                        # One journal, every runner's orders. A paper session must not spend this budget.
+                        if self.mode and row.get("mode") not in (None, self.mode):
                             continue
                         ts_str = row.get("ts") or ""
                         try:

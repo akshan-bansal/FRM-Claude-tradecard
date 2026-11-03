@@ -22,6 +22,7 @@ import inspect
 import os
 import platform
 import subprocess
+from dataclasses import asdict, is_dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -98,17 +99,21 @@ def gate_thresholds(router: object) -> dict[str, Any]:
     heat = getattr(router, "heat", None)
     ks = getattr(router, "kill_switch", None)
     budget = getattr(router, "daily_budget", None)
+    cost_model = getattr(router, "cost_model", None)
     out: dict[str, Any] = {
         "mode": getattr(router, "mode", None),
         "brokers": sorted(getattr(router, "brokers", None) or ()),
         "default_broker": getattr(router, "default_broker", None),
         "max_open_positions": getattr(router, "max_open_positions", None),
         "min_ticket_usd": getattr(router, "min_ticket_usd", None),
+        "max_round_trip_cost_ratio": getattr(router, "max_round_trip_cost_ratio", None),
+        "cost_model": asdict(cost_model) if is_dataclass(cost_model) else None,
         "max_gross_leverage": getattr(router, "max_gross_leverage", None),
         "max_position_notional_pct": getattr(router, "max_position_notional_pct", None),
         "force_exit_atr_mult": getattr(router, "force_exit_atr_mult", None),
         "on_size_cap_breach": getattr(router, "on_size_cap_breach", None),
         "heat_cap_pct": getattr(heat, "cap_pct", None),
+        "halt_scope": "paper" if getattr(ks, "paper", False) else "all",
         "max_drawdown_pct": getattr(ks, "max_drawdown_pct", None),
         "daily_loss_limit_pct": getattr(ks, "daily_loss_limit_pct", None),
     }

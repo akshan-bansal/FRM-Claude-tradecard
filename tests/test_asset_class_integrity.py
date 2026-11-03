@@ -105,7 +105,19 @@ def test_the_paper_sessions_give_futures_roots_the_futures_overlay() -> None:
     assert provider("XIC.TO").asset_class == "equity"  # an override covers only the roots it names
 
 
-@pytest.mark.parametrize("script, ctor", [("paper_ib.py", "OverlayProvider"), ("sweep_ib.py", "PersistenceGate")])
+def test_the_session_passes_its_futures_roots_to_both_class_lookups() -> None:
+    import ast
+
+    path = ROOT / "src" / "trading_live_claude" / "monitor" / "session.py"
+    src = path.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for ctor in ("OverlayProvider", "PersistenceGate"):
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == ctor]
+        assert calls and all(any(k.arg == "class_overrides" for k in c.keywords) for c in calls), ctor
+    assert "futures_overrides(list(futures))" in src
+
+
+@pytest.mark.parametrize("script, ctor", [("sweep_ib.py", "PersistenceGate")])
 def test_the_ib_scripts_pass_their_futures_roots_to_the_class_lookup(script: str, ctor: str) -> None:
     import ast
 

@@ -81,7 +81,7 @@ class SpectralCheck:
     """One gate evaluation. ``reason`` set = reject; else ``max_shares`` is the cap's fit."""
 
     reason: str | None
-    max_shares: int | None
+    max_shares: float | None
     summary: str
     observed: dict[str, Any]
 
@@ -167,7 +167,7 @@ class SpectralVarGate:
                                              tail_frac=self.tail_frac, engine=self._engine)
         return self._cache[key]
 
-    def check(self, symbol: str, *, shares: int, entry: float, equity: float) -> SpectralCheck:
+    def check(self, symbol: str, *, shares: float, entry: float, equity: float) -> SpectralCheck:
         try:
             est = self.estimate(symbol)
         except _Short as e:
@@ -180,7 +180,8 @@ class SpectralVarGate:
         cap_usd = self.cap_pct * equity
         per_unit = entry * est.loss_fraction
         var_usd = shares * per_unit
-        max_shares = int(cap_usd // per_unit) if per_unit > 0 else shares
+        # Unrounded: the Router floors this to what the symbol can actually trade.
+        max_shares = cap_usd / per_unit if per_unit > 0 else shares
         summary = summary_text(self.level, self.horizon_days, var_usd, est.loss_fraction,
                                cap_usd, self.cap_pct)
         observed = {"loss_fraction": est.loss_fraction, "var_usd": var_usd, "cap_usd": cap_usd,
