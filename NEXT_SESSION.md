@@ -495,7 +495,15 @@ study on the intel graph — calibration signal-statistics honing (section above
 calibration recurrent-learning loop (item 9 tier 4), prediction evaluation (item 9 tier 5).
 All four studies wait on the same underlying corpus.
 
-## Symbol-mapping architecture — 2026-09-08  🟡 QUEUED
+## Symbol-mapping architecture — 2026-09-08  🟢 ALL THREE GAPS LANDED; sleeve migration deferred
+
+**Status 2026-11-01.** Gap 1: `analysis/symbol_validation.py`, wired into `signal` and `paper_kraken.py`,
+and now `paper_ib.py`. Gap 3: `brokers/ib.py::_infer_stock_venue`, landed 2026-09-09. Gap 2:
+`analysis/symbol_atlas.py` (canonical ids, per-broker wire forms, `desk_route`, `validate_atlas`). It
+reads the adapters and sleeve tables rather than copying them. Not done: moving sleeve entries onto
+`canonical_id` and absorbing the `asset_spec` registries, which can wait for a real cross-venue trade.
+Note `_infer_stock_venue` still falls back to SMART/USD for an unknown suffix (`.T`, `.HK`, `.DE`);
+fix that before exchange hopping level 2. Original scope follows.
 
 Surfaced from a mid-session audit of how the same asset is represented across brokerages.
 Each broker adapter normalizes independently (Questrade `_symbol_id()`, Kraken
@@ -559,7 +567,42 @@ independence but removes the mis-routing hazard. ~40 lines + tests.
 + migration — ~4-6 hr, only if cross-venue trades get proposed). Gap 1 alone would have
 prevented both this week's mid-session failures; do it first, atlas can wait.
 
-## Risk-guard validation analysis — 2026-09-09  🟡 QUEUED (needs ≥ 1 week post-gate data)
+## Risk-guard validation analysis — 2026-09-09  🟢 SCRIPT BUILT; 🟡 DATA-BLOCKED (needs ≥ 1 week post-gate data)
+
+**Status 2026-11-01.** `scripts/risk_guard_analysis.py` writes the report and refuses to recommend on
+too little record. Today's state holds one order and one fill from one four-hour session on 2026-10-31,
+because the journals did not survive the repo reconstruction, so no threshold can be judged. Rerun
+after a week of paper sessions on two venues. Reject strings alone undercount the size caps since trim
+mode: the script also counts ledger `RISK_TRIMMED` rows.
+
+Reading the wiring found what no journal could show:
+* **Gross-leverage cap was inert.** No runner passed `current_open_notional`, so the gate compared each
+  intent to equity alone. FIXED: the monitor, the card path and `place-order` pass it, and it counts
+  entries made earlier in the same poll, as do the heat and open-positions gates.
+* **`check_forced_exits` had no caller.** The "landed" item 3 could never fire. WIRED, opt-in:
+  `forced_exits: true`, off by default. Writes a `FORCED_EXIT` ledger row.
+* **A tripped kill-switch rejected exits too.** DECIDED and FIXED 2026-11-01: an order that only reduces
+  a position the routed broker holds now passes. A SELL with no position behind it stays refused, since
+  it could open a short, and so does anything when the holding cannot be read.
+* **No auto-halt on live brokers.** DECIDED and FIXED 2026-11-01: `risk/equity_watch.py` gives live and
+  autonomous what `PaperBroker._journal_equity` gives paper, journaling to `state/live_equity.csv`. The
+  peak comes back from the journal and restarts at a human clear. A withdrawal reads as a loss.
+* **`trading.yaml` risk knobs were ignored.** No runner passed `max_gross_leverage`,
+  `max_position_notional_pct`, `force_exit_atr_mult` or `on_size_cap_breach` to the Router, so only their
+  defaults ever applied. FIXED: every runner passes `Router.limits_from(settings)`.
+* **Other gates refused exits too.** DECIDED and FIXED 2026-11-01: the heat cap refused an exit from a
+  book already over it, the min-ticket gate refused closing a small remainder, and the autonomous
+  daily budget refused exits once spent. A reducing order now passes all three, by the same test the
+  kill-switch uses. Still applied to an exit: `equity <= 0` and the stop-side check. A plain BUY that
+  covers a short also still meets the entry-only gates (basket, open-positions, size caps, spectral).
+
+`trading live` now mirrors the paper runners (`tests/test_live_parity.py`): pre-flight, alerts,
+`--strategy-map`, `--require-card`, `--require-basket`, the spectral gate, and the same `trading.yaml`
+limits. It differs where it has to: real broker, typed confirmation, strict ledger. Not carried over:
+`--hedge`, which only `signal` has and which would place real UUP orders. The intel hooks are being
+wired by another session.
+
+Original scope follows.
 
 Empirical audit of items 1/2/3/5 from the 2026-09-08 risk-architecture landing (commit
 `629594c`). Purpose: verify each new gate is actually firing as designed, calibrate
@@ -711,7 +754,12 @@ Old reject-mode tests preserved via explicit `on_size_cap_breach="reject"`.
 ### 7. Alerter dedup — OMITTED 2026-09-09 per user decision.
 Do NOT propose changes to the Telegram alerter. The Alerter stays as it currently is.
 
-### 9. Exchange hopping — trading beyond user's geographical timezone  🟡 QUEUED (2026-09-09)
+### 9. Exchange hopping — trading beyond user's geographical timezone  🟢 L1 LANDED 2026-11-01; L2-4 need decisions
+
+**Status 2026-11-01.** Level 1: `analysis/venue_calendar.py`, on in every runner through
+`monitor_policy` (`respect_market_hours`). Hours only, no holiday calendar: a holiday reads as open.
+A held position on a closed venue is still quoted once per poll for the heat figures. Level 2 needs a
+market-data spend decision and level 3 a numeraire choice; both are yours.
 
 **Levels approved but not built** (queued 2026-09-09). Applies the propagation-notes
 discipline: each level's cross-module impact is enumerated so we don't slip an
@@ -765,7 +813,15 @@ architectural change in as a small feature.
 (spend decision) AND on the L3 numeraire choice (architecture decision). L1 is
 bounded and independent — worth doing regardless of the higher levels.
 
-### 8. Event + level entry triggers (both, decoupled)  🟡 QUEUED (2026-09-09)
+### 8. Event + level entry triggers (both, decoupled)  ✅ LANDED 2026-11-01
+
+**Status 2026-11-01.** Columns: `entry_level` on ema_crossover, macd, rsi_meanrevert, zscore_ou, pairs,
+kalman_pairs, arima_garch, turn_of_month and month_of_year, with a lookahead test; a strategy whose
+`entry` already is a state has nothing to add. Default stays event; bollinger is the one family that
+acts on level unasked; `entry_triggers` in `trading.yaml` sets it per symbol. Tight guard: an order not
+yet visible as a position blocks a repeat entry, and a level-only entry routes once per bar, so a
+rejected or declined one retries next bar rather than every poll. No level setting is in use yet, and
+none has been walk-forward tested: the level path has no backtest. Original scope follows.
 User standing rule: we need BOTH event-based (fresh cross) AND level-based (state
 currently satisfied) entry triggers — neither one alone is reliable enough.
 
@@ -865,10 +921,10 @@ solutions; call out and prioritize. Full agent report lives in the session trans
 
 ### 🔴 Critical (act soon — live-path risk or silent correctness bugs)
 
-- 🔴 `cli.py:483,1422` — `trading live` AND `autonomous_run` build `LiveMonitor` without
-  `overlay_for`, `interpret_for`, `weight_bias_for`, `persistence_for`. The two CLI entry points
-  that can touch real money bypass EVERY intel/overlay/allocator/persistence gate that the
-  paper path uses. One-diff fix — copy the wiring block from `signal --paper` (cli.py ~189+).
+- ✅ FIXED 2026-11-01. `trading live` AND `autonomous_run` built `LiveMonitor` without
+  `overlay_for`, `interpret_for`, `weight_bias_for`, `persistence_for`, so the two CLI entry points
+  that can touch real money bypassed every intel/overlay/allocator/persistence gate the paper path
+  uses. See the Top-5 entry below for the decisions taken.
 - 🔴 `data/market.py:51` — `end = end or datetime.now(UTC)` is then part of the parquet cache
   key. `datetime.now()` changes every call, so `MarketData.history()`/`.recent()` NEVER hit
   the cache. Every `LiveMonitor.step()` symbol is a fresh live-broker fetch. Cache module
@@ -877,7 +933,7 @@ solutions; call out and prioritize. Full agent report lives in the session trans
   uses Questrade lexicon (`"HalfHour"`); Kraken uses `_INTERVAL_MINUTES` (numeric); IB uses
   `_INTERVAL_TO_BAR` (`"ThirtyMinutes"`). Non-QT 30-minute requests silently fall through to
   `OneDay`.
-- 🔴 `monitor/live_loop.py:245` — `float(last.get("atr", price * 0.02)) or price * 0.02` returns
+- ✅ FIXED 2026-11-01. `monitor/live_loop.py:245` — `float(last.get("atr", price * 0.02)) or price * 0.02` returns
   `NaN` when `last["atr"]` is `NaN` (NaN is truthy). Strategy with NaN ATR silently sizes off
   NaN, corrupting stop distance and downstream risk math.
 - 🔴 `monitor/live_loop.py:283-290` — `conviction *= weight_bias` is passed to `PositionSizer.size`
@@ -889,7 +945,7 @@ solutions; call out and prioritize. Full agent report lives in the session trans
 - 🔴 `brokers/ib_web.py:509-511` — `place_order` auto-confirms IB warning prompts in a while
   loop with NO CAP. In live mode this can accept margin/exchange warnings a human should
   approve; also potentially loops unbounded on a misbehaving API.
-- 🔴 `README.md:141` — Quick-start block includes `EXECUTION_MODE=live uv run trading live …`.
+- ✅ FIXED 2026-10-31. `README.md:141` — Quick-start block includes `EXECUTION_MODE=live uv run trading live …`.
   `CLAUDE.md:24` explicitly says "Never set `EXECUTION_MODE=live` in code, tests, or example
   snippets." README example directly contradicts the CLAUDE.md non-negotiable.
 - 🔴 `cli.py:1381-1383` — `os.environ["QUESTRADE_ENV"] = chosen_account` is written AFTER
@@ -998,8 +1054,14 @@ solutions; call out and prioritize. Full agent report lives in the session trans
 
 ### Top-5 recommended fixes (agent's ranking) — status as of 2026-09-08
 
-1. **Wire intel/overlay/allocator/persistence hooks into `trading live` and `autonomous_run`**
-   🔴 STILL OPEN. Single-diff copy from `signal --paper` wiring block (cli.py ~189+).
+1. ✅ **Wire intel/overlay/allocator/persistence hooks into `trading live` and `autonomous_run`**
+   LANDED 2026-11-01, with these decisions from the user. `tests/test_intel_hooks_wiring.py` pins the
+   wiring on every runner.
+   * Overlay: on when `WORLDMONITOR_API_KEY` is set; without one the runner starts and says it is
+     off. `live` has `--no-intel-overlay`. Fails open: an outage keeps the last good read.
+   * Allocator: the full 0.1×–3× range, same as paper, so one real order can be 3× larger with only
+     the Router's caps and the daemon's daily budget above it. The boost side has no validation.
+   * Persistence gate: every runner. It cannot fire until a poller writes `elevated_in` edges.
 2. ✅ **`MarketData` cache fix** — LANDED commit `638f8d3` (floor `end` to interval boundary).
 3. ✅ **Interval-name mismatch across brokers** — LANDED commit `638f8d3` (IB/Kraken lexicon
    canonical; Questrade translates on its own side).
@@ -1108,6 +1170,16 @@ _(Original spec pruned 2026-09-08 — recover from commit `2173d35` if needed.)_
 
 ## 6. GraphRAG / multi-agent overlay on the intel wing  🟡 SHIPPED + HELD
 
+**Validation 2026-11-01.** The logic works against a mocked API, end to end from graph to monitor bias
+(`tests/test_intel_hooks_wiring.py`). **No real call has ever been checked:** the real debate is written
+but `ANTHROPIC_API_KEY` is not in the app's settings, so nothing was sent. It remains unwired, and the
+journal holds no events for it to read. Fixed on the way:
+* The evidence had no headlines (ids, sources, categories and regions only). `meta.title` now carries them.
+* Direction was dropped, so a constructive read trimmed its own exemplars. Only adverse reads trim now.
+* `_domain_slice` matched hashed ids ("fed", "ecb"), and its no-text branch could never fire.
+* `max_tokens=700` had to cover thinking too, which is on by default on `claude-sonnet-5`. Now 4000.
+* The adversary prompt sent its JSON template with doubled braces, because it is never `.format`ted.
+
 **Current posture (decided this session): keep the pipeline informative on the rule + graph
 layers alone; iterate vertices/edges from journaled inputs as the record accrues; hold the
 specialist/adversary agent sim layer.** The agent layer is built and tested, but wiring it into
@@ -1189,11 +1261,20 @@ equity pairs (`RY.TO/BNS.TO` etc). To use it on FX:
 Status as of 2026-09-08:
 - ✅ **Tier 1:** OSINT scalar + interpret filter + allocator bias + Alerter (both QT + Kraken)
 - ✅ **Tier 2:** Fills → intel graph via `traded` predicate + `fill_edge()` helper
-- ✅ **Tier 3:** Graph persistence → entry gate via `PersistenceGate` (11 focused tests)
+- ✅ **Tier 3:** Graph persistence → entry gate via `PersistenceGate`. **Corrected 2026-11-01:** marked
+  done here on 2026-09-08, but no trading runner passed it (only a report column in `sweep_ib.py`).
+  Now wired into all six `LiveMonitor` calls. Also fixed: one fill reset every run to 0, because a
+  `traded` edge counted as a poll with no elevation; and a run with no age limit could halt entries
+  on a months-old reading, so a run older than `max_age_hours` (6h) now counts as none.
 - ⏳ **Tier 4:** Realized P&L → thesis calibration — **DATA-BLOCKED**, needs weeks of paper
-  fills matched against active theses. 7 days accrued / ~30 days minimum. Revisit ~2026-Oct.
+  fills matched against active theses, ~30 days minimum. The accrual clock restarted at zero: the
+  journals did not survive the repo reconstruction (as of 2026-11-01, `state/intel_graph.jsonl` is 27
+  `traded` edges, 26 of them dated 2026-10-30 and mostly test-fixture leftovers, with no `elevated_in`).
 - ⏳ **Tier 5:** Prediction evaluation — **DATA-BLOCKED**, needs 21-day forward-return windows
-  post-thesis fire. Current thesis history 10 days = zero 21-day windows. Revisit ~2026-Nov+.
+  post-thesis fire. Same restart: zero thesis history today.
+- **Not validated on real data:** tiers 1–3 are verified on stubs only. Nothing says the overlay, the
+  allocator or the persistence gate improves outcomes. `elevated_in` edges accrue only while an overlay
+  provider or `graph_journal.py` polls.
 
 _(Original spec pruned 2026-09-08 — the "missing wires" narrative was subsumed by the tier
 list above. Recover from git history if needed.)_
@@ -1257,7 +1338,11 @@ The revised first-week migration plan (below) reflects this: no
   under `/v1/…`; legacy unversioned paths still resolve during the
   deprecation window but the shim logs a warning per hit and the OpenAPI
   spec advertises `/v1/…` only. `SPEC_VERSION` bumped to `1.0.0`.
-- ⏳ **Multi-broker routing inside a single Router** — QUEUED FOR NEXT SESSION
+- ✅ **Multi-broker routing inside a single Router** — LANDED 2026-11-01, Router level
+  (`tests/test_multi_broker_router.py`). `Router(brokers=..., default_broker=...)`; an unknown route
+  is rejected, not defaulted; the card signs the routed venue; autonomous stays single-broker. Still
+  single-broker: `LiveMonitor` (equity and positions from one broker, needs the numeraire decision)
+  and the basket gate (one venue; other routes take no new entries). Original note follows.
   (moved 2026-09-08). Today's `Router` holds one `Broker` instance and the
   card displays whatever `router.broker.name` is set to. Turn
   `intent.broker` into a real routing key:
@@ -1286,7 +1371,7 @@ FastAPI side):
    the single source of truth; hand-authored `approval_schemas.py`
    deleted. Legacy paths still resolve via middleware during the
    deprecation window.
-4. ⏳ **Multi-broker routing inside a single Router** — QUEUED FOR NEXT
+4. ✅ (landed 2026-11-01, see Sub-obj 4) **Multi-broker routing inside a single Router** — QUEUED FOR NEXT
    SESSION. `Router(brokers: dict[str, Broker], default: str)`; dispatch
    inside `submit()` selects by `intent.broker` (falls back to `default`).
    Watch for merge interaction with `629594c` (kill-switch / gross-
@@ -1512,3 +1597,88 @@ Do NOT commit any of this until the user says so — the standing rule in
 
 **Published brief for this build (link stays live across sessions):**
 <https://claude.ai/code/artifact/9567c2ac-b2bd-4797-adf5-2edbce2a4d90>
+
+## 12. Spectral VaR gate — tail index, then the post-GBM dynamics queue  🔴 NEXT (2026-10-31)
+
+**Context.** `risk/spectral_var.py` (opt-in via `--spectral-var-cap` on `paper_ib.py` /
+`paper_kraken.py`) caps an entry's tail loss with `BSM_Spectral/bsm_event.py`: walk-forward
+GJR-GARCH plus a semi-parametric GPD law on the standardised residuals. Scope item 1 (multi-day
+horizons) landed 2026-10-31 on `ci/pytest-cov`. The engine part is commit `ec50436`. The gate's
+h > 1 path branch, `tests/test_spectral_var.py`, the `-path` journal challengers, the
+`journal/config.json` amendments and the docs are in the commit that adds this section. Evidence
+is in `BSM_Spectral/RECONSTRUCTION.md` under "Multi-day horizons: GJR paths".
+
+### 12.1 Fix the gate's tail index  🔴 do first
+
+**Problem.** `estimate_tail` builds `SemiParamGPD(z, tail_frac=0.10)` with no `k`, so the tail
+index is a Hill estimate. Hill puts xi_lo at 0.36–0.45, hitting the 0.45 cap on BTC and ETH.
+Restandardising by the inflated sd then squeezes the body. BTC's 1-day 1% quantile is -2.04,
+less extreme than the Gaussian's -2.33. The engine's own reconstruction notes already flag Hill
+overstating xi.
+
+**Walk-forward breach rates at 1 day** (the gate's default horizon). Nominal is
+5.00% / 2.50% / 1.00% at 95% / 97.5% / 99%:
+
+| Underlying | Hill (current) | k = 10 |
+|---|---|---|
+| SPX | 10.51 / 6.08 / 1.94 | 6.37 / 2.44 / 1.00 |
+| BTC | 10.79 / 5.93 / 2.47 | 4.86 / 1.97 / 0.81 |
+| USDJPY | 11.25 / 6.88 / 2.80 | 5.52 / 2.71 / 1.00 |
+| ETH | 8.67 / 4.94 / 1.73 | 4.32 / 1.90 / 0.75 |
+| DJIA | 10.31 / 5.63 / 2.04 | 6.08 / 2.94 / 1.05 |
+
+All eight underlyings move to near nominal with k = 10.
+
+**Do:**
+1. Add `tail_k` to `SpectralVarGate` / `estimate_tail` / `attach_spectral_gate` and to
+   `thresholds()`, so it moves `risk_check_version`. Add a `--spectral-var-tail-k` flag on both
+   paper scripts.
+2. Choose the default by walk-forward on a tuning split only, over {3, 4, 6, 10, Hill}, the
+   engine's own grid. Then confirm on the held-out windows with
+   `bsm_event.run_horizon_backtest(..., tail_k=k)`, which already takes `tail_k`, using Kupiec,
+   Christoffersen and `paired_power` on the pinball difference. Do not pick k on the full sample.
+3. The fix must not weaken the gate. Check that the new default's VaR is at least the Hill VaR
+   at 99% on every underlying, or say plainly where it is not.
+4. Rerun the h = 5 and h = 10 horizon backtests with the chosen k. With the right tail law,
+   paths moved closer to nominal for SPX, DJIA, WTI, ETH and EURUSD, and further from it for
+   USDJPY and BTC; re-judge the h > 1 path branch on that basis.
+
+**Done when:** the gate's 1-day 99% breach rate is within its Kupiec band on held-out windows
+for the gate's markets (equities, BTC, ETH), the tests cover the new parameter, the full suite
+is green, and `RECONSTRUCTION.md` records the chosen k and the held-out evidence.
+
+### 12.2 Remaining post-GBM dynamics queue  🟡 QUEUED
+
+Scoped 2026-10-31 by testing each GBM assumption three ways: what GBM predicts, the current
+model's own simulated band (FHS-GJR), and the data, across all eight underlyings. Ranked:
+
+1. **Vol-index dynamics.** `var_snapshot` moves v as an arithmetic random walk with a floor.
+   The data disagree:
+   - Vol indices mean-revert, with half-lives of 13–53 days.
+   - The 21-day variance ratio of dV is 0.36–0.55, so v shocks at 21 days are overstated
+     about 2×.
+   - Vol-of-vol scales as level^1.06–1.97 (Heston gives 0, lognormal 1, the 3/2 model 2).
+
+   Candidates: log-OU for VXN and VXD, a 3/2-type model for VIX and OVX. Positivity comes from
+   the dynamics, so the floor goes away.
+2. **Clock.**
+   - Crypto weekend days carry 0.54 (BTC, CI 0.44–0.63) and 0.66 (ETH) of a weekday's variance,
+     but `year_frac` counts calendar days equally.
+   - Kalshi's 09:00 quotes imply 0.47–0.62× of the vol index for the same day.
+
+   Replace the learned vol scale with a measured operational-time clock.
+3. **Long memory in volatility.**
+   - GJR persistence is 0.97–0.998.
+   - The |r| autocorrelation at lag 126 sits above the model's median for 7 of 8 underlyings
+     (outside the band for BTC).
+   - Vol-index Hurst is 0.30–0.41, against 0.42–0.48 from mean reversion alone.
+
+   Candidates: a multi-timescale OU superposition, a multifractal random walk, rough vol. Daily
+   data cannot separate roughness from quote noise.
+4. **WTI.** The price went negative (-37.63), kurtosis is 85 and intermittency 0.28 (both
+   outside the band), and Kalshi settles on futures while the model uses spot. Use a two-factor
+   Schwartz–Smith model in arithmetic coordinates. **Data-blocked:** it needs daily front-month
+   futures, which FRED doesn't carry.
+
+Not supported by the data: momentum or inertia (price variance ratios sit inside the model
+bands), and daily jumps beyond FHS except WTI. Microstructure is deferred by user decision.

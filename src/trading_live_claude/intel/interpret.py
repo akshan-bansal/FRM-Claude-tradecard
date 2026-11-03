@@ -52,6 +52,7 @@ class Thesis:
     inference: str             # what those readings jointly imply
     action: str                # risk posture / research focus — never an entry signal
     themes: list[str] = field(default_factory=list)   # keys into THEME_EXEMPLARS
+    direction: str = "adverse"   # only an adverse read trims its exemplars; an agent may say constructive
 
     def exemplars(self) -> list[str]:
         out: list[str] = []
@@ -303,7 +304,8 @@ def _agent_to_thesis(fired: Any) -> Thesis:
               f"any other candidate — never an entry signal on its own.")
     themes = list(_AGENT_DOMAIN_THEMES.get(fired.domain, []))
     return Thesis(name=name, confidence=band, evidence=list(fired.evidence),
-                  inference=inference, action=action, themes=themes)
+                  inference=inference, action=action, themes=themes,
+                  direction=str(fired.direction))
 
 
 def enrich_with_agents(

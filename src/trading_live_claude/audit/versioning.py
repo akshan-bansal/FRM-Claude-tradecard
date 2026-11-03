@@ -64,7 +64,8 @@ def strategy_params(strategy: object) -> dict[str, Any]:
     attributes an instance can override, and they change behaviour, so they belong in the version.
     """
     params = dict(getattr(strategy, "params", {}) or {})
-    for knob in ("stop_atr_mult", "trail_atr_mult", "time_stop_bars", "supports_level_trigger"):
+    for knob in ("stop_atr_mult", "trail_atr_mult", "time_stop_bars", "supports_level_trigger",
+                 "level_trigger_default"):
         if hasattr(strategy, knob):
             params[knob] = getattr(strategy, knob)
     return params
@@ -99,6 +100,8 @@ def gate_thresholds(router: object) -> dict[str, Any]:
     budget = getattr(router, "daily_budget", None)
     out: dict[str, Any] = {
         "mode": getattr(router, "mode", None),
+        "brokers": sorted(getattr(router, "brokers", None) or ()),
+        "default_broker": getattr(router, "default_broker", None),
         "max_open_positions": getattr(router, "max_open_positions", None),
         "min_ticket_usd": getattr(router, "min_ticket_usd", None),
         "max_gross_leverage": getattr(router, "max_gross_leverage", None),

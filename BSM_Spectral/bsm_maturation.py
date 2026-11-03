@@ -13,7 +13,8 @@ Each gets its own frozen config on its first cycle; underlyings without an impli
 point-in-time GJR forecast in its place.
 
 Streams (per underlying)
-  var     1- and 5-day VaR of rolling 21-day digitals (3 strikes x 5 models), marked to model
+  var     1- and 5-day VaR of rolling 21-day digitals (3 strikes x 5 models, plus 3 '-path'
+          challengers above 1 day that run the GJR recursion daily), marked to model
   kalshi  Kalshi binaries on the underlying (above/below and range ladders, one daily settlement):
           market quote and model p_Q at snapshot time; label = Kalshi's settlement. These are
           observed digital prices, which the paper's marked-to-model backtest lacks. A forecast is
@@ -73,7 +74,7 @@ DEFAULT_CFG = {
             'levels': [0.90, 0.95, 0.99], 'n_sims': 4000, 'tail_frac': 0.10, 'tail_k': 4.0,
             'xi_max': 0.45, 'gammas': [1.0, 1.0, 1.0], 'rho_floor': 0.2, 'skew': -0.3, 'rate': 0.04,
             'dividend': 0.015, 'vol_floor': 0.02, 'level_map': [0.0, 1.0],
-            'models': ['normal', 'gpd', 'skewt', 'fhs', 'spectral']},
+            'models': ['normal', 'gpd', 'skewt', 'fhs', 'spectral', 'gpd-path', 'fhs-path', 'spectral-path']},
     'kalshi': {'series': ['KXINXU', 'KXINX'], 'event_suffix': 'H1600', 'skew': -0.3, 'rate': 0.04,
                'dividend': 0.015, 'snapshot_hour_ny': 9},
     'cross': {'horizons': [5], 'window': 504, 'tail_k': 4.0, 'n_sims': 5000},
@@ -452,22 +453,35 @@ def var_snapshot(data_dir, jdir, cfg, log=print, key='SPX'):
         hy = H / dpy
         hS = math.sqrt(be.horizon_variance(s2S[-1], pS, H))
         hV = math.sqrt(be.horizon_variance(s2V[-1], pV, H))
+        # '-path' models run H daily GJR steps (be.gjr_paths) instead of rescaling one 1-day draw;
+        # their own uniforms leave the other models' draws unchanged
+        Up = np.clip(np.random.default_rng(_seed('var-path', key, asof, H)).random((c['n_sims'], H, 2)),
+                     1e-12, 1 - 1e-12)
         for mi, mny in enumerate(c['moneyness']):
             con = be.BSMDigital(mny * S0, T, c['rate'], c['dividend'], c['skew'])
             p0 = float(con.price(S0, v0))
             rho_t = be.temper_rho(rho, c['gammas'][mi], c['rho_floor'])
             for name in c['models']:
-                base = 'gpd' if name == 'spectral' else name
+                path = name.endswith('-path')
+                if path and H == 1:
+                    continue  # one GJR step is the closed form: the base model's forecast
+                base = name.removesuffix('-path')
+                base = 'gpd' if base == 'spectral' else base
+                u = Up if path else U
                 if base == 'fhs':
-                    idx = np.minimum((U[:, 0] * len(rows_fhs)).astype(int), len(rows_fhs) - 1)
+                    idx = np.minimum((u[..., 0] * len(rows_fhs)).astype(int), len(rows_fhs) - 1)
                     x1, x2 = rows_fhs[idx, 0], rows_fhs[idx, 1]
                 else:
                     l1, l2 = laws[base]
-                    x1, x2 = be.mix_eigen(l1.ppf(U[:, 0]), l2.ppf(U[:, 1]), rho_t)
-                S_new = S0 * np.exp(pS.mu * H + hS * x1)
-                v_new = np.maximum(v0 + pV.mu * H + hV * x2, c['vol_floor'])
+                    x1, x2 = be.mix_eigen(l1.ppf(u[..., 0]), l2.ppf(u[..., 1]), rho_t)
+                if path:
+                    S_new = S0 * np.exp(be.gjr_paths(pS, s2S[-1], x1))
+                    v_new = np.maximum(v0 + be.gjr_paths(pV, s2V[-1], x2), c['vol_floor'])
+                else:
+                    S_new = S0 * np.exp(pS.mu * H + hS * x1)
+                    v_new = np.maximum(v0 + pV.mu * H + hV * x2, c['vol_floor'])
                 extra = {}
-                if name == 'spectral':
+                if name in ('spectral', 'spectral-path'):
                     xs = np.column_stack([S_new - S0, v_new - v0])
                     Sig = np.cov(xs.T)
                     L = be.cov_factor(Sig)
@@ -521,8 +535,19 @@ def cross_snapshot(data_dir, jdir, cfg, log=print):
                  'gpd': np.column_stack([laws[j].ppf(u[:, j]) for j in range(len(bx.FACTORS))]),
                  'fhs': Z[rng.integers(0, len(Z), size=(c['n_sims'], H))].sum(axis=1) / math.sqrt(H)}
         v0 = book.value(st0, 0.0)
-        for name, d in draws.items():
-            loss = v0 - book.value(bx.apply_returns(st0, (H * mu + d * np.sqrt(hv)).T), H)
+        losses = {name: v0 - book.value(bx.apply_returns(st0, (H * mu + d * np.sqrt(hv)).T), H)
+                  for name, d in draws.items()}
+        if H > 1:
+            # '-path' challengers: H daily GJR steps per factor (be.gjr_paths), own random stream
+            rp = np.random.default_rng(_seed('cross-path', asof, H))
+            gp = rp.standard_normal((c['n_sims'], H, len(bx.FACTORS))) @ np.linalg.cholesky(C).T
+            up = np.clip(be.ndtr(gp), 1e-12, 1 - 1e-12)
+            shocks = {'gpd-path': np.stack([laws[j].ppf(up[..., j]) for j in range(len(bx.FACTORS))], axis=-1),
+                      'fhs-path': Z[rp.integers(0, len(Z), size=(c['n_sims'], H))]}
+            for name, zz in shocks.items():
+                Rh = np.column_stack([be.gjr_paths(f[0], f[1][-1], zz[..., j]) for j, f in enumerate(fits)])
+                losses[name] = v0 - book.value(bx.apply_returns(st0, Rh.T), H)
+        for name, loss in losses.items():
             out.append({'id': f'cross|{asof}|h{H}|{name}', 'stream': 'cross', 'made_at': now_iso(), 'asof': asof,
                         'horizon': H, 'model': name, 'state': st0, 'book': {'S0': book.S0, 'y0': book.y0,
                                                                            'units': book.units},
@@ -1110,7 +1135,7 @@ def selftest():
         write(cut)
         cfg = json.loads(json.dumps(DEFAULT_CFG))
         cfg['var']['n_sims'] = 800
-        cfg['var']['models'] = ['normal', 'gpd', 'fhs']
+        cfg['var']['models'] = ['normal', 'gpd', 'fhs', 'gpd-path']
         first = var_snapshot(data, jdir, cfg, log=lambda *a: None)
         again = var_snapshot(data, jdir, cfg, log=lambda *a: None)
         early = var_mature(data, jdir, log=lambda *a: None)
@@ -1121,12 +1146,18 @@ def selftest():
         con = be.BSMDigital(r['strike'], r['tenor'], 0.04, 0.015, -0.3)
         _, Sf, Vf = be.load_spx_vix(data)  # the values as written to CSV
         direct = -(float(con.price(Sf[cut + 4], max(Vf[cut + 4] / 100, 0.02), r['tenor'] - 5 / 252)) - r['p0'])
-        ok = (len(first) == 18 and not again and not early and len(mat) == 18
+        rp = next(x for x in first if x['horizon'] == 5 and x['moneyness'] == 1.0 and x['model'] == 'gpd-path')
+        mp = next(x for x in mat if x['id'] == rp['id'])
+        # 3 strikes x (3 models at 1 and 5 days + the path model at 5 days only)
+        ok = (len(first) == 21 and not again and not early and len(mat) == 21
               and m['matured_date'] == str(dates[cut + 4]) and abs(m['realized_loss'] - direct) < 1e-12
-              and 0 < m['pit'] < 1 and m['breach'] == [direct > v for v in r['var']])
+              and 0 < m['pit'] < 1 and m['breach'] == [direct > v for v in r['var']]
+              and not any(x['model'] == 'gpd-path' and x['horizon'] == 1 for x in first)
+              and not np.array_equal(rp['var'], r['var']) and mp['realized_loss'] == m['realized_loss'])
         check('journal -> maturation round trip', ok,
               f'{len(first)} forecasts, re-snapshot adds {len(again)}, {len(early)} mature early; after 5 more days '
-              f'{len(mat)} matured (1-day and 5-day), matured_date {m["matured_date"]}, PIT {m["pit"]:.3f}')
+              f'{len(mat)} matured (1-day and 5-day), matured_date {m["matured_date"]}, PIT {m["pit"]:.3f}; '
+              f'5-day 99% VaR gpd {r["var"][-1]:.4f} vs gpd-path {rp["var"][-1]:.4f}')
 
         old = 'observation_date,SP500\n2026-10-27,7700.00\n2026-10-28,7710.00\n'
         new = 'observation_date,SP500\n2026-10-27,7700.00\n2026-10-28,7711.00\n2026-10-29,7720.39\n'

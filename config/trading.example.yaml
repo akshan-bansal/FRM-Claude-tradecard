@@ -30,6 +30,16 @@ max_drawdown_kill_switch: 0.08      # -8% trips kill-switch automatically
 max_open_positions: 3
 min_ticket_usd: 100.0
 
+# === Monitor policy (every runner reads these) ===
+# Skip a symbol while its venue is outside regular hours. No holiday calendar: a holiday reads as open.
+respect_market_hours: true
+# Act on Router.check_forced_exits. Off by default: it sends SELL orders with no strategy signal behind
+# them. force_exit_atr_mult sets how far a position may fall first.
+forced_exits: false
+# Per-symbol entry channels for strategies that emit entry_level: event | level | both.
+# A symbol not named takes its strategy family's default (only bollinger acts on level by default).
+entry_triggers: {}
+
 # === Questrade target ===
 # practice | live. 'practice' = Questrade's free practice account; 'live' = real money.
 questrade_env: practice

@@ -39,7 +39,10 @@
       "gpd",
       "skewt",
       "fhs",
-      "spectral"
+      "spectral",
+      "gpd-path",
+      "fhs-path",
+      "spectral-path"
     ]
   },
   "kalshi": {
@@ -68,7 +71,11 @@
       "2026-10-29"
     ],
     "source": "tail index and tempering powers from the backtest tuning split",
-    "code_sha256_16": "dec4a60bcbe3e638"
+    "code_sha256_16": "dec4a60bcbe3e638",
+    "amendments": [
+      "2026-10-31: var.models + gpd-path, fhs-path, spectral-path. Challenger models that run H daily GJR steps (bsm_event.gjr_paths) instead of rescaling one 1-day draw by sqrt(horizon_variance); journaled for horizons above 1 day only, from their own random stream. The pre-registered models, their parameters and their draws are unchanged.",
+      "2026-10-31: cross + gpd-path, fhs-path. Challenger book models that run H daily GJR steps per factor (bsm_event.gjr_paths) through Gaussian-copula GPD draws or bootstrapped residual rows, from their own random stream. The gaussian, gpd and fhs models and their draws are unchanged."
+    ]
   },
   "underlyings": {
     "NDX": {
@@ -112,7 +119,10 @@
           "gpd",
           "skewt",
           "fhs",
-          "spectral"
+          "spectral",
+          "gpd-path",
+          "fhs-path",
+          "spectral-path"
         ],
         "days_per_year": 252
       },
@@ -136,7 +146,10 @@
           "2026-10-29"
         ],
         "source": "tail index and tempering powers from the backtest tuning split",
-        "code_sha256_16": "f24234d70c8dc40b"
+        "code_sha256_16": "f24234d70c8dc40b",
+        "amendments": [
+          "2026-10-31: var.models + gpd-path, fhs-path, spectral-path. Challenger models that run H daily GJR steps (bsm_event.gjr_paths) instead of rescaling one 1-day draw by sqrt(horizon_variance); journaled for horizons above 1 day only, from their own random stream. The pre-registered models, their parameters and their draws are unchanged."
+        ]
       }
     },
     "DJIA": {
@@ -180,7 +193,10 @@
           "gpd",
           "skewt",
           "fhs",
-          "spectral"
+          "spectral",
+          "gpd-path",
+          "fhs-path",
+          "spectral-path"
         ],
         "days_per_year": 252
       },
@@ -201,7 +217,10 @@
           "2026-10-29"
         ],
         "source": "tail index and tempering powers from the backtest tuning split",
-        "code_sha256_16": "f24234d70c8dc40b"
+        "code_sha256_16": "f24234d70c8dc40b",
+        "amendments": [
+          "2026-10-31: var.models + gpd-path, fhs-path, spectral-path. Challenger models that run H daily GJR steps (bsm_event.gjr_paths) instead of rescaling one 1-day draw by sqrt(horizon_variance); journaled for horizons above 1 day only, from their own random stream. The pre-registered models, their parameters and their draws are unchanged."
+        ]
       }
     },
     "BTC": {
@@ -245,7 +264,10 @@
           "gpd",
           "skewt",
           "fhs",
-          "spectral"
+          "spectral",
+          "gpd-path",
+          "fhs-path",
+          "spectral-path"
         ],
         "days_per_year": 365
       },
@@ -269,7 +291,10 @@
           "2026-10-29"
         ],
         "source": "tail index and tempering powers from the backtest tuning split",
-        "code_sha256_16": "f24234d70c8dc40b"
+        "code_sha256_16": "f24234d70c8dc40b",
+        "amendments": [
+          "2026-10-31: var.models + gpd-path, fhs-path, spectral-path. Challenger models that run H daily GJR steps (bsm_event.gjr_paths) instead of rescaling one 1-day draw by sqrt(horizon_variance); journaled for horizons above 1 day only, from their own random stream. The pre-registered models, their parameters and their draws are unchanged."
+        ]
       }
     },
     "ETH": {
@@ -313,7 +338,10 @@
           "gpd",
           "skewt",
           "fhs",
-          "spectral"
+          "spectral",
+          "gpd-path",
+          "fhs-path",
+          "spectral-path"
         ],
         "days_per_year": 365
       },
@@ -336,7 +364,10 @@
           "2026-10-29"
         ],
         "source": "tail index and tempering powers from the backtest tuning split",
-        "code_sha256_16": "f24234d70c8dc40b"
+        "code_sha256_16": "f24234d70c8dc40b",
+        "amendments": [
+          "2026-10-31: var.models + gpd-path, fhs-path, spectral-path. Challenger models that run H daily GJR steps (bsm_event.gjr_paths) instead of rescaling one 1-day draw by sqrt(horizon_variance); journaled for horizons above 1 day only, from their own random stream. The pre-registered models, their parameters and their draws are unchanged."
+        ]
       }
     },
     "EURUSD": {
@@ -380,7 +411,10 @@
           "gpd",
           "skewt",
           "fhs",
-          "spectral"
+          "spectral",
+          "gpd-path",
+          "fhs-path",
+          "spectral-path"
         ],
         "days_per_year": 252
       },
@@ -403,7 +437,10 @@
           "2026-10-23"
         ],
         "source": "tail index and tempering powers from the backtest tuning split",
-        "code_sha256_16": "f24234d70c8dc40b"
+        "code_sha256_16": "f24234d70c8dc40b",
+        "amendments": [
+          "2026-10-31: var.models + gpd-path, fhs-path, spectral-path. Challenger models that run H daily GJR steps (bsm_event.gjr_paths) instead of rescaling one 1-day draw by sqrt(horizon_variance); journaled for horizons above 1 day only, from their own random stream. The pre-registered models, their parameters and their draws are unchanged."
+        ]
       }
     },
     "USDJPY": {
@@ -447,7 +484,10 @@
           "gpd",
           "skewt",
           "fhs",
-          "spectral"
+          "spectral",
+          "gpd-path",
+          "fhs-path",
+          "spectral-path"
         ],
         "days_per_year": 252
       },
@@ -470,7 +510,10 @@
           "2026-10-23"
         ],
         "source": "tail index and tempering powers from the backtest tuning split",
-        "code_sha256_16": "f24234d70c8dc40b"
+        "code_sha256_16": "f24234d70c8dc40b",
+        "amendments": [
+          "2026-10-31: var.models + gpd-path, fhs-path, spectral-path. Challenger models that run H daily GJR steps (bsm_event.gjr_paths) instead of rescaling one 1-day draw by sqrt(horizon_variance); journaled for horizons above 1 day only, from their own random stream. The pre-registered models, their parameters and their draws are unchanged."
+        ]
       }
     },
     "WTI": {
@@ -514,7 +557,10 @@
           "gpd",
           "skewt",
           "fhs",
-          "spectral"
+          "spectral",
+          "gpd-path",
+          "fhs-path",
+          "spectral-path"
         ],
         "days_per_year": 252
       },
@@ -539,7 +585,8 @@
         "source": "tail index and tempering powers from the backtest tuning split",
         "code_sha256_16": "382da27c47d06b46",
         "amendments": [
-          "2026-10-31: kalshi.events '-\\\\d{2}[A-Z]{3}\\\\d{2}$' -> '\\\\d{2}[A-Z]{3}\\\\d{2}14$'; daily WTI events carry the 14 (2:30pm) settlement hour, the old pattern matched none. Contract selection only; tuned VaR parameters unchanged."
+          "2026-10-31: kalshi.events '-\\\\d{2}[A-Z]{3}\\\\d{2}$' -> '\\\\d{2}[A-Z]{3}\\\\d{2}14$'; daily WTI events carry the 14 (2:30pm) settlement hour, the old pattern matched none. Contract selection only; tuned VaR parameters unchanged.",
+          "2026-10-31: var.models + gpd-path, fhs-path, spectral-path. Challenger models that run H daily GJR steps (bsm_event.gjr_paths) instead of rescaling one 1-day draw by sqrt(horizon_variance); journaled for horizons above 1 day only, from their own random stream. The pre-registered models, their parameters and their draws are unchanged."
         ]
       }
     }

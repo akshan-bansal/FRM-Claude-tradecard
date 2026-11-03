@@ -3,6 +3,10 @@
 A strategy emits a signal -> ``Router.submit(intent)`` checks every risk gate
 and either dispatches to the chosen broker (paper or live) or rejects+logs.
 
+One Router can hold several brokers: ``intent.broker`` names the route, and an empty one takes the
+default. The gates are the same on every route and read the figures the caller passes, so a caller
+trading more than one route must pass whole-book figures. Autonomous mode stays on one broker.
+
 Modes:
   * ``paper`` / ``dry-run``  — safe defaults; no human confirmation.
   * ``live``                 — real-money orders. Requires the typed phrase
@@ -21,7 +25,7 @@ import os
 import secrets
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,6 +57,14 @@ class LiveModeNotConfirmed(RuntimeError):
 
 class AutonomousNotEnabled(RuntimeError):
     """Raised when autonomous mode is requested without AUTONOMOUS_ENABLED env var."""
+
+
+def route_key(broker: object) -> str:
+    """The name a lone broker routes under: the venue it fills against, else its own name."""
+    for key in (getattr(broker, "venue", None), getattr(broker, "name", None)):
+        if isinstance(key, str) and key:
+            return key
+    return "default"
 
 
 def mint_intent_id() -> str:
@@ -87,6 +99,8 @@ class OrderIntent:
     # Content hash of the strategy instance that produced this intent (audit/versioning.py). Set by
     # the caller holding the instance; otherwise the Router's ``strategy_version_for`` resolver.
     strategy_version: str = ""
+    # Which of the Router's brokers takes this order. Empty = the Router's default route.
+    broker: str = ""
 
 
 @dataclass
@@ -104,7 +118,9 @@ class Router:
         self,
         *,
         mode: RouterMode,
-        broker: Broker,
+        broker: Broker | None = None,
+        brokers: Mapping[str, Broker] | None = None,
+        default_broker: str | None = None,
         journal: OrderJournal,
         kill_switch: KillSwitch,
         heat: PortfolioHeat,
@@ -124,7 +140,18 @@ class Router:
                 "Router.confirm_autonomous(...)."
             )
         self.mode: RouterMode = mode
-        self.broker = broker
+        if (broker is None) == (brokers is None):
+            raise ValueError("Pass exactly one of broker= or brokers=.")
+        if broker is not None:
+            default_broker = route_key(broker)
+            brokers = {default_broker: broker}
+        assert brokers is not None
+        if default_broker is None or default_broker not in brokers:
+            raise ValueError(f"default_broker {default_broker!r} is not one of {sorted(brokers)}")
+        self.brokers: dict[str, Broker] = dict(brokers)
+        self.default_broker: str = default_broker
+        # The default route's broker: what every single-broker caller has always read.
+        self.broker: Broker = self.brokers[default_broker]
         self.journal = journal
         self.kill_switch = kill_switch
         self.heat = heat
@@ -173,7 +200,9 @@ class Router:
         cls,
         *,
         confirmation: str,
-        broker: Broker,
+        broker: Broker | None = None,
+        brokers: Mapping[str, Broker] | None = None,
+        default_broker: str | None = None,
         journal: OrderJournal,
         kill_switch: KillSwitch,
         heat: PortfolioHeat,
@@ -192,6 +221,8 @@ class Router:
         return cls(
             mode="live",
             broker=broker,
+            brokers=brokers,
+            default_broker=default_broker,
             journal=journal,
             kill_switch=kill_switch,
             heat=heat,
@@ -267,10 +298,28 @@ class Router:
         observed: dict[str, Any] = {}
         trims: list[dict[str, Any]] = []
 
+        # 0. route. An intent naming a broker this router does not hold is rejected, never sent to
+        # the default, where it would fill on a venue nobody chose.
+        route = self.route(intent)
+        observed["route"] = route
+        if route not in self.brokers:
+            reasons.append(f"unknown broker {route!r}: router holds {sorted(self.brokers)}")
+
+        # Whether this order only reduces a position the routed broker holds. The gates that stop new
+        # risk must not trap the way out of it, so the kill-switch, the minimum ticket, the heat cap
+        # and the daily budget all let such an order through. If the holding cannot be read, nothing
+        # shows the order reduces anything, and every gate applies.
+        held = self._held_quantity(intent, route)
+        reduces = held is not None and intent.shares > 0 and (
+            (intent.action == OrderAction.SELL and held >= intent.shares)
+            or (intent.action in (OrderAction.BUY, OrderAction.BUY_TO_COVER) and -held >= intent.shares))
+        observed["held_quantity"] = held
+        observed["reduces_position"] = reduces
+
         # 1. kill switch
         halted = self.kill_switch.state().halted
         observed["kill_switch_halted"] = halted
-        if halted:
+        if halted and not reduces:
             reasons.append("kill-switch tripped")
 
         # 2. equity available
@@ -283,7 +332,7 @@ class Router:
 
         # 4. min ticket
         notional = intent.shares * intent.entry
-        if notional < self.min_ticket_usd:
+        if notional < self.min_ticket_usd and not reduces:
             reasons.append(f"notional ${notional:,.2f} below min ${self.min_ticket_usd}")
 
         # 5. open positions cap (only for entries)
@@ -292,7 +341,11 @@ class Router:
 
         # 5b. card-signed basket (additional gate; entries only, exits always pass)
         if intent.action == OrderAction.BUY and self.basket_gate is not None:
-            basket_reason = self.basket_gate.check_entry(intent.symbol)
+            # The gate holds one venue's basket, and that venue is the default route's. Any other
+            # route has no signed basket to check against, so it takes no new entries.
+            basket_reason = (self.basket_gate.check_entry(intent.symbol)
+                             if route == self.default_broker
+                             else f"no card-signed basket gate on route {route}")
             observed["basket_reason"] = basket_reason
             if basket_reason:
                 reasons.append(basket_reason)
@@ -300,7 +353,7 @@ class Router:
         # 6. portfolio heat
         snap = self.heat.snapshot(equity=equity, open_risk_dollars=existing_risk + intent.risk_dollars)
         observed["heat_pct"] = snap.heat_pct
-        if snap.breached:
+        if snap.breached and not reduces:
             reasons.append(f"portfolio heat {snap.heat_pct:.2%} > cap {self.heat.cap_pct:.2%}")
 
         # 7. stop side sanity
@@ -315,7 +368,7 @@ class Router:
             observed["daily_budget"] = {"trades_today": snap_b.trades_today,
                                         "notional_today_usd": snap_b.notional_today_usd}
             ok, reason = snap_b.admits(additional_notional_usd=notional)
-            if not ok:
+            if not ok and not reduces:
                 reasons.append(reason)
 
         # 9 + 10. Size caps: per-symbol notional cap + portfolio gross-leverage cap
@@ -516,6 +569,7 @@ class Router:
                 "intent_id": intent.intent_id,
                 "mode": self.mode,
                 "strategy": intent.strategy,
+                "broker": self.route(intent),
                 "symbol": intent.symbol,
                 "action": intent.action.value,
                 "shares": intent.shares,
@@ -538,8 +592,10 @@ class Router:
             log.info("router.dry_run.skip_placement", symbol=intent.symbol, shares=intent.shares)
             return None
 
+        # The gate rejected any route this router does not hold, so this lookup cannot miss.
+        broker = self.brokers[self.route(intent)]
         self._ledger_event("BROKER_SUBMITTED", {
-            "broker": self.broker.name, "venue": getattr(self.broker, "venue", None),
+            "broker": broker.name, "venue": getattr(broker, "venue", None),
             "account": intent.account_number, "symbol": intent.symbol,
             "action": intent.action.value, "shares": intent.shares, "entry": intent.entry,
         }, intent=intent)
@@ -560,10 +616,10 @@ class Router:
         # Read before dispatch: a broker may mutate the order it is handed.
         requested_qty = float(order.totalQuantity or 0.0)
         try:
-            placed = self.broker.place_order(order)
+            placed = broker.place_order(order)
         except OrderRejected as e:
             self._ledger_event("BROKER_REJECTED", {
-                "broker": self.broker.name, "symbol": intent.symbol, "error": str(e),
+                "broker": broker.name, "symbol": intent.symbol, "error": str(e),
             }, intent=intent)
             self.journal.rejected({"intent_id": intent.intent_id, "symbol": intent.symbol,
                                    "reasons": [f"broker: {e}"]})
@@ -574,7 +630,7 @@ class Router:
             # may not be at the broker, so it is recorded as unknown, never as rejected, and the
             # exception still propagates: callers handle it exactly as they did before.
             self._ledger_event("BROKER_ERROR", {
-                "broker": self.broker.name, "symbol": intent.symbol,
+                "broker": broker.name, "symbol": intent.symbol,
                 "error_type": type(e).__name__, "error": str(e), "order_state": "unknown",
             }, intent=intent)
             self.journal.rejected({"intent_id": intent.intent_id, "symbol": intent.symbol,
@@ -591,7 +647,7 @@ class Router:
             "action": placed.action.value, "shares": placed.totalQuantity,
             "broker_ref": getattr(placed, "broker_ref", None),
         }, intent=intent, broker_order_id=placed.id, execution={
-            "source": "place_order", "broker": self.broker.name, "order_id": placed.id,
+            "source": "place_order", "broker": broker.name, "order_id": placed.id,
             "requested_quantity": requested_qty, "quantity": placed.totalQuantity,
             # Only what the broker's acknowledgement carried; never the intent's reference price.
             "price": getattr(placed, "avgExecPrice", None),
@@ -600,7 +656,7 @@ class Router:
             {
                 "intent_id": intent.intent_id,
                 "mode": self.mode,
-                "broker": self.broker.name,
+                "broker": broker.name,
                 "order_id": placed.id,
                 "symbol": placed.symbol,
                 "shares": placed.totalQuantity,
@@ -609,24 +665,29 @@ class Router:
         )
         if self.ledger is not None:
             from ..audit.recon import report_order
-            report_order(self.ledger, self.broker, intent.account_number, placed.id,
+            report_order(self.ledger, broker, intent.account_number, placed.id,
                          placed_at=intent.timestamp)
         return placed
 
     def cancel(self, account_number: str, order_id: int, *, reason: str,
-               intent_id: str | None = None) -> bool:
+               intent_id: str | None = None, broker: str = "") -> bool:
         """Cancel an open order through the Router, so the request and its outcome are recorded.
 
         Returns True when the broker accepted the cancel. A failed cancel is recorded and
         returns False; it never raises, because the callers (a kill-switch sweep, an expiry) must
-        go on to the next order.
+        go on to the next order. ``broker`` is the route the order went out on; empty = default.
         """
-        payload: dict[str, Any] = {"broker": self.broker.name, "account": account_number,
+        route = broker or self.default_broker
+        target = self.brokers.get(route)
+        payload: dict[str, Any] = {"broker": target.name if target is not None else route,
+                                   "account": account_number,
                                    "order_id": order_id, "reason": reason}
         self._ledger_event("CANCEL_REQUESTED", payload, intent_id=intent_id,
                            broker_order_id=order_id)
         try:
-            self.broker.cancel_order(account_number, order_id)
+            if target is None:
+                raise BrokerError(f"unknown broker {route!r}")
+            target.cancel_order(account_number, order_id)
         except BrokerError as e:
             self._ledger_event("CANCEL_FAILED", payload | {"error": str(e)}, intent_id=intent_id,
                                broker_order_id=order_id)
@@ -636,6 +697,24 @@ class Router:
         self._ledger_event("CANCELLED", payload, intent_id=intent_id, broker_order_id=order_id)
         self.journal.cancel(payload | {"intent_id": intent_id, "ok": True})
         return True
+
+    # ----- routing -------------------------------------------------------------
+
+    def _held_quantity(self, intent: OrderIntent, route: str) -> float | None:
+        """What the routed broker holds of the intent's symbol, signed; None if it cannot be read."""
+        broker = self.brokers.get(route)
+        if broker is None:
+            return None
+        try:
+            positions = broker.positions(intent.account_number)
+        except Exception as e:                  # a read failure must not look like a holding
+            log.error("router.held_quantity_failed", symbol=intent.symbol, error=str(e))
+            return None
+        return float(sum(p.openQuantity for p in positions if p.symbol == intent.symbol))
+
+    def route(self, intent: OrderIntent) -> str:
+        """The route an intent asks for. It may not be one this router holds; the gate checks."""
+        return intent.broker or self.default_broker
 
     # ----- audit ---------------------------------------------------------------
 
@@ -648,6 +727,7 @@ class Router:
             "symbol": intent.symbol, "action": intent.action.value, "shares": intent.shares,
             "entry": intent.entry, "stop": intent.stop, "target": intent.target,
             "risk_dollars": intent.risk_dollars, "account": intent.account_number,
+            "broker": self.route(intent),
             "created_at": intent.timestamp.isoformat(),
             "pre_gate_ms": round((datetime.now(UTC) - intent.timestamp).total_seconds() * 1000, 1),
         }, intent=intent)
@@ -663,7 +743,7 @@ class Router:
             self._ledger_event("RISK_TRIMMED", trim, intent=intent)
         self._ledger_event("RISK_CHECK" if decision.accepted else "RISK_REJECTED", {
             "accepted": decision.accepted, "rejected_reasons": decision.rejected_reasons,
-            "symbol": intent.symbol, "action": intent.action.value,
+            "symbol": intent.symbol, "action": intent.action.value, "broker": intent.broker,
             "requested_shares": requested_shares, "shares": intent.shares,
             "entry": intent.entry, "stop": intent.stop, "target": intent.target,
             "risk_dollars": intent.risk_dollars,
@@ -711,12 +791,33 @@ class Router:
                            strategy_version=self._strategy_version(intent) if intent else None,
                            risk_check_version=self.risk_check_version())
 
+    @staticmethod
+    def limits_from(settings: Any) -> dict[str, Any]:
+        """``build_default`` keyword arguments for every risk knob in ``config/trading.yaml``.
+
+        Every runner passes this, so a knob means the same thing in paper and in live, and a new one
+        only has to be added here.
+        """
+        return {
+            "cap_pct": settings.portfolio_heat_cap,
+            "max_drawdown_pct": settings.max_drawdown_kill_switch,
+            "daily_loss_limit_pct": settings.daily_loss_limit_pct,
+            "max_open_positions": settings.max_open_positions,
+            "min_ticket_usd": settings.min_ticket_usd,
+            "max_gross_leverage": settings.max_gross_leverage,
+            "max_position_notional_pct": settings.max_position_notional_pct,
+            "force_exit_atr_mult": settings.force_exit_atr_mult,
+            "on_size_cap_breach": settings.on_size_cap_breach,
+        }
+
     @classmethod
     def build_default(
         cls,
         *,
         mode: RouterMode,
-        broker: Broker,
+        broker: Broker | None = None,
+        brokers: Mapping[str, Broker] | None = None,
+        default_broker: str | None = None,
         state_dir: Path,
         cap_pct: float = 0.05,
         max_drawdown_pct: float = 0.03,
@@ -750,12 +851,16 @@ class Router:
             return cls.confirm_live(
                 confirmation=live_confirmation,
                 broker=broker,
+                brokers=brokers,
+                default_broker=default_broker,
                 journal=journal,
                 kill_switch=ks,
                 heat=heat,
                 **gate_kwargs,
             )
         if mode == "autonomous":
+            if broker is None:
+                raise ValueError("Autonomous mode routes to one broker: pass broker=.")
             budget = DailyBudget(
                 state_dir,
                 max_trades_per_day=daily_max_trades,
@@ -772,6 +877,8 @@ class Router:
         return cls(
             mode=mode,
             broker=broker,
+            brokers=brokers,
+            default_broker=default_broker,
             journal=journal,
             kill_switch=ks,
             heat=heat,

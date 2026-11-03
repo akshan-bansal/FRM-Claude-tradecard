@@ -104,6 +104,26 @@ Demo results that reproduce the paper's qualitative findings:
 
   This is a statistical framework for calibrating and evaluating detectors. It is not a certified screening system.
 
+## Multi-day horizons: GJR paths (2026-10-31)
+
+The h-day forecasts rescaled one 1-day draw by √`horizon_variance`. That keeps the 1-day law's shape at every horizon. The fitted dynamics say otherwise:
+- The h-day return mixes over the variance path.
+- The γ term raises that path after the path's own losses.
+
+`gjr_paths` and `horizon_quantiles` run the recursion day by day instead. Simulating each asset's own fitted model puts its standardised 5-day 1% quantile 1–29% beyond the rescaled law (S&P −3.05 against −2.60, Bitcoin −2.63 against −2.04).
+
+**Walk-forward evidence** (`python bsm_event.py --horizon-backtest all --data data --horizon 5`). The setting is a long unit position with 63-day refits and non-overlapping windows; there are 8,071 five-day windows over the eight underlyings.
+- **Scoring.** Paths lower the pinball loss by about 1% at 95% and 97.5%, for 6 of the 8 underlyings. At 99% the result is mixed (+0.6%, lower for 5 of 8), and at 10 days it is mixed at every level.
+- **Mixed cases.** USD/JPY (persistence 0.998) and Bitcoin breach more with paths.
+- **The S&P digital backtest** (`--backtest --paths`) is within noise: gpd's pinball is 2–3.5% worse, while fhs is 5% better at 99%.
+- **The larger error is the tail law, not the horizon.** With the Hill tail index (`SemiParamGPD`'s default), both methods breach about twice as often as nominal, already at 1 day. At 1 day:
+  - S&P breaches 10.5% at 95% and 1.9% at 99%.
+  - Bitcoin breaches 10.8% at 95% and 2.5% at 99%.
+  - Hill puts ξ at 0.36–0.45, which squeezes the body after restandardisation (the issue under "Choices made", below).
+  - With k = 10, 1-day coverage is close to nominal for every underlying: S&P 6.4/2.4/1.0%, Bitcoin 4.9/2.0/0.8%, USD/JPY 5.5/2.7/1.0%.
+
+The path forecasts therefore enter the forward journal as challengers (`gpd-path`, `fhs-path`, `spectral-path`; cross `gpd-path`, `fhs-path`), by dated amendment. They do not replace the pre-registered models.
+
 ## Choices made where the paper is silent
 
 - **Skew sign.** The smile is σ_K = v − β ln(F/K), exactly as the paper writes it, so equity skew needs β < 0. The default is −0.3.

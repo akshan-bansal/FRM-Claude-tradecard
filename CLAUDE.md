@@ -162,6 +162,30 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
 - The spectral VaR gate (`risk/spectral_var.py`, over `BSM_Spectral/`) is opt-in, entries only, and may
   only trim or reject.
 
+## Routing and monitor policy
+
+- One `Router` can hold several brokers: `intent.broker` names the route, empty takes the default, and an
+  unknown route is rejected, never sent to the default. Autonomous mode stays on one broker. Gates read
+  the figures the caller passes, so a caller trading several routes must pass whole-book figures.
+- `LiveMonitor` does not span brokers yet: its equity and positions come from one broker. Summing them
+  across brokers needs the numeraire decision (NEXT_SESSION.md, exchange hopping level 3).
+- Every runner builds `LiveMonitor` with `**monitor_policy(settings)`, so a new runner gets the market-hours
+  guard (`analysis/venue_calendar.py`), per-symbol `entry_triggers` and `forced_exits` from `trading.yaml`.
+- `supports_level_trigger` means a strategy emits `entry_level`; `level_trigger_default` means the monitor
+  acts on it unasked. Backtests read `entry` alone, so emitting the column must never change `entry`.
+- The live runner mirrors the paper runners. Build a runner from `Router.limits_from(settings)`,
+  `monitor_policy(settings)` and `preflight()`; `tests/test_live_parity.py` fails if one stops. A difference
+  between paper and live needs a reason: real broker, typed confirmation, strict ledger.
+- Gates that stop new risk must not trap the way out. An order that only reduces a position the routed
+  broker holds (`reduces` in `Router._gate`, read from the broker and recorded) passes the kill-switch, the
+  minimum ticket, the heat cap and the daily budget. The LLM-trader commands still refuse while halted.
+- Live and autonomous books auto-halt through `risk/equity_watch.py`, journaling to `state/live_equity.csv`.
+  Never reset a peak by editing that file; a human `clear-kill` is what restarts the measure.
+- `analysis/symbol_atlas.py` is the cross-broker view of a symbol. It reads the adapters' own helpers:
+  change a wire form in the adapter, not in the atlas.
+- `scripts/risk_guard_analysis.py` is how to judge the guards. Under a week of paper data on two venues it
+  recommends nothing, and neither should you.
+
 ## Skills available in this repo
 
 `.claude/skills/`:

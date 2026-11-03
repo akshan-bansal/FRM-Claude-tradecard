@@ -61,7 +61,7 @@ from trading_live_claude.data.market import MarketData
 from trading_live_claude.execution.approval import wire_card_approval
 from trading_live_claude.execution.router import Router
 from trading_live_claude.intel.vs_engine import MarketContext, VSInvestmentEngine
-from trading_live_claude.monitor.live_loop import LiveMonitor, MonitorEvent
+from trading_live_claude.monitor.live_loop import LiveMonitor, MonitorEvent, monitor_policy
 from trading_live_claude.portfolio.allocator import PortfolioAllocator
 from trading_live_claude.risk.sizing import PositionSizer
 from trading_live_claude.strategies import STRATEGIES
@@ -250,11 +250,7 @@ def main() -> None:
         mode="paper",
         broker=exec_broker,
         state_dir=settings.state_dir,
-        cap_pct=settings.portfolio_heat_cap,
-        max_drawdown_pct=settings.max_drawdown_kill_switch,
-        daily_loss_limit_pct=settings.daily_loss_limit_pct,
-        max_open_positions=settings.max_open_positions,
-        min_ticket_usd=settings.min_ticket_usd,
+        **Router.limits_from(settings),
         ledger=ledger,
     )
 
@@ -316,6 +312,13 @@ def main() -> None:
         sym_list = list(dict.fromkeys(sym_list + futures_list))
         print(f"[ib-paper] {len(futures_list)} futures roots registered as FUT front-month: "
               f"{futures_list}", flush=True)
+
+    # Pre-flight symbol validation, as paper_kraken.py and `signal` do: refuse to start on a symbol
+    # that would fail on candles at runtime. After the FUT registration above, so a futures root
+    # resolves as the future. PaperBroker.candles delegates to this feed anyway.
+    from trading_live_claude.analysis.symbol_validation import preflight
+    preflight(feed, sym_list, emit=lambda s: print(s, flush=True))
+
     strat = STRATEGIES[args.strategy]()
 
     smap: dict[str, object] = {}
@@ -343,6 +346,8 @@ def main() -> None:
         print(f"[ib-paper] monitoring {len(sym_list)} symbols with strategy '{args.strategy}': "
               f"{sym_list}", flush=True)
 
+    from trading_live_claude.intel.routing import PersistenceGate, futures_overrides
+
     # Optional OSINT overlay + interpret filter — same as QT paper's --intel-overlay path.
     overlay_for = None
     interpret_for = None
@@ -352,7 +357,7 @@ def main() -> None:
         import asyncio as _asyncio
 
         from trading_live_claude.intel.interpret import interpret as _interpret
-        from trading_live_claude.intel.routing import OverlayProvider, futures_overrides
+        from trading_live_claude.intel.routing import OverlayProvider
         from trading_live_claude.intel.worldmonitor import WorldMonitorClient
 
         def _snapshot():
@@ -493,6 +498,8 @@ def main() -> None:
         overlay_for=overlay_for,
         interpret_for=interpret_for,
         weight_bias_for=_weight_bias_for,
+        persistence_for=PersistenceGate(class_overrides=futures_overrides(futures_list)),
+        **monitor_policy(settings),
     )
 
     if tickle is not None:

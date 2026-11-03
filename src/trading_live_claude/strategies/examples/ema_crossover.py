@@ -14,6 +14,8 @@ class EmaCrossover(Strategy):
     """
 
     name = "ema_crossover"
+    # Emits ``entry_level`` for per-symbol opt-in; the monitor acts on ``entry`` alone by default.
+    supports_level_trigger: bool = True
     description = "Fast/slow EMA crossover (long; short opt-in)"
 
     def __init__(self, fast: int = 20, slow: int = 50, allow_short: bool = False, atr_window: int = 14) -> None:
@@ -35,6 +37,7 @@ class EmaCrossover(Strategy):
         cross_up = (out["ema_fast"] > out["ema_slow"]) & (out["ema_fast"].shift(1) <= out["ema_slow"].shift(1))
         cross_dn = (out["ema_fast"] < out["ema_slow"]) & (out["ema_fast"].shift(1) >= out["ema_slow"].shift(1))
         out["entry"] = cross_up.astype(int)
+        out["entry_level"] = (out["ema_fast"] > out["ema_slow"]).astype(int)
         out["exit"] = cross_dn.astype(int)
         if self.allow_short:  # a downward cross opens a short; an upward cross covers it
             out["short_entry"] = cross_dn.astype(int)

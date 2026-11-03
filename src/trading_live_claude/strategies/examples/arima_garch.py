@@ -19,6 +19,8 @@ from ..base import Strategy, StrategyContext
 
 class ArimaGarchTrend(Strategy):
     name = "arima_garch"
+    # Emits ``entry_level`` for per-symbol opt-in; the monitor acts on ``entry`` alone by default.
+    supports_level_trigger: bool = True
     description = "MA-ladder trend confirmed by ARIMA direction, gated by GARCH volatility regime"
 
     def __init__(self, trend_threshold: float = 0.2, window: int = 250, arima_order: tuple[int, int, int] = (1, 0, 1),
@@ -55,6 +57,7 @@ class ArimaGarchTrend(Strategy):
         bull = (trend > self.trend_threshold) & (fc_s > 0.0) & calm
         prev_bull = bull.shift(1).fillna(False)
         out["entry"] = (bull & ~prev_bull).astype(int)         # first bar the regime turns bullish
+        out["entry_level"] = bull.astype(int)                  # any bar the regime is bullish
         out["exit"] = ((trend < 0.0) | (fc_s < 0.0)).astype(int)
         # Conviction: forecast size relative to conditional vol, capped.
         conv = (fc_s.abs() / vol_s.replace(0.0, np.nan)).fillna(0.0)

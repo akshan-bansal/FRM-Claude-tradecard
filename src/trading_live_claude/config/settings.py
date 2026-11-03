@@ -119,6 +119,15 @@ class Settings(BaseSettings):
     # 5-min poll cadence — closes the gap where daily-bar strategies can't see mid-day
     # drawdowns. Set to 0.0 to disable; typical range 2-4 (higher = more room for noise).
     force_exit_atr_mult: float = Field(default=3.0, ge=0.0, le=10.0)
+    # Whether the monitor acts on that trigger. Off by default: it sends SELL orders with no strategy
+    # signal behind them, so turning it on is the operator's decision.
+    forced_exits: bool = False
+
+    # Skip a symbol while its venue is outside regular hours (analysis/venue_calendar.py).
+    respect_market_hours: bool = True
+    # Per-symbol entry channels, for strategies that emit entry_level: event | level | both. A symbol
+    # not named takes its strategy family's default (Strategy.level_trigger_default).
+    entry_triggers: dict[str, Literal["event", "level", "both"]] = Field(default_factory=dict)
 
     # Behavior when the per-symbol notional cap OR the portfolio gross-leverage cap
     # would be breached (2026-09-09). 'trim' (default) resizes the intent to fit and
@@ -189,6 +198,9 @@ _TRADING_KNOB_FIELDS: tuple[str, ...] = (
     "max_gross_leverage",
     "max_position_notional_pct",
     "force_exit_atr_mult",
+    "forced_exits",
+    "respect_market_hours",
+    "entry_triggers",
     "on_size_cap_breach",
     "default_strategy",
     "default_symbols",
