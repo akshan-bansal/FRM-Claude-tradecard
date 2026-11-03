@@ -1690,6 +1690,15 @@ bands), and daily jumps beyond FHS except WTI. Microstructure is deferred by use
 Recorded after `5b80db6` on `feat/backlog-routing-triggers`. In priority order; the spectral tail index
 is in 12.1 and the post-GBM queue in 12.2.
 
+### Fix first: the intel feed is down
+
+0. 🔴 **WorldMonitor has moved, so the overlay and persistence gate have no feed.** Checked 2026-11-01:
+   `initialize` at `DEFAULT_URL` (`intel/worldmonitor.py`) returns `410 Gone` with "Use
+   https://worldmonitor.app/mcp". `__aenter__` raises, so every refresh fails and the provider has no read:
+   every runner behaves as if the overlay were off, while its startup line says it is on. No new
+   `elevated_in` edges get written either. The key is set. The new host answered a keyless `initialize` and
+   `tools/list`; the key has not been sent there, pending the user's OK.
+
 ### Fix before any live or autonomous run
 
 1. 🔴 **`QUESTRADE_ENV` selects nothing.** Worse than the audit's "runtime override is a no-op". From
@@ -1744,14 +1753,25 @@ cache key, the interval lexicon, the conviction clip, and the intel hooks.
 
 8. **Stale-run warning.** `PersistenceGate` ignores a run older than `max_age_hours` silently. Log it, so
    a dead poller is visible rather than looking like a calm market.
-9. **Dead persistence domains.** `_CLASS_TO_DOMAINS` reads `disaster` and `economy`, but `INTEL_DOMAINS`
-   writes only `conflict`, `energy` and `military`. So `fixed_income` can only halt on `conflict`. Add
-   the domains to the snapshot or drop them from the map.
-10. **Allocator weights go stale.** `_allocator_weight_bias` computes once at startup and never refreshes,
+9. **Persistence domains: decided 2026-11-01.** The desk does not seek to profit on disasters.
+   * `disaster` is out of `_CLASS_TO_DOMAINS` and stays unwritten. Keeping it unwritten also keeps the
+     "Disaster / insurance underpricing" thesis in `interpret.py` dormant, since it needs disaster
+     acceleration. That thesis calls cat-exposed insurers "a specific bet" and the agent layer's
+     `disaster` domain maps to the same themes: **ask the user whether to remove both.** The overlay's
+     `_disaster_gate` stays, because it only trims.
+   * `economy` is **half done and cannot fire on live data yet.** `intel/graph.py` writes its
+     `elevated_in` edge at `ECONOMY_ALERT_THRESHOLD` (3 alerts, uncalibrated) from `category_alert_counts`,
+     and the gate reads it for `fx` and `fixed_income`. But `worldmonitor._build_snapshot` never fills
+     `category_alert_counts`, so that edge, and the overlay's existing `_econ_gate`, stay silent. Adding
+     `economy` to `INTEL_DOMAINS` is not the fix: `get_intel_timeline` allows only conflict, military and
+     energy, and a rejected call marks every snapshot degraded. Next: with item 0 fixed, read the real
+     news payload and fill the counts, or build the intel hook on `get_economic_data` or
+     `get_macro_history`. Don't guess the payload's shape.
+10. **Allocator weights go stale.** `allocator_weight_bias` computes once at startup and never refreshes,
     so a long-running daemon keeps old weights.
 11. **Hook settings aren't in `trading.yaml`.** `min_polls`, the 6-hour stale limit and the allocator range
     are hard-coded, and the daemon's only overlay opt-out is removing the key.
-12. **Thin test coverage on the real-money paths.** `_intel_overlay_hooks` has no test with a key set, and
+12. **Thin test coverage on the real-money paths.** `intel_overlay_hooks` has no test with a key set, and
     `live` and `autonomous_run` are checked by reading their source, because tests may not use live mode.
 13. **One real agent call.** Add `ANTHROPIC_API_KEY` to `.env`, then run `debate()` on two or three
     made-up headlines with `domains=("energy",)`, at most two API calls, and record `stop_reason` and

@@ -20,7 +20,7 @@ from trading_live_claude.intel.overlay import IntelSnapshot
 def _snap(**overrides: object) -> IntelSnapshot:
     """Build a snapshot with sane defaults; overrides win."""
     base: dict[str, object] = {
-        "category_alert_counts": {"economy": 3, "conflict": 2},
+        "category_alert_counts": {"economy": 2, "conflict": 2},
         "country_alert_counts": {"US": 4, "CN": 1},
         "event_acceleration": {"energy": 3.0, "conflict": 1.2},
         "source_age_hours": {"news": 0.5, "energy": 48.0},
@@ -37,7 +37,7 @@ def test_snapshot_decomposes_into_the_expected_edge_shape() -> None:
 
     # Domain observations, one per non-zero category count.
     dom_obs = edges_where(edges, predicate="observed", object=("domain", "economy"))
-    assert len(dom_obs) == 1 and dom_obs[0].weight == 3.0
+    assert len(dom_obs) == 1 and dom_obs[0].weight == 2.0
 
     # Elevated_in only for domains at/above the threshold. energy=3.0 clears, conflict=1.2 does not.
     elev = edges_where(edges, predicate="elevated_in")
@@ -475,3 +475,24 @@ def test_edges_where_is_conjunctive_over_provided_filters() -> None:
                            object=("domain", "energy"))) == 2
     assert len(edges_where(edges, subject=("poll", "p1"), predicate="elevated_in",
                            object=("domain", "energy"))) == 1
+
+
+def test_economy_is_elevated_on_its_alert_count() -> None:
+    """Economy has no event archive, so its alert count drives the edge the persistence gate reads."""
+    quiet = snapshot_to_edges(_snap(category_alert_counts={"economy": 2}))
+    assert not edges_where(quiet, predicate="elevated_in", object=("domain", "economy"))
+    for counts in ({"economy": 3}, {"economic": 3}, {"economy": 1, "economic": 2}):
+        edges = edges_where(snapshot_to_edges(_snap(category_alert_counts=counts)),
+                            predicate="elevated_in", object=("domain", "economy"))
+        assert len(edges) == 1 and edges[0].weight == 3.0
+
+
+def test_economy_co_occurs_with_other_elevated_domains() -> None:
+    edges = snapshot_to_edges(_snap(category_alert_counts={"economy": 4}, event_acceleration={"energy": 3.0}))
+    pairs = {(e.subject[1], e.object[1]) for e in edges_where(edges, predicate="co_occurs")}
+    assert ("energy", "economy") in pairs and ("economy", "energy") in pairs
+
+
+def test_no_snapshot_writes_a_disaster_elevation_from_alerts() -> None:
+    edges = snapshot_to_edges(_snap(category_alert_counts={"disaster": 50}, natural_disasters_active=50))
+    assert not edges_where(edges, predicate="elevated_in", object=("domain", "disaster"))
