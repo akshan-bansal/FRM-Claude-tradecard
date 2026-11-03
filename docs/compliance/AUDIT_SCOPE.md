@@ -56,8 +56,9 @@ the engine's source hash is part of the gate version. `--spectral-var-cap` on th
   signs with git's configured key or `--signing-key` (`--ssh` for an SSH key); `--no-sign` makes
   an annotated tag and the row says unsigned.
 - Retention destination: `trading audit archive` needs a place outside OneDrive; not chosen.
-- Affiliated accounts: the superficial-loss test sees a spouse's or registered account only if you
-  supply its executions as a CSV.
+- Affiliated accounts: the superficial-loss test sees a registered account only if you supply its
+  executions as a CSV. TFSA trades will be supplied. Spouse and RRSP accounts are out of scope, so their
+  buy-backs are not tested (operator's decision, 2026-11-03).
 - Live executions arrive after the placement; run `trading audit recon <venue>` after a live
   session (or on a schedule) to pick them up. Not scheduled here.
 - Clock offset (G10) is not measured.
@@ -303,8 +304,8 @@ reorders a gate.
 
 ## 8. Decisions for the operator
 
-- **Affiliated accounts.** Superficial loss counts buy-backs in a spouse's account or your
-  RRSP/TFSA. Are those fed to `audit export` as a CSV, or declared out of scope in writing?
+- **Affiliated accounts.** Decided 2026-11-03: TFSA trades are fed to `audit export` as a CSV. Spouse and
+  RRSP accounts are declared out of scope.
 - **Characterisation.** Whether to treat this as business income from the start. It changes what
   the export totals (income and expenses vs capital gains), not what the ledger records.
 - **Anchor target.** Where the head hash goes, off this machine.

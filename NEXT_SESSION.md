@@ -2257,23 +2257,24 @@ Each has a recommendation. Answers go here or in chat.
   most notional the book can hold.
 * **6. IB trades derivatives and international markets.** North American equities are refused there; overseas listings and futures
   pass. `ib_futures_only: true` narrows it back. No runner trades options yet, so that part is permitted but has no path.
-* **22. TFSA.** Read as: TFSA trades will be supplied as a CSV, and spouse and RRSP accounts will not. `trading audit export --affiliated
-  <file>` takes `account,symbol,side,quantity,time[,venue]`. **The file itself is still needed.** The test cannot see a spouse's or
-  an RRSP's buy-backs.
+* **22. TFSA only, confirmed.** TFSA trades will be supplied as a CSV; spouse and RRSP accounts are declared out of scope, so the
+  superficial-loss test cannot see their buy-backs. `trading audit export --affiliated <file>` takes
+  `account,symbol,side,quantity,time[,venue]`. **The file itself is still needed.**
 * **24. Keep** `Components\BSM_Spectral.pre-subtree.git`.
 
 Section 13, same day: **7** fixed (`get_settings` notices a change to the yaml, `.env` or the environment). **8** fixed (a stale run
 is logged). **10** fixed (`allocator_refresh_seconds`, hourly by default: weights recomputed between polls, last good kept on a failure,
 each new set in the ledger as `ALLOCATION_REFRESHED`). **11** fixed (`persistence_min_polls`, `persistence_max_age_hours`,
 `allocator_bias_floor`, `allocator_bias_cap`; `intel_overlay: false` already turns the overlay off for the daemon). **12** see
-`tests/test_money_paths.py`. **15** accepted as it is. **19** see below.
+`tests/test_money_paths.py`; the user decided Questrade's HTTP layer stays untested, keeping the `CLAUDE.md` rule against building a
+Questrade broker in tests. **15** accepted as it is. **19** see below. **20** done: `bsm_detect.py` is in
+`BSM_Spectral/.claude/settings.json`, and the maturation script's allowed path is corrected.
 
 **Section 13 item 19, the maturation run.** The scheduled runs on 2026-11-02 and 11-03 both logged a header and `^C`, and the task's
 last result is `0xC000013A` (console closed or Ctrl-C), so neither did any work. Run by hand on 2026-11-03 at 12:18 ET the same script
 finished with "all stages ok", so the script is fine and the scheduled start is what dies. That run's Kalshi quotes are past the
 09:00 pre-open window, so they calibrate the model but do not count in the market-versus-model comparison. What kills the 09:00
 console is not known; the task is set to "Interactive only". Running it hidden needs the user's password, so it is theirs to change.
-`BSM_Spectral/.claude/settings.json` still allows the old path, `Components\BSM_Spectral\run_maturation.cmd`, and has no `bsm_detect.py` entry (item 20).
 
 The port of `FRM-Claude` (`docs/PORT_FRM_CLAUDE.md`, 2026-11-02) settles two of these and changes a third: **6** IB is
 futures-only, enforced (`ib_futures_only`); **13** Kraken trades fractional units in its own lots; **14** fees are now the venue
