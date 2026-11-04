@@ -435,6 +435,20 @@ def venue_feed(settings: Any, venue: str, *, money: bool, transport: str = "web"
         return IBBroker(host=settings.ib_host, port=port, client_id=settings.ib_client_id,
                         account=settings.ib_account or "", enable_live_orders=money,
                         readonly_market_data=not money), None
+    if transport == "connector":
+        if money:
+            raise SessionError("--transport connector is read-only: it feeds paper sessions and places no orders.")
+        from ..brokers.base import TokenExpired
+        from ..brokers.ib_connector import IBConnectorBroker
+        if not settings.token_encryption_key:
+            raise SessionError("TOKEN_ENCRYPTION_KEY must be set in .env.")
+        try:
+            connector = IBConnectorBroker.from_state(Path(settings.state_dir), settings.token_encryption_key)
+        except TokenExpired as e:
+            raise SessionError(str(e)) from e
+        for root in futures:
+            connector.set_sec_type(root.upper(), "FUT")
+        return connector, None
     raise SessionError(f"Unknown transport {transport!r}.")
 
 

@@ -160,11 +160,12 @@ def main() -> None:
                          "Same shape as `trading paper --strategy-map`.")
     ap.add_argument("--futures", default="",
                     help="Comma-separated futures roots resolved as FUT front-month contracts, e.g. "
-                         "'ES,NQ,CL,GC,ZN'. Only for --transport web. Without this flag those symbols would "
+                         "'ES,NQ,CL,GC,ZN'. Not for --transport socket. Without this flag those symbols would "
                          "collide with the STK tickers of the same name (ES=Eversource, CL=Colgate).")
-    ap.add_argument("--transport", default="web", choices=("web", "socket"),
+    ap.add_argument("--transport", default="web", choices=("web", "socket", "connector"),
                     help="'web' hits the Client Portal Gateway REST API (default). 'socket' uses TWS/IB "
-                         "Gateway via ib_insync.")
+                         "Gateway via ib_insync. 'connector' uses IBKR's official MCP connector, read-only; "
+                         "log in first with scripts/ib_connector_login.py.")
     ap.add_argument("--account-currency", dest="account_currency", choices=("CAD", "USD"), default=None,
                     help="The book's currency. Default USD on IB: one book per currency, FX is not sourced from IB.")
     ap.add_argument("--news-providers", dest="news_providers", default="",
