@@ -29,7 +29,7 @@ from trading_live_claude.brokers.models import OrderAction
 from trading_live_claude.execution.approval import CardRegistry, InMemoryApprovalStore, fingerprint
 from trading_live_claude.execution.approval_asgi import create_app
 from trading_live_claude.execution.approval_sqlite import SqliteApprovalStore, SqliteCardRegistry
-from trading_live_claude.execution.desk_feed import meters_snapshot, session_stats
+from trading_live_claude.execution.desk_feed import catalog_rows, meters_snapshot, session_stats
 from trading_live_claude.execution.router import OrderIntent
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -174,14 +174,42 @@ def test_stats_name_what_they_cannot_source(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- the atlas feed
 
 
+def test_the_atlas_tab_draws_the_120_meter_catalogue() -> None:
+    cat_id, rows = catalog_rows(ROOT)
+    assert cat_id and len(rows) == len({r["id"] for r in rows}) == 120
+    assert len({r["group"] for r in rows}) == 12
+    assert {r["kind"] for r in rows} == {"number", "status"}
+    assert all(r["bounds"] is None or r["bounds"][0] < r["bounds"][1] for r in rows)
+    assert not any("value" in r or "status" in r for r in rows)  # what the code defines, never a reading
+
+
 def test_meter_readings_pass_the_pages_validator(tmp_path: Path) -> None:
     _marks(tmp_path, SID)
     snap = meters_snapshot(tmp_path, ROOT)
+    defined = {r["id"] for r in catalog_rows(ROOT)[1]}
     assert snap["schema_version"] == 1 and snap["readings"]
     for mid, r in snap["readings"].items():
+        assert mid in defined, mid  # one unknown id and the page refuses the whole snapshot
         assert r["source"] and r["scope"] and r["status"] == "OBSERVED", mid
         assert r["stale_after_seconds"] > 0, mid
         assert datetime.fromisoformat(r["as_of"]) <= datetime.now(UTC), mid
+
+
+def test_the_feed_takes_the_newest_session_unless_told_which(tmp_path: Path) -> None:
+    _marks(tmp_path, "older")
+    rows = (tmp_path / "paper_equity.csv").read_text(encoding="utf-8").splitlines()
+    newer = rows[-1].replace("older", SID).replace("99980", "99970").replace(",0,0,", ",-30,0,")
+    (tmp_path / "paper_equity.csv").write_text("\n".join([*rows, newer]) + "\n", encoding="utf-8")
+    assert meters_snapshot(tmp_path, ROOT)["session_id"] == SID
+    assert meters_snapshot(tmp_path, ROOT, session_id="older")["session_id"] == "older"
+
+
+def test_the_shim_reads_its_own_session_in_its_own_currency(tmp_path: Path) -> None:
+    _marks(tmp_path, SID)
+    body = client(None, state_dir=tmp_path, session_id=SID, account_currency="USD").get("/v1/meters/snapshot").json()
+    assert body["session_id"] == SID and body["readings"]["001"]["unit"] == "USD"
+    unread = client(None, state_dir=tmp_path, session_id="never-traded").get("/v1/meters/snapshot").json()
+    assert "001" not in unread["readings"] and any("unread, not zero" in n for n in unread["notes"])
 
 
 # --------------------------------------------------------------------------- the builder and template
@@ -193,6 +221,25 @@ def dash():
     mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
     return mod
+
+
+def test_the_builder_bakes_120_meters_and_readings_they_define(tmp_path: Path, dash) -> None:
+    _marks(tmp_path, SID)
+    meters, snaps, pin = dash.atlas(tmp_path)
+    assert len(meters) == 120 and "OS-InvestmentIntelligenceDashboard/meter_catalog.csv" in pin["text"]
+    assert snaps["build"]["readings"].keys() <= {m["id"] for m in meters}
+
+
+def test_a_contradictory_journal_loses_the_readings_not_the_page(tmp_path: Path, dash, capsys) -> None:
+    _marks(tmp_path, SID)
+    path = tmp_path / "paper_equity.csv"
+    head, *rows = path.read_text(encoding="utf-8").splitlines()
+    bad = rows[-1].split(",")
+    bad[3] = "1"                                             # cash no longer reconciles with equity
+    path.write_text("\n".join([head, *rows[:-1], ",".join(bad)]) + "\n", encoding="utf-8")
+    meters, snaps, _ = dash.atlas(tmp_path)
+    assert len(meters) == 120 and snaps == {}
+    assert "JournalMismatch" in capsys.readouterr().out
 
 
 def test_a_book_with_nothing_fit_to_rank_still_builds(tmp_path: Path, dash) -> None:

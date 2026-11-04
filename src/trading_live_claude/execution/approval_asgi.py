@@ -665,7 +665,8 @@ def create_app(
                                            "has no journals to read readings from."]})
         from .desk_feed import meters_snapshot as _snapshot
         try:
-            return JSONResponse(_snapshot(Path(state_dir)))
+            return JSONResponse(_snapshot(Path(state_dir), session_id=session_id,
+                                          currency=account_currency if session_id else None))
         except Exception as exc:       # a contradictory journal is reported, not rounded off
             return JSONResponse({"schema_version": 1, "mode": "UNREADABLE", "readings": {},
                                  "notes": [f"{type(exc).__name__}: {exc}"]}, status_code=409)

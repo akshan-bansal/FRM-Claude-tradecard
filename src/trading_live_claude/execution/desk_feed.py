@@ -11,6 +11,7 @@ panel and for the tests.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import socket
 import sqlite3
@@ -22,6 +23,9 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 OVERLAY_MAX_AGE_S = 3600.0   # the live overlay refreshes every 15 min; an older row is not "current"
+# The ATLAS tab's 120 meters, the ids audit.meters reports against. config/meter_catalog.csv belongs to
+# scripts/atlas.py and reports/atlas.html; the page refuses a whole snapshot over an id it does not define.
+DESK_CATALOG = Path("OS-InvestmentIntelligenceDashboard") / "meter_catalog.csv"
 
 
 def _ts(raw: object) -> datetime | None:
@@ -130,41 +134,57 @@ def _prompt_rows(db: Path) -> list[dict[str, Any]] | None:
 # --------------------------------------------------------------------------- atlas
 
 
+def _bounds(raw: str) -> list[float] | None:
+    """A meter's dial scale. An unparseable scale is no scale, not a guessed one."""
+    try:
+        lo, hi = json.loads(raw)
+        return [float(lo), float(hi)]
+    except (ValueError, TypeError):
+        return None
+
+
 def catalog_rows(root: Path = REPO_ROOT) -> tuple[str, list[dict[str, Any]]]:
-    """The Evidence Atlas catalogue in the shape the desk's ATLAS tab draws."""
-    from ..atlas.catalog import load_catalog
-    path = root / "config" / "meter_catalog.csv"
+    """The 120-meter catalogue in the shape the desk's ATLAS tab draws.
+
+    It states what the code defines, so the file's value and status columns stay behind: a reading only
+    reaches the page from a snapshot, carrying its own source, scope and timestamp.
+    """
+    path = root / DESK_CATALOG
     if not path.exists():
         return "", []
-    cat_id, meters = load_catalog(path)
-    return cat_id, [{"id": m.id, "group": m.section.split(" ", 1)[-1] if m.section[:2].isdigit() else m.section,
-                     "label": m.name, "source": m.source, "formula": m.definition, "unit": m.unit,
-                     "bounds": [m.lo, m.hi] if m.lo is not None and m.hi is not None else None,
-                     "kind": "number", "support": f"stale after {m.stale_after_s}s", "url": ""}
-                    for m in meters]
+    text = path.read_text(encoding="utf-8")
+    rows = [{"id": r["id"], "group": r["group"], "label": r["label"], "source": r["source"],
+             "formula": r["formula"], "unit": r["unit"], "bounds": _bounds(r["bounds"]),
+             "kind": r["kind"], "support": r["support"], "url": r["url"]}
+            for r in csv.DictReader(text.splitlines())]
+    return hashlib.sha256(text.encode()).hexdigest()[:12], sorted(rows, key=lambda r: r["id"])
 
 
-def meters_snapshot(state_dir: Path, root: Path = REPO_ROOT, *, now: datetime | None = None) -> dict[str, Any]:
+def _newest_session(state_dir: Path) -> str:
+    """The session of the last equity row, for a reader that was not told which book it is on."""
+    path = state_dir / "paper_equity.csv"
+    if not path.exists():
+        return ""
+    with path.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    return (rows[-1].get("session_id") or "") if rows else ""
+
+
+def meters_snapshot(state_dir: Path, root: Path = REPO_ROOT, *, session_id: str | None = None,
+                    currency: str | None = None, now: datetime | None = None) -> dict[str, Any]:
     """An atlas snapshot taken from the journals now, in the desk's wire schema (schema_version 1).
 
     Each reading keeps the journal row's own timestamp, so the panel ages it to STALE on its clock.
     """
-    from ..atlas.catalog import load_catalog
-    from ..atlas.snapshot import take_snapshot
-    now = now or datetime.now(UTC)
-    path = root / "config" / "meter_catalog.csv"
+    from ..audit.meters import snapshot
+    from ..config.settings import get_settings
+    path = root / DESK_CATALOG
     if not path.exists():
         return {"schema_version": 1, "mode": "NO CATALOGUE", "readings": {},
                 "notes": [f"no meter catalogue at {path}"]}
-    cat_id, meters = load_catalog(path)
-    snap = take_snapshot(Path(state_dir), root, meters, cat_id, now=now)
-    readings = {r["id"]: {"value": r["value"], "unit": r["unit"], "as_of": r["observed_utc"],
-                          "status": "OBSERVED", "stale_after_seconds": r["stale_after_s"],
-                          "source": r["source"], "scope": r["scope"]}
-                for r in snap["readings"]}
-    return {"schema_version": 1, "mode": f"JOURNALS · catalogue {cat_id}",
-            "captured_at": snap["generated_utc"], "readings": readings,
-            "notes": snap["extractor_errors"]}
+    state = Path(state_dir)
+    return snapshot(state, session_id or _newest_session(state), currency or get_settings().account_currency,
+                    now=now)
 
 
 # --------------------------------------------------------------------------- IB access
