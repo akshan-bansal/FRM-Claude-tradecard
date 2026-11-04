@@ -93,9 +93,17 @@ class BacktestEngine:
         profit_lock: ProfitLock | None = None,
         candle_exit: CandleExit | None = None,
         overbought_exit: OverboughtExit | None = None,
+        warmup_bars: int = 0,
     ) -> BacktestResult:
+        """Run ``strategy`` over ``df``. The first ``warmup_bars`` feed its indicators and are not scored.
+
+        Equity, returns, positions, trades and metrics then cover only the bars after them, which is
+        how an out-of-sample fold should read: a lookback longer than the fold still gets to act.
+        """
         if "close" not in df.columns:
             raise ValueError("DataFrame must contain a 'close' column.")
+        if warmup_bars < 0 or (warmup_bars and warmup_bars >= len(df)):
+            raise ValueError(f"warmup_bars must leave a bar to score; got {warmup_bars} of {len(df)}")
         ctx = StrategyContext(symbol=symbol, timeframe=timeframe)
         signals = strategy.generate_signals(df, ctx)
         position = SignalSet(signals).to_positions(
@@ -115,10 +123,21 @@ class BacktestEngine:
         transition = position.diff().abs().fillna(0)
         cost = transition * per_side
         strat_ret = position.shift(1).fillna(0) * bar_ret - cost
+        ledger_signals, ledger_position = signals, position
+        if warmup_bars:
+            # What is held into the first scored bar is bought there, at the prior close: the pick
+            # scored here may not be what ran before it, and a position that paid nothing to arrive
+            # would flatter the fold.
+            strat_ret = strat_ret.iloc[warmup_bars:].copy()
+            strat_ret.iloc[0] -= abs(float(position.iloc[warmup_bars - 1])) * per_side
+            ledger_signals = signals.iloc[warmup_bars - 1:]
+            ledger_position = position.iloc[warmup_bars - 1:]
+            signals = signals.iloc[warmup_bars:]
+            position = position.iloc[warmup_bars:]
         equity = self.starting_equity * (1.0 + strat_ret).cumprod()
 
         # trade ledger
-        trades = self._build_trade_ledger(signals, position)
+        trades = self._build_trade_ledger(ledger_signals, ledger_position)
         trade_pnls = [t.pnl_pct for t in trades]
 
         metrics = compute_metrics(equity, strat_ret, trade_pnls, position)

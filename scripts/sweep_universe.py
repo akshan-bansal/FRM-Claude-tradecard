@@ -88,9 +88,10 @@ def combos(grid: dict) -> list[dict]:
     return out
 
 
-def score_run(eng: BacktestEngine, sname: str, params: dict, df: pd.DataFrame, sym: str):
+def score_run(eng: BacktestEngine, sname: str, params: dict, df: pd.DataFrame, sym: str,
+              warmup_bars: int = 0):
     try:
-        res = eng.run(STRATEGIES[sname](**params), df, sym)
+        res = eng.run(STRATEGIES[sname](**params), df, sym, warmup_bars=warmup_bars)
     except Exception:
         return None
     m = res.metrics
@@ -145,6 +146,9 @@ def walk_forward(
     explicitly overridden by the ``train`` / ``test`` / ``step`` arguments. ``asset_class`` is
     inferred from ``sym`` via ``intel.routing.classify_symbol`` if not supplied. Falls back to
     the equity protocol for unknown classes so a caller never silently misconfigures.
+
+    Each test block is scored with its training bars in front as warm-up. Scored alone, a lookback
+    longer than the block cannot act, so it reads as 0% whatever the market did.
     """
     cls = asset_class or classify_symbol(sym.replace("_TO", ".TO").replace("_UN_", ".UN."))
     protocol = wf_protocol(cls)
@@ -167,7 +171,7 @@ def walk_forward(
     start = 0
     while start + train_bars + test_bars <= n:
         tr = df.iloc[start:start + train_bars].reset_index(drop=True)
-        te = df.iloc[start + train_bars:start + train_bars + test_bars].reset_index(drop=True)
+        fold = df.iloc[start:start + train_bars + test_bars].reset_index(drop=True)
         bt = None
         for sname, grid in PARAM_GRIDS.items():
             for p in combos(grid):
@@ -175,7 +179,7 @@ def walk_forward(
                 if got and (bt is None or got[0] > bt[0]):
                     bt = (got[0], sname, p)
         if bt is not None:
-            got = score_run(eng, bt[1], bt[2], te, sym)
+            got = score_run(eng, bt[1], bt[2], fold, sym, warmup_bars=train_bars)
             if got is not None:
                 oos_scores.append(got[0])
                 is_scores.append(bt[0])
