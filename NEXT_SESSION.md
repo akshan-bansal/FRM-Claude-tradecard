@@ -2377,7 +2377,7 @@ question 4's case happening now, not a hypothetical. Check the key when the othe
 24. **Can `Components\BSM_Spectral.pre-subtree.git` be deleted?** It is the backup from the subtree merge. Under the
     no-removals rule it stays until you say so.
 
-## 17. GraphRAG search and thesis signals  🟢 PHASES 1–2 BUILT (2026-11-03)
+## 17. GraphRAG search and thesis signals  🟢 PHASES 1–4 BUILT (2026-11-04)
 
 **Goal.** Build search into our GraphRAG (not CAMEL-OASIS, whose `AgentGraph` has no traversal and whose
 `search_posts` is an unranked SQL `LIKE`), so theses can influence and post entry and exit signals on top of
@@ -2398,8 +2398,8 @@ the composites and microstructure pipelines.
 |---|---|---|---|
 | 1 ✅ | `intel/graph_store.py`, `microstructure/l2_recorder.py`, `scripts/record_l2.py` | No future edge can be returned | Nothing |
 | 2 ✅ | `intel/graph_search.py`: `neighbors`, `bfs_paths`, `shortest_path`, `temporal_walk`, `personalized_pagerank`, `centrality`, `communities`, `bm25_search`, `co_persistence`, `first_seen`, `thickening_rate`, `trending_nodes`, `reciprocal_rank_fusion`, `mmr_diversify` | Tested on fixed sample graphs, all through a `GraphView` | `graph` extra (`networkx`, `scipy`) |
-| 3 | `retrieve_evidence`, agent search tools, thesis memory and trace | A mocked debate cites its evidence paths | Anthropic credit for real calls |
-| 4 | `intel/thesis_signal.py`: `ThesisSignal`, `thesis_to_signals`, `ThesisBook`; `THESIS_SIGNAL` ledger event first | Signals logged, acting on nothing | Live feed (section 13, item 0) |
+| 3 ✅ | `intel/retrieval.py`: `retrieve_evidence`, `ViewTools`, `ThesisMemory`, `debate_on_view`; `run_debate` in `intel/agents.py` | A mocked debate cites its evidence paths | Anthropic credit for real calls |
+| 4 ✅ | `intel/thesis_signal.py`: `ThesisSignal`, `thesis_to_signals`, `fired_to_signals`, `ThesisBook`, `run_shadow_pass`; `scripts/thesis_shadow.py`; `THESIS_SIGNAL` ledger event | Signals logged, acting on nothing | Live feed for real signals (section 13, item 0) |
 | 5 | `promotion_gate`, replay | Walk-forward results per thesis type | Weeks of shadow data |
 | 6 | `ThesisOverlay`: confirm, veto, exit | Works identically on paper and money | Gate and user approval |
 | 7 | `ThesisStrategy`: originates entries | Strictest gate passed | Gate and user approval |
@@ -2425,7 +2425,40 @@ drops `disaster` and its events. For phase 3:
 * **`uv.lock`** does not have the `graph` extra: `uv` is not installed here. Run `uv lock` where it is.
 * **Evidence is empty today.** The real journal holds 27 edges, all `traded`, so every search on it returns nothing.
 
-### 17.3 Phase 3 brief: evidence retrieval, agent search, memory and trace  🔴 NEXT
+### 17.4 Phase 4 as built  🟡 TABLE AWAITS REVIEW
+
+Signals are rows in the ledger's `thesis` stream, so they cannot be edited or added after an outcome without
+breaking the chain. A pass for a past moment is marked `replay` and stays out of `ThesisBook.signals()` by default;
+phase 5 must never count one as forward evidence. An adverse read logs `veto` and `exit`, a constructive one `confirm`
+and `entry`, and an unsigned one `watch`, which must never be promotable. Nothing on the order path reads any of it, and
+tests check that by import and by source.
+
+**`THEME_DIRECTIONS` is a draft awaiting the user's review (`DIRECTION_TABLE_VERSION`).** Rule theses state no
+direction, so the table supplies one per thesis and theme, from each thesis's own wording. Bump the version on any
+change. `Thesis.direction` is not used for rule signals: its `adverse` default only exists to make them trim.
+
+**Not done, and known.**
+* No real signal exists yet: the WorldMonitor feed is down, so `run_shadow_pass` records nothing and says why.
+* Nothing schedules a pass. The standing rule in "Data-first sequencing" says no new scheduled tasks, so it runs by hand:
+  `python scripts/thesis_shadow.py`. The forward record only grows while someone runs it.
+* Rule signals land on `THEME_EXEMPLARS`, which covers little of the book (section 13, item 15).
+* `strength` is uncalibrated: band weight times `intensity` where modelled, or the agent's self-reported confidence.
+
+### 17.3 Phase 3 brief: evidence retrieval, agent search, memory and trace  ✅ BUILT 2026-11-04
+
+**As built, where it differs from the brief below.**
+* The trace extends `state/intel_agents.jsonl`, which the port added, rather than a new `thesis_trace.jsonl`:
+  rows now carry `target`, `evidence_hash`, `evidence_ids` and `errors`, and each domain has `calls` with model, prompt
+  hash, `stop_reason`, usage and tool calls. `ThesisMemory` reads the same file.
+* Sharing one graph is `view.cached()`, which remembers at `_select`, so it cannot go round the cutoff. Hold one for
+  one piece of work: it will not see later arrivals.
+* `debate()` still returns a list. `run_debate()` returns a `DebateReport` whose `errors` names each domain that
+  failed (`no_api_key`, `http_error`, `api_400:invalid_request_error`, `refusal`, `no_text`, `unparseable`,
+  `tool_turn_limit`). `intel/interpret.py`'s `enrich_with_agents` still calls `debate()`, so it does not see them.
+* Not verified: no real API call has run. Tool use is tested only against a mocked API, so the tool-turn shape,
+  thinking blocks and the model's real behaviour are unproven until the Anthropic account has credit.
+
+Next is phase 4, the shadow journal. It needs the live feed. Original brief follows.
 
 **Goal.** Give the debate real evidence: found by search, cited by path, remembered across debates, and fully
 traced. It stays unwired, and nothing here posts a signal. Phase 4 starts that, in shadow.

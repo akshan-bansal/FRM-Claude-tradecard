@@ -29,8 +29,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Hashable, Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
@@ -248,3 +248,32 @@ class GraphView:
     def recent_events(self, limit: int = 40) -> list[dict[str, object]]:
         """:func:`~trading_live_claude.intel.graph.recent_events_from_graph` as of the cutoff."""
         return recent_events_from_graph(self._select("subject_type = 'event' OR object_type = 'event'"), limit=limit)
+
+    def cached(self) -> CachedGraphView:
+        """This view with its reads remembered, for a run of searches that should agree with each other."""
+        return CachedGraphView(self._conn, self.cutoff)
+
+
+@dataclass(frozen=True)
+class CachedGraphView(GraphView):
+    """A view that reads each query once. Same cutoff and same guard: it remembers what :meth:`GraphView._select`
+    returned and never goes around it. Hold one for one piece of work, because it will not see an edge ingested
+    after its first read, even one stamped before the cutoff.
+    """
+
+    _memo: dict[Hashable, Any] = field(default_factory=dict, compare=False, repr=False)
+
+    def _select(self, where: str = "", params: Sequence[Any] = ()) -> list[Edge]:
+        key = ("select", where, tuple(params))
+        if key not in self._memo:
+            self._memo[key] = super()._select(where, params)
+        return list(self._memo[key])
+
+    def cached(self) -> CachedGraphView:
+        return self
+
+    def remember(self, key: Hashable, make: Callable[[], Any]) -> Any:
+        """Something derived from this view's reads, computed once. Callers must not change what they get."""
+        if key not in self._memo:
+            self._memo[key] = make()
+        return self._memo[key]

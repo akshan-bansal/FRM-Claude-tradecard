@@ -167,7 +167,7 @@ def test_the_store_itself_offers_no_edge_reader() -> None:
     public = {n for n, v in inspect.getmembers(GraphStore, inspect.isfunction) if not n.startswith("_")}
     assert public == {"as_of_view", "close", "ingest", "stats", "sync_journal"}
     readers = {n for n, v in inspect.getmembers(GraphView, inspect.isfunction) if not n.startswith("_")}
-    assert readers == {"edges", "persistence", "recent_events", "washed"}  # add new readers to _every_read too
+    assert readers == {"cached", "edges", "persistence", "recent_events", "washed"}  # add new readers to _every_read
 
 
 # ---------------------------------------------------------------- staying caught up with the journal

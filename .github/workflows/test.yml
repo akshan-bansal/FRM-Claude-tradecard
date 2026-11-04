@@ -82,6 +82,8 @@ jobs:
             tests/test_intel_hooks_wiring.py \
             tests/test_graph_store.py \
             tests/test_graph_search.py \
+            tests/test_retrieval.py \
+            tests/test_thesis_signal.py \
             tests/test_l2_recorder.py \
             tests/test_asset_class_integrity.py \
             tests/test_venue_calendar.py \

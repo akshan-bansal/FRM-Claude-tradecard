@@ -29,7 +29,7 @@ import networkx as nx
 
 from trading_live_claude.analysis.graph_adapter import ENDOGENOUS_NODES, ENDOGENOUS_PREDICATES
 from trading_live_claude.intel.graph import Edge, NodeType, Predicate
-from trading_live_claude.intel.graph_store import GraphView, stamp_to_us
+from trading_live_claude.intel.graph_store import CachedGraphView, GraphView, stamp_to_us
 
 Node = tuple[NodeType, str]
 EdgeSpec = tuple[Predicate, Node]
@@ -134,7 +134,16 @@ def _scoped(edges: Sequence[Edge], scope: SearchScope) -> list[Edge]:
 
 
 def build_graph(view: GraphView, scope: SearchScope = EVIDENCE_SCOPE, *, decay: bool = True) -> nx.MultiDiGraph:
-    """The scoped edges as a directed multigraph. ``decay`` applies decay and TTL as of the cutoff."""
+    """The scoped edges as a directed multigraph. ``decay`` applies decay and TTL as of the cutoff.
+
+    A cached view builds this once and returns the same object each time, so do not change what you get.
+    """
+    if isinstance(view, CachedGraphView):
+        return view.remember(("graph", scope, decay), lambda: _built(view, scope, decay))
+    return _built(view, scope, decay)
+
+
+def _built(view: GraphView, scope: SearchScope, decay: bool) -> nx.MultiDiGraph:
     graph = nx.MultiDiGraph()
     for e in _scoped(view.washed() if decay else view.edges(), scope):
         graph.add_edge(e.subject, e.object, predicate=e.predicate, weight=abs(float(e.weight)), as_of=e.as_of)
@@ -152,6 +161,12 @@ def _undirected(graph: nx.MultiDiGraph) -> nx.Graph:
     for (a, b), weight in sorted(totals.items()):
         simple.add_edge(a, b, weight=weight)
     return simple
+
+
+def _simple(view: GraphView, scope: SearchScope) -> nx.Graph:
+    if isinstance(view, CachedGraphView):
+        return view.remember(("simple", scope), lambda: _undirected(build_graph(view, scope)))
+    return _undirected(build_graph(view, scope))
 
 
 def _hop(graph: nx.MultiDiGraph, a: Node, b: Node) -> Hop:
@@ -185,7 +200,7 @@ def bfs_paths(view: GraphView, source: Node, target: Node, *, max_hops: int = 3,
     graph = build_graph(view, scope)
     if source not in graph or target not in graph or source == target:
         return []
-    simple = _undirected(graph)
+    simple = _simple(view, scope)
     if not nx.has_path(simple, source, target):
         return []
     out: list[GraphPath] = []
@@ -203,7 +218,7 @@ def shortest_path(view: GraphView, source: Node, target: Node, *,
     if source not in graph or target not in graph:
         return None
     try:
-        return _to_path(graph, nx.shortest_path(_undirected(graph), source, target))
+        return _to_path(graph, nx.shortest_path(_simple(view, scope), source, target))
     except nx.NetworkXNoPath:
         return None
 
@@ -250,7 +265,7 @@ def personalized_pagerank(view: GraphView, seeds: Iterable[Node] | Mapping[Node,
     Solved only on what the seeds can reach: a walk cannot get anywhere else, and leaving it in would hand
     unconnected nodes a small non-zero score from the solver's starting vector.
     """
-    simple = _undirected(build_graph(view, scope))
+    simple = _simple(view, scope)
     weights = dict(seeds) if isinstance(seeds, Mapping) else dict.fromkeys(seeds, 1.0)
     present = {n: float(w) for n, w in weights.items() if n in simple and w > 0}
     if not present:
@@ -266,7 +281,7 @@ def centrality(view: GraphView, kind: Literal["degree", "betweenness", "pagerank
                node_type: NodeType | None = None, top: int | None = 50,
                scope: SearchScope = EVIDENCE_SCOPE) -> list[tuple[Node, float]]:
     """How central each node is. ``node_type`` filters the result, not the graph it is computed on."""
-    simple = _undirected(build_graph(view, scope))
+    simple = _simple(view, scope)
     if simple.number_of_nodes() == 0:
         return []
     if kind == "degree":
@@ -285,7 +300,7 @@ def centrality(view: GraphView, kind: Literal["degree", "betweenness", "pagerank
 def communities(view: GraphView, *, seed: int = 0, resolution: float = 1.0,
                 scope: SearchScope = EVIDENCE_SCOPE) -> list[list[Node]]:
     """Louvain clusters, largest first. The seed is fixed, so the same view gives the same answer."""
-    simple = _undirected(build_graph(view, scope))
+    simple = _simple(view, scope)
     if simple.number_of_edges() == 0:
         return []
     found = nx.community.louvain_communities(simple, weight="weight", resolution=resolution, seed=seed)
@@ -294,7 +309,7 @@ def communities(view: GraphView, *, seed: int = 0, resolution: float = 1.0,
 
 def neighbor_similarity(view: GraphView, scope: SearchScope = EVIDENCE_SCOPE) -> Callable[[Node, Node], float]:
     """A similarity for :func:`mmr_diversify`: the Jaccard overlap of two nodes' neighbours."""
-    simple = _undirected(build_graph(view, scope))
+    simple = _simple(view, scope)
     around = {n: set(simple[n]) for n in simple}
 
     def similarity(a: Node, b: Node) -> float:
@@ -312,7 +327,8 @@ def _joined(values: Any) -> str:
     return " ".join(sorted(map(str, values or [])))
 
 
-def _documents(view: GraphView, scope: SearchScope) -> Iterator[tuple[str, str, str, str, str, str]]:
+def _documents(view: GraphView, scope: SearchScope,
+               titles: Mapping[str, str] | None) -> Iterator[tuple[str, str, str, str, str, str]]:
     all_edges = view.edges()
     dropped = {n[1] for n in _dropped_events(all_edges, scope)}
     symbols: dict[str, set[str]] = defaultdict(set)
@@ -323,12 +339,17 @@ def _documents(view: GraphView, scope: SearchScope) -> Iterator[tuple[str, str, 
         event_id = str(rec["id"])
         if event_id in dropped:
             continue
-        yield (event_id, str(rec.get("title") or ""), _joined(rec.get("sources")), _joined(rec.get("categories")),
+        title = str(rec.get("title") or (titles or {}).get(event_id, ""))
+        yield (event_id, title, _joined(rec.get("sources")), _joined(rec.get("categories")),
                _joined(rec.get("regions")), " ".join(sorted(symbols.get(event_id, ()))))
 
 
-def bm25_search(view: GraphView, query: str, *, top: int = 20, scope: SearchScope = EVIDENCE_SCOPE) -> list[EventHit]:
+def bm25_search(view: GraphView, query: str, *, top: int = 20, scope: SearchScope = EVIDENCE_SCOPE,
+                titles: Mapping[str, str] | None = None) -> list[EventHit]:
     """Events matching any query word, best first, with titles counting most.
+
+    ``titles`` supplies headlines the graph does not hold, by event id. The caller answers for them being known by
+    the cutoff: :func:`~trading_live_claude.intel.retrieval.news_titles` is the one that checks.
 
     The index lives only for this call and holds only what the view can see, so term statistics are point-in-time
     too. It costs a rebuild per search; the guarantee is worth more than the speed until the graph says otherwise.
@@ -340,7 +361,7 @@ def bm25_search(view: GraphView, query: str, *, top: int = 20, scope: SearchScop
     conn = sqlite3.connect(":memory:")
     try:
         conn.execute("CREATE VIRTUAL TABLE docs USING fts5(event_id UNINDEXED, title, sources, categories, regions, symbols)")
-        conn.executemany("INSERT INTO docs VALUES (?, ?, ?, ?, ?, ?)", _documents(view, scope))
+        conn.executemany("INSERT INTO docs VALUES (?, ?, ?, ?, ?, ?)", _documents(view, scope, titles))
         rows = conn.execute(
             "SELECT event_id, title, sources, categories, regions, symbols, bm25(docs, 0, 5.0, 1.0, 2.0, 1.0, 3.0) AS rank "
             "FROM docs WHERE docs MATCH ? ORDER BY rank, event_id LIMIT ?",
