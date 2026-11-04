@@ -44,7 +44,7 @@ ALL_EVENTS = 10**9
 class SearchScope:
     """Which edges a search may read. An edge is dropped if any rule below excludes it."""
 
-    exclude_predicates: frozenset[str] = ENDOGENOUS_PREDICATES | SIMULATED_PREDICATES | frozenset({"ranked_by"})
+    exclude_predicates: frozenset[str] = ENDOGENOUS_PREDICATES | SIMULATED_PREDICATES | frozenset({"ranked_by", "sentiment_on"})
     exclude_node_types: frozenset[str] = ENDOGENOUS_NODES | SIMULATED_NODES | frozenset({"poll", "analysis"})
     exclude_nodes: frozenset[Node] = frozenset()
     exclude_event_domains: frozenset[str] = frozenset()   # an event filed under one of these goes with its edges

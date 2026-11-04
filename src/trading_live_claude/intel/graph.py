@@ -107,10 +107,12 @@ NodeType = Literal[
 #                  (2026-10-12). Weight 1, ``as_of`` is when the collector SAW it, never the published
 #                  time; ``meta.via`` says whether the title named it or a per-ticker feed tagged it.
 #                  No sentiment is read. ``state/news.jsonl`` is the durable record; these edges expire.
+#   ``sentiment_on`` — an LLM scored that headline for that symbol (intel/news_sentiment.py). Weight is its
+#                  confidence, ``meta.score`` the reading, ``as_of`` when it was scored.
 Predicate = Literal[
     "observed", "elevated_in", "co_occurs", "stressed_by",
     "mentioned_by", "about_domain", "affects_region", "traded", "ranked_by",
-    "mentions", "scaled", "loads_on",
+    "mentions", "sentiment_on", "scaled", "loads_on",
     # OASIS (2026-10-30): what a simulated society REPORTED. Nothing says the stance was right.
     "holds_stance", "member_of", "follows", "engaged", "attends", "seeded",
 ]
@@ -363,6 +365,8 @@ DEFAULT_POLICIES: dict[Predicate, DecayPolicy] = {
     # A mention is a fact about a moment, not a score that fades; the graph copy simply expires.
     # The point-in-time archive is state/news.jsonl, which nothing washes.
     "mentions":       DecayPolicy(mode="none", ttl_h=90 * 24),
+    # An LLM's reading of a headline; the durable record is state/news_sentiment.jsonl, which nothing washes.
+    "sentiment_on":   DecayPolicy(mode="exp", half_life_h=48.0, ttl_h=30 * 24),
     # A simulated run describes one moment; its structure is as perishable as the stance it came with.
     # The durable record of every run is state/oasis_runs.jsonl, which nothing washes.
     "holds_stance":   DecayPolicy(mode="exp", half_life_h=24.0, ttl_h=7 * 24),

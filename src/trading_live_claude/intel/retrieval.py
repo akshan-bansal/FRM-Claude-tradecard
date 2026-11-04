@@ -46,6 +46,7 @@ from trading_live_claude.intel.graph_search import (
     trending_nodes,
 )
 from trading_live_claude.intel.graph_store import GraphView, stamp_to_us
+from trading_live_claude.intel.news_sentiment import event_sentiment
 from trading_live_claude.logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -87,12 +88,15 @@ class EvidenceItem:
     as_of: str
     found_by: tuple[str, ...]        # which searches ranked it: graph, text
     path: GraphPath | None = None    # how it connects to the target, for citing
+    sentiment: dict[str, dict[str, float]] = field(default_factory=dict)  # symbol -> an LLM's score, a label only
 
     def record(self) -> dict[str, Any]:
         """The shape agents read: free text in ``title``, and how the event connects in ``path``."""
         rec: dict[str, Any] = {"id": self.event_id, "title": self.title, "sources": list(self.sources),
                                "categories": list(self.categories), "regions": list(self.regions),
                                "symbols": list(self.symbols), "ingestedAt": self.as_of}
+        if self.sentiment:
+            rec["sentiment"] = self.sentiment
         if self.path is not None:
             rec["path"] = [f"{h.source[1]} -{h.predicate}-> {h.target[1]}" for h in self.path.hops]
         return rec
@@ -137,7 +141,7 @@ def _domain_state(view: GraphView, scope: SearchScope) -> tuple[dict[str, int], 
 
 def _hash(target: Target, view: GraphView, items: Sequence[EvidenceItem], runs: dict[str, int]) -> str:
     body = json.dumps({"target": target, "cutoff": view.cutoff.isoformat(), "runs": runs,
-                       "items": [[i.event_id, i.title, i.sources, i.categories, i.regions, i.symbols, i.as_of]
+                       "items": [[i.event_id, i.title, i.sources, i.categories, i.regions, i.symbols, i.as_of, i.sentiment]
                                  for i in items]}, sort_keys=True, default=str)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
@@ -171,6 +175,7 @@ def retrieve_evidence(view: GraphView, target: Target, *, budget: int = 12, scop
     mentions: dict[str, set[str]] = {}
     for e in v.edges(predicate="mentions"):
         mentions.setdefault(e.subject[1], set()).add(e.object[1])
+    scores = event_sentiment(v)
     items = []
     for node in chosen:
         event_id = node[1]
@@ -183,7 +188,8 @@ def retrieve_evidence(view: GraphView, target: Target, *, budget: int = 12, scop
             regions=tuple(sorted(map(str, rec.get("regions") or []))),  # type: ignore[call-overload]
             symbols=tuple(sorted(mentions.get(event_id, ()))),
             as_of=str(rec.get("ingestedAt") or ""), found_by=found_by,
-            path=shortest_path(v, origin, node, scope=scope) if origin is not None and origin != node else None))
+            path=shortest_path(v, origin, node, scope=scope) if origin is not None and origin != node else None,
+            sentiment=scores.get(event_id, {})))
     runs, together = _domain_state(v, scope)
     trending = tuple((t.node[1], round(t.acceleration, 3)) for t in trending_nodes(v, node_type="symbol", top=5, scope=scope)
                      if t.acceleration > 1.0)
