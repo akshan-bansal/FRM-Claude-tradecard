@@ -568,12 +568,18 @@ def approvals(db: Path) -> dict[str, Any]:
 
 def atlas(state: Path) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, str]]:
     """The Evidence Atlas catalogue, one build-time snapshot from the journals, and its provenance."""
-    from trading_live_claude.execution.desk_feed import catalog_rows, meters_snapshot
+    from trading_live_claude.execution.desk_feed import DESK_CATALOG, catalog_rows, meters_snapshot
     cat_id, meters = catalog_rows(ROOT)
     if not meters:
         return [], {}, {}
-    snap = meters_snapshot(state, ROOT)
     snaps: dict[str, Any] = {}
+    pin = {"text": f"CATALOGUE {cat_id} · {DESK_CATALOG.as_posix()} — what the atlas defines. Every "
+                   "reading on this tab comes from a snapshot of the journals, or from nothing."}
+    try:
+        snap = meters_snapshot(state, ROOT)
+    except Exception as exc:           # a contradictory journal is reported, not rounded off
+        print(f"[dash] atlas: no build snapshot, {type(exc).__name__}: {exc}")
+        return meters, snaps, pin
     if snap["readings"]:
         snaps["build"] = {
             "label": f"BUILD · journals at {snap['captured_at'][:16].replace('T', ' ')} UTC",
@@ -582,8 +588,6 @@ def atlas(state: Path) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, 
                        "timestamp and turns STALE on this page's clock; served from a running "
                        "session, the RUNTIME option reads the same journals live."),
             "readings": snap["readings"]}
-    pin = {"text": f"CATALOGUE {cat_id} · config/meter_catalog.csv — what the atlas defines. Every "
-                   "reading on this tab comes from a snapshot of the journals, or from nothing."}
     return meters, snaps, pin
 
 
