@@ -234,18 +234,19 @@ class OverlayProvider:
 
 
 # Class-to-domain mapping. Each overlay class is exposed to a subset of the graph's watched
-# domains (energy / conflict / military / disaster / economy). The mapping mirrors the ``_compose``
+# domains (energy / conflict / military / economy). The mapping mirrors the ``_compose``
 # branches in :class:`~trading_live_claude.intel.overlay.RiskOverlay` — anything that shows up in
 # a class's gate list is a candidate for the persistence gate. Ordering is not significant; the
-# gate short-circuits on the first persistent domain it finds.
+# gate short-circuits on the first persistent domain it finds. ``disaster`` is left out on purpose,
+# by the user's decision (2026-11-01): this desk does not seek to trade on disasters.
 _CLASS_TO_DOMAINS: Mapping[OverlayClass, tuple[str, ...]] = {
     "equity":          ("conflict", "military"),
     "future":          ("conflict", "military", "energy"),
-    "commodity":       ("energy", "conflict", "disaster"),
+    "commodity":       ("energy", "conflict"),
     "crypto":          ("conflict", "military"),
     "fx":              ("conflict", "energy", "economy"),
     "fixed_income":    ("economy", "conflict"),
-    "precious_metals": ("conflict", "disaster", "energy"),
+    "precious_metals": ("conflict", "energy"),
 }
 
 

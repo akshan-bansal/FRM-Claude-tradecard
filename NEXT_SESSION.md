@@ -2079,6 +2079,15 @@ bands), and daily jumps beyond FHS except WTI. Microstructure is deferred by use
 Recorded after `5b80db6` on `feat/backlog-routing-triggers`. In priority order; the spectral tail index
 is in 12.1 and the post-GBM queue in 12.2.
 
+### Fix first: the intel feed is down
+
+0. 🔴 **WorldMonitor has moved, so the overlay and persistence gate have no feed.** Checked 2026-11-01:
+   `initialize` at `DEFAULT_URL` (`intel/worldmonitor.py`) returns `410 Gone` with "Use
+   https://worldmonitor.app/mcp". `__aenter__` raises, so every refresh fails and the provider has no read:
+   every runner behaves as if the overlay were off, while its startup line says it is on. No new
+   `elevated_in` edges get written either. The key is set. The new host answered a keyless `initialize` and
+   `tools/list`; the key has not been sent there, pending the user's OK.
+
 ### Fix before any live or autonomous run
 
 1. 🔴 **`QUESTRADE_ENV` selects nothing.** Worse than the audit's "runtime override is a no-op". From
@@ -2133,19 +2142,32 @@ cache key, the interval lexicon, the conviction clip, and the intel hooks.
 
 8. **Stale-run warning.** `PersistenceGate` ignores a run older than `max_age_hours` silently. Log it, so
    a dead poller is visible rather than looking like a calm market.
-9. **Dead persistence domains.** `_CLASS_TO_DOMAINS` reads `disaster` and `economy`, but `INTEL_DOMAINS`
-   writes only `conflict`, `energy` and `military`. So `fixed_income` can only halt on `conflict`. Add
-   the domains to the snapshot or drop them from the map.
-10. **Allocator weights go stale.** `_allocator_weight_bias` computes once at startup and never refreshes,
+9. **Persistence domains: decided 2026-11-01.** The desk does not seek to profit on disasters.
+   * `disaster` is out of `_CLASS_TO_DOMAINS` and stays unwritten. Keeping it unwritten also keeps the
+     "Disaster / insurance underpricing" thesis in `interpret.py` dormant, since it needs disaster
+     acceleration. That thesis calls cat-exposed insurers "a specific bet" and the agent layer's
+     `disaster` domain maps to the same themes: **ask the user whether to remove both.** The overlay's
+     `_disaster_gate` stays, because it only trims.
+   * `economy` is **half done and cannot fire on live data yet.** `intel/graph.py` writes its
+     `elevated_in` edge at `ECONOMY_ALERT_THRESHOLD` (3 alerts, uncalibrated) from `category_alert_counts`,
+     and the gate reads it for `fx` and `fixed_income`. But `worldmonitor._build_snapshot` never fills
+     `category_alert_counts`, so that edge, and the overlay's existing `_econ_gate`, stay silent. Adding
+     `economy` to `INTEL_DOMAINS` is not the fix: `get_intel_timeline` allows only conflict, military and
+     energy, and a rejected call marks every snapshot degraded. Next: with item 0 fixed, read the real
+     news payload and fill the counts, or build the intel hook on `get_economic_data` or
+     `get_macro_history`. Don't guess the payload's shape.
+10. **Allocator weights go stale.** `allocator_weight_bias` computes once at startup and never refreshes,
     so a long-running daemon keeps old weights.
 11. **Hook settings aren't in `trading.yaml`.** `min_polls`, the 6-hour stale limit and the allocator range
     are hard-coded, and the daemon's only overlay opt-out is removing the key.
-12. **Thin test coverage on the real-money paths.** `_intel_overlay_hooks` has no test with a key set, and
+12. **Thin test coverage on the real-money paths.** `intel_overlay_hooks` has no test with a key set, and
     `live` and `autonomous_run` are checked by reading their source, because tests may not use live mode.
-13. **One real agent call.** Add `ANTHROPIC_API_KEY` to `.env`, then run `debate()` on two or three
-    made-up headlines with `domains=("energy",)`, at most two API calls, and record `stop_reason` and
-    usage. This is the first check of the model id and the reply parsing against the real API. The layer
-    stays unwired.
+13. **One real agent call.** Run `debate()` on two or three made-up headlines with `domains=("energy",)`,
+    at most two API calls, and record `stop_reason` and usage. This is the first check of the model id and
+    the reply parsing against the real API. The layer stays unwired. Tried 2026-11-03: the key is in `.env`,
+    and the first request returned 400 "credit balance is too low", so model and parsing remain unverified.
+    Rerun once the Anthropic account has credits. Note `debate()` returns an empty list on that error, which
+    reads like "no thesis" unless you see the `agents.api_error` log line.
 14. **Accrue the data.** Run an overlay provider or `scripts/graph_journal.py` so `elevated_in` edges exist.
     Until then the persistence gate cannot fire, and nothing validates the overlay, the allocator or the
     gate on real data. Tiers 4 and 5 in section 9 need about 30 days and 21-day windows from that start.
@@ -2354,6 +2376,170 @@ question 4's case happening now, not a hypothetical. Check the key when the othe
 23. **Who holds the copyright for a LICENSE file?** `pyproject.toml` names "pouria" as the author, so none was added.
 24. **Can `Components\BSM_Spectral.pre-subtree.git` be deleted?** It is the backup from the subtree merge. Under the
     no-removals rule it stays until you say so.
+
+## 17. GraphRAG search and thesis signals  🟢 PHASES 1–4 BUILT (2026-11-04)
+
+**Goal.** Build search into our GraphRAG (not CAMEL-OASIS, whose `AgentGraph` has no traversal and whose
+`search_posts` is an unranked SQL `LIKE`), so theses can influence and post entry and exit signals on top of
+the composites and microstructure pipelines.
+
+**User decisions, 2026-11-03.**
+* A thesis may confirm or veto entries, post exits, and originate entries, with originating gated hardest.
+* Promotion from shadow log to acting: the walk-forward gate, then the user's approval. Paper and money stay
+  one build, and everything still goes through the Router.
+* Search stack: SQLite, networkx, BM25.
+* Microstructure feeds the fusion directly, as a new `mx_*` lens family. **This changes two standing rules,
+  neither yet changed in code:** the risk-lens "no price or volatility inputs" rule (2026-10-12, enforced by
+  `assert_no_price_inputs`) and the 90-day L2 wait in "Data-first sequencing" (2026-09-08). Narrow the assert to
+  allow `mx_*` in phase 8 and keep the price-free audit as a baseline. Lens results need redoing then.
+* `disaster` posts no signals.
+
+| Phase | What | Done when | Needs |
+|---|---|---|---|
+| 1 ✅ | `intel/graph_store.py`, `microstructure/l2_recorder.py`, `scripts/record_l2.py` | No future edge can be returned | Nothing |
+| 2 ✅ | `intel/graph_search.py`: `neighbors`, `bfs_paths`, `shortest_path`, `temporal_walk`, `personalized_pagerank`, `centrality`, `communities`, `bm25_search`, `co_persistence`, `first_seen`, `thickening_rate`, `trending_nodes`, `reciprocal_rank_fusion`, `mmr_diversify` | Tested on fixed sample graphs, all through a `GraphView` | `graph` extra (`networkx`, `scipy`) |
+| 3 ✅ | `intel/retrieval.py`: `retrieve_evidence`, `ViewTools`, `ThesisMemory`, `debate_on_view`; `run_debate` in `intel/agents.py` | A mocked debate cites its evidence paths | Anthropic credit for real calls |
+| 4 ✅ | `intel/thesis_signal.py`: `ThesisSignal`, `thesis_to_signals`, `fired_to_signals`, `ThesisBook`, `run_shadow_pass`; `scripts/thesis_shadow.py`; `THESIS_SIGNAL` ledger event | Signals logged, acting on nothing | Live feed for real signals (section 13, item 0) |
+| 5 | `promotion_gate`, replay | Walk-forward results per thesis type | Weeks of shadow data |
+| 6 | `ThesisOverlay`: confirm, veto, exit | Works identically on paper and money | Gate and user approval |
+| 7 | `ThesisStrategy`: originates entries | Strictest gate passed | Gate and user approval |
+| 8 | `micro_features`, `mx_*` in fusion | Lens audit redone | Recorded L2 |
+
+**Phase 1 notes.** The store is derived from the journal and not on the trading path yet. Its reads go only
+through `GraphView._select`, which applies the cutoff; a new reader must be added to `_every_read` in
+`tests/test_graph_store.py`. Removing the guard fails 9 of its 22 tests (checked by hand). The recorder is public
+data only and is not running: nothing schedules it, so the L2 clock has not started until someone runs
+`python scripts/record_l2.py`.
+
+**Phase 2 notes.** Every search takes a `GraphView`, and BM25 indexes per call so rarity statistics are
+point-in-time too. A new search must be added to `SEARCHES` in `tests/test_graph_search.py`. With the cutoff guard
+removed, 13 of the 14 future-edge tests fail (checked by hand); `first_seen` rightly gives the same answer.
+`SearchScope` leaves out our own trades, simulated societies, analysis outputs and poll nodes; `SIGNAL_SCOPE` also
+drops `disaster` and its events. For phase 3:
+* **Speed.** Each search rebuilds from the view: about 3 to 6 seconds at 100,000 edges. `retrieve_evidence` runs
+  several, so it should build once per view. Measured on a synthetic graph only.
+* **News titles.** `mentions` events (`news:<source>:<hash>`) carry no title in the graph, so BM25 finds them by
+  symbol only. Join `state/news.jsonl`, by `as_of`, when building evidence.
+* **Domain elevation** is not in the evidence graph, because `elevated_in` hangs off a poll node. Read it through
+  `view.persistence` and `co_persistence`.
+* **`uv.lock`** does not have the `graph` extra: `uv` is not installed here. Run `uv lock` where it is.
+* **Evidence is empty today.** The real journal holds 27 edges, all `traded`, so every search on it returns nothing.
+
+### 17.5 Pick up here: review the direction table, then phase 5  🔴 NEXT
+
+**State, 2026-11-04.** Phases 1 to 4 are on `feat/graphrag-search`, at `745c1d6` plus this note, not pushed and not in
+`main`. That branch was cut from `main` at `e9b8aa7`; `feat/runner-parity` holds the older copies of the same work and
+can be ignored. Full suite on that code: 2,657 passed, 2 skipped, 0 failed. It takes 7 to 11 minutes, so run it in the
+background: `.venv/Scripts/python.exe -m pytest -o addopts="" -q`.
+
+**1. The user reviews this table, then bump `DIRECTION_TABLE_VERSION` off `draft-`.** It decides what phase 5 scores, so
+settle it before signals accrue: a change later splits the record. Constructive logs `confirm` and `entry`, adverse logs
+`veto` and `exit`, unsigned logs only `watch`.
+
+| Thesis | Theme | Direction | From its wording |
+|---|---|---|---|
+| Complacency divergence | `volatility_convexity` | constructive | "Favour cheap convexity" |
+| Complacency divergence | `safe_haven` | constructive | **Weakest call:** only implied, and it asks a wider margin on new risk in these themes |
+| Energy event concentration | `energy`, `materials` | unsigned | "in both directions" |
+| Conflict escalation watch | `defense_geopolitical`, `safe_haven` | unsigned | "as a hedge on escalation, not as a directional bet" |
+| Sentiment stretch — greed | `volatility_convexity` | constructive | Greed "thins the buffer against bad news" |
+| Commodity carry-inversion proxy | `energy`, `materials` | constructive | "producers positioned for physical scarcity", but also "Do not size on this alone" |
+| Dollar strength divergence | `dollar` | constructive | "the risk asset gives first" |
+| Dollar strength divergence | `materials`, `emerging_markets` | adverse | "Prefer trimming into commodity / EM strength" |
+| Dollar weakness divergence | `dollar` | unsigned | Treats the dollar's fall as a given, not a call on it |
+| Dollar weakness divergence | `materials` | adverse | "the driver is demand destruction" |
+
+**2. The user unblocks the real data.** Nothing below proves anything until these are done:
+* Approve sending the WorldMonitor key to `https://worldmonitor.app/mcp` (section 13, item 0). The address came from a
+  server response, and the user has said "not yet". The client still points at the old one.
+* Add Anthropic credit, then run the first real debate (section 13, item 13). Tool use is unproven against the real API.
+* Run `python scripts/thesis_shadow.py` regularly. Nothing schedules it, because of the no-new-scheduled-tasks rule in
+  "Data-first sequencing". The user may lift that for this one job. The forward record only grows while it runs.
+* Say whether to start `python scripts/record_l2.py`, which the user has so far left off. Phase 8 waits on its history.
+
+**3. Phase 5: `promotion_gate` and replay.** Can be built on stubs now; it cannot judge anything for weeks.
+* Score each thesis type and each action separately, on forward returns over the signal's `horizon_days`.
+  `analysis/labeling.py` and the `risk_lens.verdict` date-rotation null are the pieces to reuse, not to rewrite.
+* Count only rows with `replay` false, recorded in the ledger before their outcome. Check the chain before trusting them.
+* `watch` is never promotable. `entry` gets the strictest bar. Passing makes a type eligible, and the user's approval
+  promotes it: gate first, then approval, never the gate alone.
+* The lens has run with no multiple-testing correction since 2026-10-30, and a verdict passes on its raw p-value. With
+  many thesis-action pairs, about 5% of null ones will pass by chance, so report how many were tested.
+* Keep `ThesisSignal`'s shadow-only check until phase 6 changes it on purpose.
+
+**Open decisions.** The `disaster` specialist and thesis stay unless the user says otherwise (section 13, item 9).
+`enrich_with_agents` still cannot see debate errors. `uv.lock` lacks the `graph` extra, and mypy is not in `.venv`.
+
+### 17.4 Phase 4 as built  🟡 TABLE AWAITS REVIEW
+
+Signals are rows in the ledger's `thesis` stream, so they cannot be edited or added after an outcome without
+breaking the chain. A pass for a past moment is marked `replay` and stays out of `ThesisBook.signals()` by default;
+phase 5 must never count one as forward evidence. An adverse read logs `veto` and `exit`, a constructive one `confirm`
+and `entry`, and an unsigned one `watch`, which must never be promotable. Nothing on the order path reads any of it, and
+tests check that by import and by source.
+
+**`THEME_DIRECTIONS` is a draft awaiting the user's review (`DIRECTION_TABLE_VERSION`).** Rule theses state no
+direction, so the table supplies one per thesis and theme, from each thesis's own wording. Bump the version on any
+change. `Thesis.direction` is not used for rule signals: its `adverse` default only exists to make them trim.
+
+**Not done, and known.**
+* No real signal exists yet: the WorldMonitor feed is down, so `run_shadow_pass` records nothing and says why.
+* Nothing schedules a pass. The standing rule in "Data-first sequencing" says no new scheduled tasks, so it runs by hand:
+  `python scripts/thesis_shadow.py`. The forward record only grows while someone runs it.
+* Rule signals land on `THEME_EXEMPLARS`, which covers little of the book (section 13, item 15).
+* `strength` is uncalibrated: band weight times `intensity` where modelled, or the agent's self-reported confidence.
+
+### 17.3 Phase 3 brief: evidence retrieval, agent search, memory and trace  ✅ BUILT 2026-11-04
+
+**As built, where it differs from the brief below.**
+* The trace extends `state/intel_agents.jsonl`, which the port added, rather than a new `thesis_trace.jsonl`:
+  rows now carry `target`, `evidence_hash`, `evidence_ids` and `errors`, and each domain has `calls` with model, prompt
+  hash, `stop_reason`, usage and tool calls. `ThesisMemory` reads the same file.
+* Sharing one graph is `view.cached()`, which remembers at `_select`, so it cannot go round the cutoff. Hold one for
+  one piece of work: it will not see later arrivals.
+* `debate()` still returns a list. `run_debate()` returns a `DebateReport` whose `errors` names each domain that
+  failed (`no_api_key`, `http_error`, `api_400:invalid_request_error`, `refusal`, `no_text`, `unparseable`,
+  `tool_turn_limit`). `intel/interpret.py`'s `enrich_with_agents` still calls `debate()`, so it does not see them.
+* Not verified: no real API call has run. Tool use is tested only against a mocked API, so the tool-turn shape,
+  thinking blocks and the model's real behaviour are unproven until the Anthropic account has credit.
+
+Next is phase 4, the shadow journal. It needs the live feed. Original brief follows.
+
+**Goal.** Give the debate real evidence: found by search, cited by path, remembered across debates, and fully
+traced. It stays unwired, and nothing here posts a signal. Phase 4 starts that, in shadow.
+
+**Build (new `intel/retrieval.py` unless noted; names are proposals):**
+1. `retrieve_evidence(view, target, *, budget, scope)`. `target` is a symbol, a domain or free text. Runs
+   `personalized_pagerank`, `bm25_search` and `trending_nodes`, merges with `reciprocal_rank_fusion`, diversifies
+   with `mmr_diversify`, and returns an `EvidenceBundle`: items with title, sources, the path that found each one,
+   and a content hash. Default scope is `SIGNAL_SCOPE`, so `disaster` stays out of anything that can become a signal.
+2. **Build once per view.** Let searches share one built graph. Each rebuilds today, at 3 to 6 seconds per 100,000
+   edges, and retrieval runs several. Must not weaken the rule that everything reads through a `GraphView`.
+3. **News titles.** `mentions` events carry no title. Join `state/news.jsonl`, using only headlines whose
+   `arrived_utc` is before the cutoff. That file sits outside the store, so this join needs its own future test.
+4. **Domain state.** Add `view.persistence` and `co_persistence` readings to the bundle, because `elevated_in` hangs
+   off poll nodes and is not in the evidence graph.
+5. **Agent tools (`intel/agents.py`).** Let `SpecialistReader` and `Adversary` call search during a debate: text,
+   neighbours and paths, all bound to one view, with a cap on calls per debate. An agent must be unable to widen its
+   cutoff or scope. Tool results are untrusted text. `claude-api` is the skill to load first: thinking counts against
+   `max_tokens`, and forced tool choice returns a 400 on current models.
+6. **Thesis memory.** `ThesisMemory`: earlier claims and verdicts, shown to agents only if made before the cutoff.
+7. **Trace.** An append-only `state/thesis_trace.jsonl` (gitignore it): evidence hash, model, prompt hash, `stop_reason`,
+   usage, claim and verdict for every debate, so a debate can be audited and rule-based theses replayed in phase 5.
+8. **Failure must be visible.** `debate()` returns `[]` on an API error, which reads like "no thesis fired". Return
+   or record the difference. Found 2026-11-03, when low credit looked like an empty result.
+
+**Done when:** a mocked debate on a sample graph cites evidence paths that exist in the view; adding future edges or
+future `news.jsonl` rows changes nothing; `disaster` events never reach a bundle under `SIGNAL_SCOPE`; a failed call
+is told apart from an empty one; and the full suite is green.
+
+**Needs from the user.** None to build it on stubs and a mocked API. For real runs:
+* Anthropic credit (section 13, item 13).
+* The WorldMonitor switch or a running news collector, because the real graph holds no usable evidence (item 0).
+* A call on whether the `disaster` specialist and thesis stay (item 9). Under the no-removals rule, leave both.
+
+**Keep in mind.** `.env.example` looked to hold two real credentials as of 2026-11-03, so stage by path. `uv.lock` lacks
+the `graph` extra. `mypy --strict` has not run on phases 1 and 2, because mypy is not in `.venv`.
 
 ---
 

@@ -118,6 +118,11 @@ Predicate = Literal[
 # Threshold below which "elevated" is not asserted. Matches the interpret.py convention that a
 # domain acceleration under 2.0 is not evidence, and keeps single-wire noise out of the graph.
 ELEVATION_THRESHOLD = 2.0
+# Economy has no event archive: the vendor's timeline takes only conflict, military and energy. It is
+# elevated on ``category_alert_counts``, the reading the overlay's economy gate uses, at half of that
+# gate's saturation (``econ_alerts_full``). Not calibrated. NOTE ``worldmonitor._build_snapshot`` does not
+# fill those counts yet, so on live data this edge cannot fire until it does.
+ECONOMY_ALERT_THRESHOLD = 3
 
 
 @dataclass(frozen=True)
@@ -201,6 +206,13 @@ def snapshot_to_edges(snap: IntelSnapshot, poll_id: str | None = None) -> list[E
             out.append(Edge(poll, "elevated_in", ("domain", str(dom)),
                             weight=float(accel), as_of=ts,
                             meta={"threshold": ELEVATION_THRESHOLD}))
+
+    alerts = snap.category_alert_counts or {}
+    economic = alerts.get("economy", 0) + alerts.get("economic", 0)
+    if economic >= ECONOMY_ALERT_THRESHOLD and "economy" not in elevated_domains:
+        elevated_domains.append("economy")
+        out.append(Edge(poll, "elevated_in", ("domain", "economy"), weight=float(economic), as_of=ts,
+                        meta={"threshold": ECONOMY_ALERT_THRESHOLD, "source": "alert_count"}))
 
     # Co-occurrence of elevated domains, for later corroboration queries. Undirected, so we write
     # both directions to keep read-side queries symmetric without a special case.

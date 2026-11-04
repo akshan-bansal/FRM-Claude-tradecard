@@ -111,9 +111,9 @@ def _run_pinned_wf(df: pd.DataFrame, sym: str, strategy: str, params: dict,
         # No re-opt — score train + test on the SAME pinned params so WFE is meaningful
         # (IS→OOS degradation for this specific config, not for whatever won the re-opt).
         tr = df.iloc[start:start + train_bars].reset_index(drop=True)
-        te = df.iloc[start + train_bars:start + train_bars + test_bars].reset_index(drop=True)
+        fold = df.iloc[start:start + train_bars + test_bars].reset_index(drop=True)
         got_is = score_run(eng, strategy, params, tr, sym)
-        got_te = score_run(eng, strategy, params, te, sym)
+        got_te = score_run(eng, strategy, params, fold, sym, warmup_bars=train_bars)
         if got_te is not None:
             oos_scores.append(got_te[0])
             is_scores.append(got_is[0] if got_is is not None else 0.0)
