@@ -2425,6 +2425,51 @@ drops `disaster` and its events. For phase 3:
 * **`uv.lock`** does not have the `graph` extra: `uv` is not installed here. Run `uv lock` where it is.
 * **Evidence is empty today.** The real journal holds 27 edges, all `traded`, so every search on it returns nothing.
 
+### 17.5 Pick up here: review the direction table, then phase 5  🔴 NEXT
+
+**State, 2026-11-04.** Phases 1 to 4 are on `feat/graphrag-search`, at `745c1d6` plus this note, not pushed and not in
+`main`. That branch was cut from `main` at `e9b8aa7`; `feat/runner-parity` holds the older copies of the same work and
+can be ignored. Full suite on that code: 2,657 passed, 2 skipped, 0 failed. It takes 7 to 11 minutes, so run it in the
+background: `.venv/Scripts/python.exe -m pytest -o addopts="" -q`.
+
+**1. The user reviews this table, then bump `DIRECTION_TABLE_VERSION` off `draft-`.** It decides what phase 5 scores, so
+settle it before signals accrue: a change later splits the record. Constructive logs `confirm` and `entry`, adverse logs
+`veto` and `exit`, unsigned logs only `watch`.
+
+| Thesis | Theme | Direction | From its wording |
+|---|---|---|---|
+| Complacency divergence | `volatility_convexity` | constructive | "Favour cheap convexity" |
+| Complacency divergence | `safe_haven` | constructive | **Weakest call:** only implied, and it asks a wider margin on new risk in these themes |
+| Energy event concentration | `energy`, `materials` | unsigned | "in both directions" |
+| Conflict escalation watch | `defense_geopolitical`, `safe_haven` | unsigned | "as a hedge on escalation, not as a directional bet" |
+| Sentiment stretch — greed | `volatility_convexity` | constructive | Greed "thins the buffer against bad news" |
+| Commodity carry-inversion proxy | `energy`, `materials` | constructive | "producers positioned for physical scarcity", but also "Do not size on this alone" |
+| Dollar strength divergence | `dollar` | constructive | "the risk asset gives first" |
+| Dollar strength divergence | `materials`, `emerging_markets` | adverse | "Prefer trimming into commodity / EM strength" |
+| Dollar weakness divergence | `dollar` | unsigned | Treats the dollar's fall as a given, not a call on it |
+| Dollar weakness divergence | `materials` | adverse | "the driver is demand destruction" |
+
+**2. The user unblocks the real data.** Nothing below proves anything until these are done:
+* Approve sending the WorldMonitor key to `https://worldmonitor.app/mcp` (section 13, item 0). The address came from a
+  server response, and the user has said "not yet". The client still points at the old one.
+* Add Anthropic credit, then run the first real debate (section 13, item 13). Tool use is unproven against the real API.
+* Run `python scripts/thesis_shadow.py` regularly. Nothing schedules it, because of the no-new-scheduled-tasks rule in
+  "Data-first sequencing". The user may lift that for this one job. The forward record only grows while it runs.
+* Say whether to start `python scripts/record_l2.py`, which the user has so far left off. Phase 8 waits on its history.
+
+**3. Phase 5: `promotion_gate` and replay.** Can be built on stubs now; it cannot judge anything for weeks.
+* Score each thesis type and each action separately, on forward returns over the signal's `horizon_days`.
+  `analysis/labeling.py` and the `risk_lens.verdict` date-rotation null are the pieces to reuse, not to rewrite.
+* Count only rows with `replay` false, recorded in the ledger before their outcome. Check the chain before trusting them.
+* `watch` is never promotable. `entry` gets the strictest bar. Passing makes a type eligible, and the user's approval
+  promotes it: gate first, then approval, never the gate alone.
+* The lens has run with no multiple-testing correction since 2026-10-30, and a verdict passes on its raw p-value. With
+  many thesis-action pairs, about 5% of null ones will pass by chance, so report how many were tested.
+* Keep `ThesisSignal`'s shadow-only check until phase 6 changes it on purpose.
+
+**Open decisions.** The `disaster` specialist and thesis stay unless the user says otherwise (section 13, item 9).
+`enrich_with_agents` still cannot see debate errors. `uv.lock` lacks the `graph` extra, and mypy is not in `.venv`.
+
 ### 17.4 Phase 4 as built  🟡 TABLE AWAITS REVIEW
 
 Signals are rows in the ledger's `thesis` stream, so they cannot be edited or added after an outcome without
