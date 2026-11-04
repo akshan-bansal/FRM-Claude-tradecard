@@ -6,18 +6,14 @@ the hooks run on a stub broker with a recording router.
 from __future__ import annotations
 
 import ast
-import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
 import pandas as pd
 import pytest
-import respx
 
 from tests.test_monitor import _Broker, _EntryStrategy, _Market, _Router
-from trading_live_claude.intel.agents import _domain_slice, debate
 from trading_live_claude.intel.graph import (
     append_edges,
     edge_persistence,
@@ -27,7 +23,6 @@ from trading_live_claude.intel.graph import (
     recent_events_from_graph,
     snapshot_to_edges,
 )
-from trading_live_claude.intel.interpret import enrich_with_agents
 from trading_live_claude.intel.overlay import IntelSnapshot
 from trading_live_claude.intel.routing import PersistenceGate
 from trading_live_claude.monitor import session
@@ -177,13 +172,6 @@ def test_a_stale_run_does_not_halt_entries_today(tmp_path: Path) -> None:
 # ---------------------------------------------------------------- the held agent layer, end to end
 
 
-@pytest.fixture()
-def _fake_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    from trading_live_claude.config import get_settings
-    get_settings.cache_clear()
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
-
-
 def _evidence(tmp_path: Path) -> list[dict[str, object]]:
     records = [{"id": "ev-1", "title": "Refinery strike halts pipeline flows", "sources": ["reuters", "ap"],
                 "categories": ["energy"], "country": "SA"}]
@@ -197,47 +185,3 @@ def test_the_headline_reaches_the_agents_evidence(tmp_path: Path) -> None:
     assert _evidence(tmp_path)[0]["title"] == "Refinery strike halts pipeline flows"
 
 
-def test_a_hashed_event_id_does_not_put_a_record_in_a_domain() -> None:
-    rec = {"id": "a3fed12ecb", "title": "Refinery strike", "sources": [], "ingestedAt": "2026-11-01T00:00:00+00:00"}
-    assert _domain_slice([rec], "macro") == []
-    assert _domain_slice([rec], "energy") == [rec]
-
-
-def test_a_record_with_no_text_goes_to_every_domain() -> None:
-    rec = {"id": "a1", "sources": ["ap"], "categories": [], "regions": [], "ingestedAt": "2026-11-01T00:00:00+00:00"}
-    assert _domain_slice([rec], "macro") == [rec] and _domain_slice([rec], "disaster") == [rec]
-
-
-@pytest.mark.parametrize("direction, trimmed", [("adverse", True), ("constructive", False)])
-def test_only_an_adverse_agent_read_trims_its_exemplars(tmp_path: Path, _fake_key: None, direction: str,
-                                                        trimmed: bool) -> None:
-    prompts: list[dict[str, object]] = []
-
-    def reply(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        prompts.append(body)
-        if "adversary" in body["system"]:
-            text = json.dumps({"verdict": "UPHELD", "reason": "corroborated", "demote_by": 0})
-        else:
-            text = json.dumps({"thesis": "Energy supply", "direction": direction, "confidence": 0.8,
-                               "inference": "One line.", "evidence": ["ev-1"]})
-        return httpx.Response(200, json={"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"})
-
-    with respx.mock(assert_all_called=False) as mock:
-        mock.post("https://api.anthropic.com/v1/messages").mock(side_effect=reply)
-        theses = enrich_with_agents([], evidence=_evidence(tmp_path), as_of="2026-11-01")
-
-    thesis = next(t for t in theses if "energy" in t.name)
-    assert thesis.direction == direction
-    assert any("Refinery strike" in str(p["messages"]) for p in prompts)
-    assert all("{{" not in str(p["system"]) for p in prompts)     # the prompt shows real JSON, not a template
-    monitor = _monitor(_Router(), [], interpret_for=lambda: [thesis])
-    bias, applied = monitor._interpret_bias("XLE")
-    assert (bias < 1.0) is trimmed and bool(applied) is trimmed
-
-
-def test_a_debate_with_no_key_fires_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from trading_live_claude.config import get_settings
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-    get_settings.cache_clear()
-    assert debate(_evidence(tmp_path), domains=("energy",)) == []

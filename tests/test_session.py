@@ -378,7 +378,7 @@ def test_without_background_it_still_refreshes_inline() -> None:
 def test_the_doctor_never_shows_a_secret() -> None:
     secret = "SECRET-VALUE-123"
     settings = _settings(questrade_refresh_token=secret, token_encryption_key=secret, kraken_api_key=secret,
-                         kraken_api_secret=secret, worldmonitor_api_key=secret, anthropic_api_key=secret,
+                         kraken_api_secret=secret, worldmonitor_api_key=secret,
                          telegram_bot_token=secret, telegram_chat_id=secret, smtp_host=secret)
     rows = wiring_rows(settings)
     assert all(secret not in " ".join((r.layer, r.item, r.state, r.needed_for)) for r in rows)
@@ -396,7 +396,7 @@ def test_the_doctor_names_what_is_missing() -> None:
 def test_every_secret_is_named_in_the_env_template() -> None:
     template = (REPO / ".env.example").read_text(encoding="utf-8")
     for key in ("QUESTRADE_REFRESH_TOKEN", "TOKEN_ENCRYPTION_KEY", "KRAKEN_API_KEY", "KRAKEN_API_SECRET",
-                "WORLDMONITOR_API_KEY", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+                "WORLDMONITOR_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
         assert f"{key}=" in template, key
 
 

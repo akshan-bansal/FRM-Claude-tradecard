@@ -6,14 +6,10 @@ reads it, this module imports nothing from the order path, and :class:`ThesisSig
 is why the ledger holds it: a signal cannot be quietly added or edited after the outcome is known. A pass run
 for a past moment is marked ``replay`` and must never count as forward evidence.
 
-A thesis becomes signals in two ways:
-
-* **Rule theses** (:func:`~trading_live_claude.intel.interpret.interpret`) name themes and never say which way.
+Rule theses (:func:`~trading_live_claude.intel.interpret.interpret`) name themes and never say which way.
   :data:`THEME_DIRECTIONS` states it, one entry per thesis and theme, drafted from each thesis's own wording for the
   user to review. Where a thesis says it is not a directional call, the entry is ``unsigned`` and logs as ``watch``,
   which can never be promoted. Every row carries :data:`DIRECTION_TABLE_VERSION`, so a later change stays visible.
-* **Agent theses** (:func:`~trading_live_claude.intel.retrieval.debate_on_view`) state a direction, and their symbols
-  are the ones their cited events mention.
 
 An adverse read yields ``veto`` and ``exit``; a constructive one yields ``confirm`` and ``entry``. Phase 5 judges each
 action separately, with ``entry`` held to the strictest bar. Anything about disasters yields nothing, by the user's
@@ -28,17 +24,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-import httpx
-
 from trading_live_claude.audit.ledger import Ledger
 from trading_live_claude.config.settings import get_settings
-from trading_live_claude.intel.agents import FiredThesis
 from trading_live_claude.intel.confluence import confluence
-from trading_live_claude.intel.graph_store import GraphStore, GraphView, stamp_to_us
+from trading_live_claude.intel.graph_store import GraphStore, stamp_to_us
 from trading_live_claude.intel.history import default_overlay_journal
 from trading_live_claude.intel.interpret import THEME_EXEMPLARS, Thesis, interpret
 from trading_live_claude.intel.overlay import IntelSnapshot
-from trading_live_claude.intel.retrieval import Target, debate_on_view
 from trading_live_claude.intel.routing import classify_symbol
 from trading_live_claude.intel.thesis_intensity import intensity, load_history
 from trading_live_claude.logging_setup import get_logger
@@ -164,23 +156,6 @@ def thesis_to_signals(thesis: Thesis, *, as_of: datetime, snapshot: IntelSnapsho
     return list(out.values())
 
 
-def fired_to_signals(fired: FiredThesis, view: GraphView, *, evidence_hash: str = "",
-                     horizon_days: int = DEFAULT_HORIZON_DAYS, replay: bool = False) -> list[ThesisSignal]:
-    """An agent thesis's signals, on the symbols its cited events mention as of the view's cutoff."""
-    name = f"[agent · {fired.domain}] {fired.thesis}"
-    if fired.domain == "disaster" or _excluded(name):
-        return []
-    symbols = {e.object[1] for c in fired.evidence
-               for e in view.edges(subject=("event", c), predicate="mentions")}
-    out: list[ThesisSignal] = []
-    for symbol in sorted(symbols):
-        inputs = {"domain": fired.domain, "agent_confidence": fired.confidence, "verdict": fired.adversary_verdict}
-        out += _build(thesis=name, origin="agent", symbol=symbol, sign=fired.direction, strength=fired.confidence,
-                      as_of=view.cutoff, horizon_days=horizon_days, source="cited_event", replay=replay,
-                      evidence=fired.evidence, evidence_hash=evidence_hash, inputs=inputs)
-    return out
-
-
 class ThesisBook:
     """The shadow record: rows in the ledger's ``thesis`` stream, one per signal. It only writes and reads that stream."""
 
@@ -238,7 +213,6 @@ class ShadowPass:
     recorded: int
     snapshot_as_of: str | None
     notes: tuple[str, ...]
-    debate_errors: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def latest_snapshot(cutoff: datetime, path: str | Path | None = None, *, max_age_hours: float = MAX_SNAPSHOT_AGE_HOURS
@@ -256,19 +230,16 @@ def latest_snapshot(cutoff: datetime, path: str | Path | None = None, *, max_age
 
 
 def run_shadow_pass(store: GraphStore, book: ThesisBook, *, cutoff: datetime | None = None,
-                    universe: Collection[str] | None = None, debate_targets: Sequence[Target] = (),
+                    universe: Collection[str] | None = None,
                     overlay_journal: str | Path | None = None, graph_journal: str | Path | None = None,
-                    news_path: str | Path | None = None, agents_journal: str | Path | None = None,
-                    client: httpx.Client | None = None, horizon_days: int = DEFAULT_HORIZON_DAYS) -> ShadowPass:
+                    horizon_days: int = DEFAULT_HORIZON_DAYS) -> ShadowPass:
     """Read what is known, work out what theses would say, and record it. Touches no order path.
 
-    ``cutoff`` runs the pass for a past moment and marks every signal ``replay``. Debates cost money, so they run only
-    for ``debate_targets``. A stale feed records nothing rather than dressing old news as today's.
+    ``cutoff`` runs the pass for a past moment and marks every signal ``replay``. A stale feed records nothing rather than dressing old news as today's.
     """
     replay = cutoff is not None
     at = cutoff if cutoff is not None else datetime.now().astimezone()
     store.sync_journal(graph_journal)
-    view = store.as_of_view(at).cached()
     notes: list[str] = []
     signals: list[ThesisSignal] = []
     current, history, why = latest_snapshot(at, overlay_journal)
@@ -281,19 +252,7 @@ def run_shadow_pass(store: GraphStore, book: ThesisBook, *, cutoff: datetime | N
         for t in theses:
             signals += thesis_to_signals(t, as_of=at, snapshot=current[1], history=history, universe=universe,
                                          horizon_days=horizon_days, replay=replay)
-    errors: dict[str, dict[str, str]] = {}
-    for target in debate_targets:
-        debated = debate_on_view(view, target, client=client, news_path=news_path, journal_path=agents_journal)
-        key = target if isinstance(target, str) else target[1]
-        if debated.report.errors:
-            errors[key] = debated.report.errors
-            notes.append(f"debate on {key} failed: {debated.report.errors}")
-        if not debated.bundle.items:
-            notes.append(f"debate on {key}: no evidence in the graph")
-        for fired in debated.report.fired:
-            signals += fired_to_signals(fired, view, evidence_hash=debated.bundle.content_hash, horizon_days=horizon_days,
-                                        replay=replay)
     recorded = book.record(signals)
     log.info("thesis_shadow.pass", as_of=at.isoformat(), replay=replay, signals=len(signals), recorded=recorded)
     return ShadowPass(as_of=at.isoformat(), replay=replay, signals=tuple(signals), recorded=recorded,
-                      snapshot_as_of=snapshot_as_of, notes=tuple(notes), debate_errors=errors)
+                      snapshot_as_of=snapshot_as_of, notes=tuple(notes))

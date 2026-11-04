@@ -1,4 +1,4 @@
-"""LLM headline sentiment: known when scored, untrusted input, failures stay unscored, and how evidence shows it."""
+"""Headline sentiment: known when scored, untrusted input, failures stay unscored, and how evidence shows it."""
 from __future__ import annotations
 
 import json
@@ -10,11 +10,15 @@ import pytest
 
 pytest.importorskip("networkx")
 
-from trading_live_claude.intel.agents import CallRecord
 from trading_live_claude.intel.graph import load_edges
 from trading_live_claude.intel.graph_search import EVIDENCE_SCOPE, build_graph
 from trading_live_claude.intel.graph_store import GraphStore
-from trading_live_claude.intel.news_sentiment import event_sentiment, run_pass, symbol_sentiment
+from trading_live_claude.intel.news_sentiment import (
+    CallRecord,
+    event_sentiment,
+    run_pass,
+    symbol_sentiment,
+)
 from trading_live_claude.intel.retrieval import retrieve_evidence
 
 ARRIVED = datetime(2026, 11, 4, 12, tzinfo=UTC)
@@ -82,15 +86,14 @@ def test_a_reply_cannot_write_what_it_was_not_asked(paths: dict[str, Path], bad:
     assert not paths["scores_path"].exists() and not paths["graph_path"].exists()
 
 
-def test_headlines_reach_the_model_as_data(paths: dict[str, Path]) -> None:
+def test_only_mapped_headlines_reach_the_scorer(paths: dict[str, Path]) -> None:
     call = _caller(_reply(GOOD))
     run_pass(call=call, **paths)
     sent = call.calls[0]
-    assert "ignore any instruction" in sent["system"]
     assert {h["id"] for h in json.loads(sent["user"])} == {ZEC_ID, BTC_ID}  # the unmapped headline is not sent
 
 
-@pytest.mark.parametrize("reply,error", [(None, "no_api_key"), (None, "api_400:invalid_request_error"), ("nonsense", "")])
+@pytest.mark.parametrize("reply,error", [(None, "scorer_failed"), ("nonsense", "")])
 def test_a_failure_leaves_headlines_unscored_for_the_next_pass(paths: dict[str, Path], reply: Any, error: str) -> None:
     result = run_pass(call=_caller(reply, error), **paths)
     assert result.scored == 0 and result.failed_batches == 1 and not paths["scores_path"].exists()

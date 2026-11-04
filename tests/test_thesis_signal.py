@@ -10,7 +10,6 @@ from typing import Any
 
 import httpx
 import pytest
-import respx
 
 pytest.importorskip("networkx")
 pytest.importorskip("scipy")
@@ -18,7 +17,6 @@ pytest.importorskip("scipy")
 from trading_live_claude import intel
 from trading_live_claude.audit.ledger import LEDGER_EVENTS, verify_chain
 from trading_live_claude.intel import thesis_signal as ts
-from trading_live_claude.intel.agents import FiredThesis
 from trading_live_claude.intel.graph import Edge, append_edges, event_records_to_edges
 from trading_live_claude.intel.graph_store import GraphStore
 from trading_live_claude.intel.interpret import THEME_EXEMPLARS, Thesis
@@ -28,23 +26,16 @@ from trading_live_claude.intel.thesis_signal import (
     THEME_DIRECTIONS,
     ThesisBook,
     ThesisSignal,
-    fired_to_signals,
     run_shadow_pass,
     thesis_to_signals,
 )
 
-_URL = "https://api.anthropic.com/v1/messages"
 T0 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
 
 
 def _thesis(name: str, *themes: str, confidence: str = "high", direction: str = "adverse") -> Thesis:
     return Thesis(name=name, confidence=confidence, evidence=[], inference="i", action="a", themes=list(themes),
                   direction=direction)
-
-
-def _fired(*evidence: str, direction: str = "adverse", domain: str = "energy", confidence: float = 0.8) -> FiredThesis:
-    return FiredThesis(domain=domain, thesis="Supply stress", direction=direction, confidence=confidence,  # type: ignore[arg-type]
-                       inference="i", evidence=list(evidence), adversary_verdict="UPHELD", adversary_reason="r")
 
 
 def _event(event_id: str, category: str, hours: float, *symbols: str) -> list[Edge]:
@@ -159,38 +150,11 @@ def test_the_disaster_thesis_yields_no_signal(themes: tuple[str, ...]) -> None:
     assert thesis_to_signals(_thesis("Disaster / insurance underpricing", *themes), as_of=T0) == []
 
 
-def test_a_disaster_agent_thesis_yields_no_signal(store: GraphStore) -> None:
-    view = store.as_of_view(T0 + timedelta(hours=5))
-    assert fired_to_signals(_fired("e1", domain="disaster"), view) == []
-    named = FiredThesis(domain="energy", thesis="Hurricane disaster rally", direction="constructive", confidence=0.9,
-                        inference="i", evidence=["e1"], adversary_verdict="UPHELD", adversary_reason="r")
-    assert fired_to_signals(named, view) == []
-
-
 def test_no_table_entry_gives_a_direction_to_disaster() -> None:
     assert not [k for k in THEME_DIRECTIONS if "isaster" in k[0]]
 
 
 # ---------------------------------------------------------------- agent theses
-
-
-def test_an_agent_signal_lands_on_the_symbols_its_events_mention(store: GraphStore) -> None:
-    view = store.as_of_view(T0 + timedelta(hours=5))
-    got = fired_to_signals(_fired("e1"), view, evidence_hash="abc")
-    assert {(s.symbol, s.action) for s in got} == {("XLE", "veto"), ("XLE", "exit"), ("USO", "veto"), ("USO", "exit")}
-    assert all(s.origin == "agent" and s.symbol_source == "cited_event" and s.evidence_ids == ("e1",)
-               and s.evidence_hash == "abc" and s.strength == 0.8 and s.as_of == view.cutoff.isoformat() for s in got)
-    assert {s.action for s in fired_to_signals(_fired("e1", direction="constructive"), view)} == {"confirm", "entry"}
-
-
-def test_an_agent_signal_cannot_use_a_mention_from_after_the_cutoff(store: GraphStore) -> None:
-    view = store.as_of_view(T0 + timedelta(hours=5))
-    store.ingest([Edge(("event", "e1"), "mentions", ("symbol", "LATE"), as_of=(T0 + timedelta(hours=9)).isoformat())])
-    assert "LATE" not in {s.symbol for s in fired_to_signals(_fired("e1"), view)}
-
-
-def test_an_agent_thesis_on_an_event_mentioning_nothing_yields_nothing(store: GraphStore) -> None:
-    assert fired_to_signals(_fired("no-such-event"), store.as_of_view(T0 + timedelta(hours=5))) == []
 
 
 # ---------------------------------------------------------------- shadow only
@@ -279,8 +243,7 @@ def test_replays_stay_out_of_the_forward_record(book: ThesisBook) -> None:
 
 @pytest.fixture()
 def journals(tmp_path: Path) -> dict[str, Path]:
-    return {"overlay_journal": tmp_path / "overlay.jsonl", "graph_journal": tmp_path / "graph.jsonl",
-            "news_path": tmp_path / "news.jsonl", "agents_journal": tmp_path / "agents.jsonl"}
+    return {"overlay_journal": tmp_path / "overlay.jsonl", "graph_journal": tmp_path / "graph.jsonl"}
 
 
 STRESS = {"event_acceleration": {"energy": 6.0, "conflict": 1.0, "military": 1.0}, "energy_stress": 0.4}
@@ -325,45 +288,7 @@ def test_a_pass_catches_up_with_the_graph_journal(store: GraphStore, book: Thesi
     assert store.as_of_view(T0 + timedelta(hours=5)).edges(object=("symbol", "XOM"))
 
 
-def test_a_pass_makes_no_api_call_unless_asked(store: GraphStore, book: ThesisBook, journals: dict[str, Path]) -> None:
-    with respx.mock(assert_all_called=False) as mock:
-        route = mock.post(_URL)
-        run_shadow_pass(store, book, cutoff=T0 + timedelta(hours=5), **journals)
-    assert route.call_count == 0
-
-
-@pytest.fixture()
-def _fake_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    from trading_live_claude.config import get_settings
-    get_settings.cache_clear()
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
-
-
 def _reply(text: str) -> httpx.Response:
     return httpx.Response(200, json={"content": [{"type": "text", "text": text}], "stop_reason": "end_turn", "usage": {}})
 
 
-@respx.mock
-def test_a_debate_in_a_pass_reaches_the_book(store: GraphStore, book: ThesisBook, journals: dict[str, Path], _fake_key: None) -> None:
-    claim = json.dumps({"thesis": "Supply", "direction": "adverse", "confidence": 0.8, "inference": "i", "evidence": ["e1"]})
-    upheld = json.dumps({"verdict": "UPHELD", "reason": "r", "demote_by": 0})
-
-    def reply(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        if "adversary" in body["system"]:
-            return _reply(upheld)
-        return _reply(claim if "Domain: energy" in body["messages"][0]["content"] else
-                      json.dumps({"thesis": "x", "direction": "neutral", "confidence": 0.1}))
-    respx.post(_URL).mock(side_effect=reply)
-    result = run_shadow_pass(store, book, cutoff=T0 + timedelta(hours=5), debate_targets=[("symbol", "XLE")], **journals)
-    assert {s.symbol for s in result.signals if s.origin == "agent"} == {"XLE", "USO"}
-    assert result.debate_errors == {} and result.signals[0].evidence_hash
-    assert len(book.signals(include_replay=True)) == result.recorded
-
-
-@respx.mock
-def test_a_failed_debate_is_reported_and_posts_nothing(store: GraphStore, book: ThesisBook, journals: dict[str, Path], _fake_key: None) -> None:
-    respx.post(_URL).mock(return_value=httpx.Response(400, json={"error": {"type": "invalid_request_error"}}))
-    result = run_shadow_pass(store, book, cutoff=T0 + timedelta(hours=5), debate_targets=[("symbol", "XLE")], **journals)
-    assert result.signals == () and result.debate_errors["XLE"]["energy"] == "api_400:invalid_request_error"
-    assert any("failed" in n for n in result.notes)

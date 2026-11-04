@@ -10,7 +10,6 @@ from typing import Any
 
 import httpx
 import pytest
-import respx
 
 pytest.importorskip("networkx")
 pytest.importorskip("scipy")
@@ -18,11 +17,9 @@ pytest.importorskip("scipy")
 from trading_live_claude import intel
 from trading_live_claude.intel import graph_search as gs
 from trading_live_claude.intel import retrieval as rt
-from trading_live_claude.intel.agents import debate, run_debate
 from trading_live_claude.intel.graph import Edge, event_records_to_edges
 from trading_live_claude.intel.graph_store import GraphStore, GraphView
 
-_URL = "https://api.anthropic.com/v1/messages"
 T0 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
 AFTER = T0 + timedelta(hours=5)
 XLE = ("symbol", "XLE")
@@ -66,13 +63,6 @@ def store(tmp_path: Path) -> Iterator[GraphStore]:
 @pytest.fixture()
 def view(store: GraphStore) -> GraphView:
     return store.as_of_view(AFTER)
-
-
-@pytest.fixture(autouse=True)
-def _fake_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    from trading_live_claude.config import get_settings
-    get_settings.cache_clear()
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
 
 
 NO_NEWS = "no-news.jsonl"
@@ -221,24 +211,6 @@ def test_disaster_events_never_reach_a_bundle(tmp_path: Path, view: GraphView) -
         assert "urricane" not in json.dumps(bundle.records())
 
 
-def test_tools_cannot_reach_disaster_or_widen_their_scope(view: GraphView) -> None:
-    tools = rt.ViewTools(view)
-    out, err = tools.call("search_text", {"query": "hurricane", "scope": "EVIDENCE_SCOPE", "as_of": "2030-01-01"})
-    assert (json.loads(out), err) == ([], False)
-    out, _ = tools.call("neighbors", {"node_type": "symbol", "node_id": "XLE", "hops": 2})
-    assert "e4" not in out and "disaster" not in out
-    out, _ = tools.call("find_path", {"from_type": "symbol", "from_id": "XLE", "to_type": "event", "to_id": "e4"})
-    assert json.loads(out) == {"connected": False}
-
-
-def test_the_default_debate_skips_the_disaster_specialist(tmp_path: Path, view: GraphView) -> None:
-    with respx.mock(assert_all_called=False) as mock:
-        route = mock.post(_URL).mock(return_value=_reply('{"thesis": "x", "direction": "neutral", "confidence": 0.1}'))
-        result = rt.debate_on_view(view, XLE, domains=("energy", "disaster"), journal=False, news_path=tmp_path / NO_NEWS)
-    assert set(result.report.outcomes) == {"energy"}
-    assert all("Domain: disaster" not in r.request.content.decode() for r in route.calls)
-
-
 # ---------------------------------------------------------------- nothing sees the future
 
 
@@ -253,25 +225,10 @@ def test_future_edges_change_no_bundle(tmp_path: Path, store: GraphStore, target
     assert "leak" in {i.event_id for i in after.items}     # the same edges do arrive for a later view
 
 
-def test_tools_see_only_the_view(store: GraphStore) -> None:
-    v = store.as_of_view(AFTER)
-    store.ingest(_future())
-    tools = rt.ViewTools(v)
-    assert "leak" not in tools.call("search_text", {"query": "leak strike"})[0]
-    assert "leak" not in tools.call("neighbors", {"node_type": "symbol", "node_id": "XLE"})[0]
-
-
 def test_the_retrieval_module_reads_only_through_a_view_and_the_news_join() -> None:
     source = inspect.getsource(rt)
     for banned in ("load_edges", "default_graph_journal", "GraphStore", "sync_journal", "._select"):
         assert banned not in source, banned
-
-
-def test_no_tool_definition_offers_a_time_or_a_scope(view: GraphView) -> None:
-    for definition in rt.ViewTools(view).definitions():
-        props = set(definition["input_schema"]["properties"])
-        assert not props & {"as_of", "cutoff", "since", "until", "scope", "date"}, definition["name"]
-        assert definition["input_schema"]["additionalProperties"] is False
 
 
 def test_nothing_on_the_trading_path_imports_retrieval() -> None:
@@ -282,19 +239,6 @@ def test_nothing_on_the_trading_path_imports_retrieval() -> None:
 
 
 # ---------------------------------------------------------------- tools
-
-
-def test_a_tool_budget_is_enforced_and_a_bad_call_comes_back_as_text(view: GraphView) -> None:
-    tools = rt.ViewTools(view, max_calls=2)
-    assert tools.call("neighbors", {"node_type": "symbol"})[1] is True      # missing argument, no exception
-    assert tools.call("no_such_tool", {})[1] is True
-    out, err = tools.call("search_text", {"query": "opec"})
-    assert err is True and "budget" in out
-
-
-def test_hops_are_capped_whatever_the_model_asks(view: GraphView) -> None:
-    out = json.loads(rt.ViewTools(view).call("neighbors", {"node_type": "symbol", "node_id": "USO", "hops": 99})[0])
-    assert max(n["hops"] for n in out) == 2
 
 
 # ---------------------------------------------------------------- the debate: citations, tools, memory, trace
@@ -318,165 +262,6 @@ def _script(*replies: httpx.Response) -> Any:
     return lambda _req: next(it)
 
 
-@respx.mock
-def test_a_debate_cites_paths_that_exist_in_the_view(tmp_path: Path, view: GraphView) -> None:
-    respx.post(_URL).mock(side_effect=_script(_reply(_claim("e1", "e2")), _reply(UPHELD)))
-    result = rt.debate_on_view(view, XLE, domains=("energy",), journal=False, news_path=tmp_path / NO_NEWS)
-    assert [t.evidence for t in result.report.fired] == [["e1", "e2"]]
-    cited = result.citations["energy"]
-    assert [c.event_id for c in cited] == ["e1", "e2"]
-    graph = gs.build_graph(view, gs.SIGNAL_SCOPE)
-    for c in cited:
-        assert c.path is not None and c.path.nodes[-1] == ("event", c.event_id)
-        assert all(graph.has_edge(h.source, h.target) for h in c.path.hops)
-
-
-@respx.mock
-def test_a_made_up_citation_is_dropped_and_a_claim_with_none_is_too(tmp_path: Path, view: GraphView) -> None:
-    respx.post(_URL).mock(side_effect=_script(_reply(_claim("e1", "invented")), _reply(UPHELD)))
-    kept = rt.debate_on_view(view, XLE, domains=("energy",), journal=False, news_path=tmp_path / NO_NEWS)
-    assert kept.report.fired[0].evidence == ["e1"]
-
-    route = respx.post(_URL).mock(side_effect=_script(_reply(_claim("invented", "e4"))))
-    sent = route.call_count
-    dropped = rt.debate_on_view(view, XLE, domains=("energy",), journal=False, news_path=tmp_path / NO_NEWS)
-    assert dropped.report.fired == [] and dropped.report.outcomes["energy"]["outcome"] == "uncited"
-    assert route.call_count == sent + 1                    # the adversary was not paid to read it; e4 is disaster
-
-
-@respx.mock
-def test_an_agent_can_search_then_answer_and_thinking_goes_back_unchanged(tmp_path: Path, view: GraphView) -> None:
-    thinking = {"type": "thinking", "thinking": "", "signature": "sig-1"}
-    tool_use = {"type": "tool_use", "id": "tu_1", "name": "search_text", "input": {"query": "opec"}}
-    first = httpx.Response(200, json={"content": [thinking, tool_use], "stop_reason": "tool_use",
-                                      "usage": {"input_tokens": 50, "output_tokens": 5}})
-    route = respx.post(_URL).mock(side_effect=_script(first, _reply(_claim("e2")), _reply(UPHELD)))
-    result = rt.debate_on_view(view, XLE, domains=("energy",), journal=False, news_path=tmp_path / NO_NEWS)
-    assert result.report.fired[0].evidence == ["e2"]
-    second = json.loads(route.calls[1].request.content)
-    assert second["messages"][1] == {"role": "assistant", "content": [thinking, tool_use]}
-    result_block = second["messages"][2]["content"][0]
-    assert result_block["tool_use_id"] == "tu_1" and "OPEC" in result_block["content"]
-    assert "tool_choice" not in second                     # forced tool use returns a 400 on current models
-    assert result.report.outcomes["energy"]["calls"][0]["tool_calls"] == 1
-
-
-@respx.mock
-def test_a_model_that_never_stops_searching_ends_as_a_failure(tmp_path: Path, view: GraphView) -> None:
-    tool_use = {"type": "tool_use", "id": "tu_1", "name": "search_text", "input": {"query": "opec"}}
-    respx.post(_URL).mock(return_value=httpx.Response(200, json={"content": [tool_use], "stop_reason": "tool_use", "usage": {}}))
-    result = rt.debate_on_view(view, XLE, domains=("energy",), journal=False, news_path=tmp_path / NO_NEWS)
-    assert result.report.errors == {"energy": "tool_turn_limit"}
-
-
-@respx.mock
-def test_earlier_claims_are_shown_only_if_made_before_the_cutoff(tmp_path: Path, store: GraphStore) -> None:
-    journal, news = tmp_path / "agents.jsonl", tmp_path / NO_NEWS
-    respx.post(_URL).mock(side_effect=_script(_reply(_claim("e1")), _reply(UPHELD)))
-    rt.debate_on_view(store.as_of_view(T0 + timedelta(hours=1, minutes=30)), XLE, domains=("energy",),
-                      journal_path=journal, news_path=news)
-    memory = rt.ThesisMemory(journal)
-    at_debate = T0 + timedelta(hours=1, minutes=30)
-    assert memory.before(at_debate) == []                  # strictly before, so not its own row
-    assert memory.before(at_debate - timedelta(hours=1)) == []
-    later = memory.before(AFTER)
-    assert later[0]["thesis"] == "Supply stress" and later[0]["verdict"] == "UPHELD"
-    assert memory.before(AFTER, domains=["macro"]) == []
-
-    route = respx.post(_URL).mock(side_effect=_script(_reply(_claim("e1")), _reply(UPHELD)))
-    sent = route.call_count
-    rt.debate_on_view(store.as_of_view(AFTER), XLE, domains=("energy",), journal=False, news_path=news,
-                      journal_path=journal)
-    assert "earlier_claims" in route.calls[sent].request.content.decode()
-
-    route = respx.post(_URL).mock(side_effect=_script(_reply(_claim("e1")), _reply(UPHELD)))
-    sent = route.call_count
-    rt.debate_on_view(store.as_of_view(T0 + timedelta(hours=1, minutes=1)), XLE, domains=("energy",), journal=False,
-                      news_path=news, journal_path=journal)
-    assert "earlier_claims" not in route.calls[sent].request.content.decode()   # a replay before it cannot read it
-
-
-def test_memory_skips_rows_it_cannot_place_in_time(tmp_path: Path) -> None:
-    journal = tmp_path / "agents.jsonl"
-    row = {"as_of": "", "outcomes": {"energy": {"outcome": "fired", "claim": {"thesis": "x"}}}}
-    journal.write_text(json.dumps(row) + "\n{broken\n", encoding="utf-8")
-    assert rt.ThesisMemory(journal).before(AFTER) == []
-    assert rt.ThesisMemory(tmp_path / "absent.jsonl").before(AFTER) == []
-
-
-@respx.mock
-def test_the_journal_traces_what_each_debate_read_and_did(tmp_path: Path, view: GraphView) -> None:
-    journal = tmp_path / "agents.jsonl"
-    respx.post(_URL).mock(side_effect=_script(_reply(_claim("e1")), _reply(UPHELD)))
-    result = rt.debate_on_view(view, XLE, domains=("energy",), journal_path=journal, news_path=tmp_path / NO_NEWS)
-    row = json.loads(journal.read_text(encoding="utf-8").splitlines()[0])
-    assert row["as_of"] == AFTER.isoformat() and row["target"] == ["symbol", "XLE"]
-    assert row["evidence_hash"] == result.bundle.content_hash
-    assert set(row["evidence_ids"]) == {i.event_id for i in result.bundle.items}
-    specialist, adversary = row["outcomes"]["energy"]["calls"]
-    assert specialist["model"] and len(specialist["prompt_sha"]) == 16 and specialist["stop_reason"] == "end_turn"
-    assert (specialist["input_tokens"], specialist["output_tokens"]) == (100, 20)
-    assert specialist["prompt_sha"] != adversary["prompt_sha"]
-
-
 # ---------------------------------------------------------------- failure is told apart from silence
 
 
-@respx.mock
-def test_low_credit_is_a_failure_not_a_quiet_world(tmp_path: Path, view: GraphView) -> None:
-    respx.post(_URL).mock(return_value=httpx.Response(400, json={
-        "type": "error", "error": {"type": "invalid_request_error", "message": "Your credit balance is too low"}}))
-    result = rt.debate_on_view(view, XLE, domains=("energy",), journal=False, news_path=tmp_path / NO_NEWS)
-    assert result.report.fired == []
-    assert result.report.errors == {"energy": "api_400:invalid_request_error"}
-
-
-@respx.mock
-def test_a_quiet_answer_has_no_error(tmp_path: Path, view: GraphView) -> None:
-    respx.post(_URL).mock(return_value=_reply(_claim("e1", direction="neutral", confidence=0.1)))
-    result = rt.debate_on_view(view, XLE, domains=("energy",), journal=False, news_path=tmp_path / NO_NEWS)
-    assert result.report.fired == [] and result.report.errors == {}
-    assert result.report.outcomes["energy"]["outcome"] == "below_threshold"
-
-
-def test_each_failure_names_itself(monkeypatch: pytest.MonkeyPatch) -> None:
-    from trading_live_claude.config import get_settings
-    evidence = [{"id": "EV", "title": "energy outage"}]
-    with respx.mock(assert_all_called=False) as mock:
-        route = mock.post(_URL)
-        cases = {"http_error": httpx.ConnectError("down"), "unparseable": _reply("not json at all"),
-                 "api_529:overloaded_error": httpx.Response(529, json={"error": {"type": "overloaded_error"}})}
-        for expected, reply in cases.items():
-            route.mock(side_effect=[reply])  # one reply per case: only the specialist runs
-            assert run_debate(evidence, domains=("energy",), journal=False).errors == {"energy": expected}
-        route.mock(side_effect=[httpx.Response(200, json={"content": [], "stop_reason": "refusal"})])
-        assert run_debate(evidence, domains=("energy",), journal=False).errors == {"energy": "refusal"}
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-    get_settings.cache_clear()
-    assert run_debate(evidence, domains=("energy",), journal=False).errors == {"energy": "no_api_key"}
-
-
-@respx.mock
-def test_an_adversary_failure_is_reported_and_drops_the_claim() -> None:
-    respx.post(_URL).mock(side_effect=_script(_reply(_claim("EV")), httpx.Response(500, json={})))
-    report = run_debate([{"id": "EV", "title": "energy outage"}], domains=("energy",), journal=False)
-    assert report.fired == [] and report.errors == {"energy": "api_500"}
-    assert report.outcomes["energy"]["outcome"] == "no_critique"
-
-
-@respx.mock
-def test_the_failure_is_on_the_journal_row(tmp_path: Path) -> None:
-    respx.post(_URL).mock(return_value=httpx.Response(400, json={"error": {"type": "invalid_request_error"}}))
-    journal = tmp_path / "agents.jsonl"
-    run_debate([{"id": "EV", "title": "energy outage"}], domains=("energy",), journal_path=journal)
-    row = json.loads(journal.read_text(encoding="utf-8").splitlines()[0])
-    assert row["errors"] == {"energy": "api_400:invalid_request_error"}
-    assert row["outcomes"]["energy"]["error"] == "api_400:invalid_request_error"
-
-
-@respx.mock
-def test_plain_debate_still_returns_a_list_and_sends_no_tools() -> None:
-    route = respx.post(_URL).mock(side_effect=_script(_reply(_claim("EV")), _reply(UPHELD)))
-    fired = debate([{"id": "EV", "title": "energy outage"}], domains=("energy",), journal=False)
-    assert [t.thesis for t in fired] == ["Supply stress"] and fired[0].evidence == ["EV"]
-    assert "tools" not in json.loads(route.calls[0].request.content)

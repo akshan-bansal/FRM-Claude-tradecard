@@ -1,7 +1,6 @@
 """Record what theses would say right now, in shadow. It places no orders and nothing acts on what it writes.
 
     python scripts/thesis_shadow.py
-    python scripts/thesis_shadow.py --debate XLE,ETH/USD      # also runs agent debates, which cost API credit
     python scripts/thesis_shadow.py --list                    # what the shadow book holds
 
 One pass and out, and nothing schedules it. Signals go to the ledger's ``thesis`` stream. It needs a recent real
@@ -23,7 +22,6 @@ from trading_live_claude.intel.thesis_signal import ThesisBook, run_shadow_pass 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--debate", default="", help="comma-separated symbols to debate; costs API credit")
     ap.add_argument("--list", action="store_true", help="show what the shadow book holds and stop")
     args = ap.parse_args(argv)
 
@@ -36,9 +34,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     universe = set(WALK_FORWARD_VALIDATED) | set(CRYPTO_SLEEVE)
-    targets = [("symbol", s.strip()) for s in args.debate.split(",") if s.strip()]
     with GraphStore() as store:
-        result = run_shadow_pass(store, book, universe=universe, debate_targets=targets)  # type: ignore[arg-type]
+        result = run_shadow_pass(store, book, universe=universe)
     print(f"[thesis-shadow] as of {result.as_of}: {len(result.signals)} signals, {result.recorded} new; "
           f"snapshot {result.snapshot_as_of or 'none'}")
     for note in result.notes:

@@ -50,7 +50,6 @@ def wiring_rows(settings: Any) -> list[Row]:
         Row("execution", "ib_auto_confirm_prompts", str(settings.ib_auto_confirm_prompts),
             "off: an IB warning prompt rejects the order"),
         Row("intel", "WORLDMONITOR_API_KEY", _secret(settings, "worldmonitor_api_key"), "overlay and thesis trims, every runner"),
-        Row("intel", "ANTHROPIC_API_KEY", _secret(settings, "anthropic_api_key"), "held agent layer only, not trading"),
         Row("intel", "elevated_in edges", _edges(state_dir), "persistence gate cannot fire without them"),
         Row("risk", "limits", f"heat {settings.portfolio_heat_cap:.1%}, drawdown {settings.max_drawdown_kill_switch:.1%}, "
             f"daily loss {settings.daily_loss_limit_pct:.1%}, leverage {settings.max_gross_leverage:.2f}x", "every runner"),
