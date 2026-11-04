@@ -87,10 +87,11 @@ def _param_combos(grid: dict) -> list[dict]:
     return [dict(zip(keys, vals)) for vals in product(*grid.values())]
 
 
-def _score_pairs_fold(eng: BacktestEngine, params: dict, df: pd.DataFrame, sym: str):
+def _score_pairs_fold(eng: BacktestEngine, params: dict, df: pd.DataFrame, sym: str,
+                      warmup_bars: int = 0):
     """Run one PairsZScore backtest on a pair-frame fold; return (objective_score, metrics)."""
     try:
-        res = eng.run(STRATEGIES["pairs"](**params), df, sym)
+        res = eng.run(STRATEGIES["pairs"](**params), df, sym, warmup_bars=warmup_bars)
     except Exception:
         return None
     m = res.metrics
@@ -119,14 +120,14 @@ def _walk_forward_pair(pair_df: pd.DataFrame, sym_y: str, sym_x: str) -> _WFResu
     start = 0
     while start + train_bars + test_bars <= n:
         tr = pair_df.iloc[start:start + train_bars].reset_index(drop=True)
-        te = pair_df.iloc[start + train_bars:start + train_bars + test_bars].reset_index(drop=True)
+        fold = pair_df.iloc[start:start + train_bars + test_bars].reset_index(drop=True)
         bt: tuple[float, dict] | None = None
         for p in _param_combos(_PAIRS_GRID):
             got = _score_pairs_fold(eng, p, tr, label)
             if got and (bt is None or got[0] > bt[0]):
                 bt = (got[0], p)
         if bt is not None:
-            got = _score_pairs_fold(eng, bt[1], te, label)
+            got = _score_pairs_fold(eng, bt[1], fold, label, warmup_bars=train_bars)
             if got is not None:
                 oos_scores.append(got[0])
                 is_scores.append(bt[0])

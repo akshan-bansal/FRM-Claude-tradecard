@@ -1,0 +1,22 @@
+book,strategy,gate,replay_bars,entries,accepted,trimmed,avg_trim,still_held,ret,maxdd,buy_hold,rejects,gate_loaded
+ES x50,ema_crossover,off,291,0,0,0,0.0,0.0,0.0,0.0,0.11948406454676386,{},False
+ES x50,ema_crossover,"on,500",291,0,0,0,0.0,0.0,0.0,0.0,0.11948406454676386,{},True
+ES x50,ema_crossover,"on,250",291,0,0,0,0.0,0.0,0.0,0.0,0.11948406454676386,{},True
+ES x5 micro-size,ema_crossover,off,291,1,1,0,0.0,1.0,0.016051726994730675,-0.01715266672614324,0.11948406454676386,{},False
+ES x5 micro-size,ema_crossover,"on,500",291,1,0,0,0.0,0.0,0.0,0.0,0.11948406454676386,"{""spectral VaR: 405 daily returns for"": 1}",True
+ES x5 micro-size,ema_crossover,"on,250",291,1,0,0,0.0,0.0,0.0,0.0,0.11948406454676386,"{""spectral VaR: 99% 1d VaR $626"": 1}",True
+ZN x1000,ema_crossover,off,239,1,0,0,0.0,0.0,0.0,0.0,-0.049651134562316845,"{""trim would round to 0 shares"": 1}",False
+ZN x1000,ema_crossover,"on,500",239,1,0,0,0.0,0.0,0.0,0.0,-0.049651134562316845,"{""trim would round to 0 shares"": 1}",True
+ZN x1000,ema_crossover,"on,250",239,1,0,0,0.0,0.0,0.0,0.0,-0.049651134562316845,"{""trim would round to 0 shares"": 1}",True
+GC x100,bollinger,off,250,0,0,0,0.0,0.0,0.0,0.0,-0.049574615545908696,{},False
+GC x100,bollinger,"on,500",250,0,0,0,0.0,0.0,0.0,0.0,-0.049574615545908696,{},True
+GC x100,bollinger,"on,250",250,0,0,0,0.0,0.0,0.0,0.0,-0.049574615545908696,{},True
+GC x10 micro-size,bollinger,off,250,0,0,0,0.0,0.0,0.0,0.0,-0.049574615545908696,{},False
+GC x10 micro-size,bollinger,"on,500",250,0,0,0,0.0,0.0,0.0,0.0,-0.049574615545908696,{},True
+GC x10 micro-size,bollinger,"on,250",250,0,0,0,0.0,0.0,0.0,0.0,-0.049574615545908696,{},True
+CL x1000,rsi_meanrevert,off,248,0,0,0,0.0,0.0,0.0,0.0,0.93001063702785,{},False
+CL x1000,rsi_meanrevert,"on,500",248,0,0,0,0.0,0.0,0.0,0.0,0.93001063702785,{},True
+CL x1000,rsi_meanrevert,"on,250",248,0,0,0,0.0,0.0,0.0,0.0,0.93001063702785,{},True
+CL x100 micro-size,rsi_meanrevert,off,248,2,2,0,0.0,0.0,0.009214250230900722,-0.0018032964597827217,0.93001063702785,{},False
+CL x100 micro-size,rsi_meanrevert,"on,500",248,3,0,0,0.0,0.0,0.0,0.0,0.93001063702785,"{""spectral VaR: 280 daily returns for"": 1, ""spectral VaR: 409 daily returns for"": 1, ""spectral VaR: 411 daily returns for"": 1}",True
+CL x100 micro-size,rsi_meanrevert,"on,250",248,2,2,1,3.0,0.0,0.005531265203379432,-0.0018099164829818992,0.93001063702785,{},True
