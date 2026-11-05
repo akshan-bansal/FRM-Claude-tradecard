@@ -2543,6 +2543,49 @@ the `graph` extra. `mypy --strict` has not run on phases 1 and 2, because mypy i
 
 ---
 
+## 18. Eigentensor data collector  🟡 QUEUED, NOT BUILT (2026-11-05)
+
+**Why.** The eigen-against-tensor test (`reports/eigen_vs_tensor_2026-11-04/`, `BSM_Spectral/bsm_eigentensor.py`,
+`scripts/eigen_vs_tensor.py`) found nothing in tensors that survives checking, on five names and 1,224 daily bars. It also
+could not tell a stable tensor direction from noise: with dates shuffled so nothing changes over time, 252 bars recover a
+coskew direction only 0.08 of the way from chance to a perfect match. More history is the only way past that. The user
+reckons signal is being dropped or lost on the way. Measured 2026-11-05 on the same bars:
+
+| Where | Measured | Loss |
+|---|---|---|
+| Same-date pairing across time zones | SPY-STW.AX 0.12 same-date, 0.59 with closes aligned; US-Sydney mean 0.05 against 0.27 | Most of the link. Sections 2 and 3 of the report ran same-date |
+| Joining five calendars | 1,224 of 1,263 rows kept | 3% |
+| Rank truncation | Rank 1 keeps 68% of the coskew norm, against 62% for noise; cokurt 52% against 61% | Little concentrated signal to lose |
+| Not measured | Bars the feed never delivered, zero-volume futures rows, and how each feed stamps a Sydney session | Unknown |
+
+The cross-venue audit (2026-11-05) separately reports that the IBKR connector's stamping loses 20% of rows on the heat
+gate's path. Not re-checked here.
+
+**What it records.** One row per run and window, point in time, keyed by the last completed bar:
+* returns by each venue's local session date, aligned so a US session pairs with the next Sydney one, with the same-date
+  figure beside it so the loss stays measured;
+* per symbol, bars its venue calendar expects against bars received, gaps, and zero-volume rows, plus rows lost in the join;
+* kappa, the leading Z-eigenpairs of coskew and anisotropic cokurt with residuals, the leading correlation eigenvector and
+  the horizon share;
+* eigenfidelity and moment capture against the previous row, and rank-1 and rank-2 retention beside the noise figure for
+  the same sample size.
+
+Append-only under `state/tensor/`, not the ledger, since nothing on the order path reads it. Keep the bars rather than
+running tensor totals, so windows can be re-cut later.
+
+**Decide before building.**
+1. Source. The IBKR connector only works inside a Claude session. A collector that runs on its own needs IB Gateway with
+   `ib_insync`, the Questrade feed (which spends refresh tokens), or Kraken's public feed (crypto only).
+2. Universe. Beyond about five to eight names, fourth moments get too noisy for this much history: unique cokurt entries
+   grow as C(N+3, 4).
+3. Schedule. "Data-first sequencing" allows no new scheduled tasks, so it runs by hand unless the user lifts that for
+   this job.
+4. Rerun sections 2 and 3 of the existing test on aligned closes first. It is cheap, and says whether same-date pairing
+   hid anything before data starts to accrue.
+
+**Done means.** A run writes a dated row, and a second run on the same bars adds nothing. A test fails if a later bar
+changes an earlier row. The figures above come back out of the first rows.
+
 # Brought by the port: FRM-Claude `feat/multi-scoring-attention-map-wq7f42` handover (2026-10-04)
 
 Their notes, unedited. Where a line disagrees with the sections above, the sections above are later.
