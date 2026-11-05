@@ -59,7 +59,8 @@ def whitener(X):
 
     Symmetric rather than Cholesky so that whitened coordinates stay close to the assets, which is
     what lets a direction be compared across windows, and no ordering of the assets matters."""
-    lam, V = np.linalg.eigh(np.cov(np.asarray(X, dtype=float), rowvar=False))
+    # one asset gives a 0-d covariance, which is still a 1 x 1 matrix
+    lam, V = np.linalg.eigh(np.atleast_2d(np.cov(np.asarray(X, dtype=float), rowvar=False)))
     lam = np.maximum(lam, 1e-12)
     return (V / np.sqrt(lam)) @ V.T, (V * np.sqrt(lam)) @ V.T
 
@@ -341,8 +342,8 @@ def fit_methods(Z, gamma=0.75, **kw):
     Gaussian would be showing fat tails, not cross-asset structure."""
     Z = np.asarray(Z, dtype=float)
     stdev = Z.std(axis=0, ddof=1)
-    C = np.corrcoef(Z, rowvar=False)
-    covs = {'sample': np.cov(Z, rowvar=False),
+    C = np.atleast_2d(np.corrcoef(Z, rowvar=False))
+    covs = {'sample': np.atleast_2d(np.cov(Z, rowvar=False)),
             'spectral': correlation_to_cov(be.spectral_correlation(C, gamma), stdev),
             'mp': correlation_to_cov(be.mp_filter(C, len(Z))[0], stdev)}
     x = whiten(Z)

@@ -2586,6 +2586,23 @@ running tensor totals, so windows can be re-cut later.
 **Done means.** A run writes a dated row, and a second run on the same bars adds nothing. A test fails if a later bar
 changes an earlier row. The figures above come back out of the first rows.
 
+### 18.1 Shadow VaR stage  🟡 BUILT, NOT YET RECORDING (2026-11-05)
+
+The user's choice, "the safe equivalent": the tensor methods stay off the trade path and earn a place by forward record.
+`analysis/shadow_var.py` and `scripts/var_shadow.py` forecast a runner's book one day ahead under every method in
+`bsm_eigentensor.fit_methods`, beside the live gate's per-name figure summed, and write `SHADOW_VAR` rows to the shared
+`var-shadow` stream. Nothing on the order path imports it; tests check that by import and by source.
+
+* Run by hand after the runner's cache refreshes: `python scripts/var_shadow.py record --stream qt --stream kraken`, then
+  `python scripts/var_shadow.py score`. Nothing schedules it ("Data-first sequencing").
+* Book from the stream's `EXECUTION_REPORTED` rows on or before `as_of`; closes from the runners' cache, never fetched.
+* A row is written only when there is a forecast, and counts only if written on a UTC day before its outcome bar.
+* Window is the longest shared history up to 504 bars, never under 252, so it differs from the backtest's 504.
+
+**Why nothing is recording yet (dry run, 2026-11-05).** `qt`'s fills are dated 11-03 and its cache ends 11-02, so the
+book was empty on the last bar it could forecast from. `kraken`'s four names share 272 returns against 312 needed, about
+40 more days. The gate's own figure needs 500 returns a name, so it reads as unavailable until then.
+
 # Brought by the port: FRM-Claude `feat/multi-scoring-attention-map-wq7f42` handover (2026-10-04)
 
 Their notes, unedited. Where a line disagrees with the sections above, the sections above are later.

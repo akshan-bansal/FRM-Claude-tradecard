@@ -169,8 +169,8 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
 ## Audit trail (docs/compliance/AUDIT_SCOPE.md)
 
 - Every runner writes the hash-chained ledger under `state/ledger/<date>.<stream>.jsonl`, one stream
-  per process (`qt`, `qt-paper`, `qt-live`, `autonomous`, `kraken`, `ib`; `manual`, `control`, `recon`
-  and `thesis` are shared and locked). Live and autonomous are strict: a failed ledger write stops the order.
+  per process (`qt`, `qt-paper`, `qt-live`, `autonomous`, `kraken`, `ib`; `manual`, `control`, `recon`,
+  `thesis` and `var-shadow` are shared and locked). Live and autonomous are strict: a failed ledger write stops the order.
 - Never edit or delete a ledger row. A correction is a new `CORRECTION` row. Never "repair" a chain.
 - `OrderIntent.intent_id` is the one identity from signal to execution; the approval stores reuse it.
 - New order-path behaviour gets a ledger event, added to `LedgerEvent` in `audit/ledger.py` first.
