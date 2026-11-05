@@ -85,6 +85,7 @@ jobs:
             tests/test_retrieval.py \
             tests/test_thesis_signal.py \
             tests/test_walk_forward_warmup.py \
+            tests/test_eigentensor.py \
             tests/test_l2_recorder.py \
             tests/test_asset_class_integrity.py \
             tests/test_venue_calendar.py \
