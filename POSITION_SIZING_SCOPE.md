@@ -23,6 +23,13 @@ probability, as an entry filter and as an exit, thresholds chosen from closed tr
 IBKR `zscore_ou` composite filter (p = 0.001, but a lower total and 36 trades) and an IBKR `momentum_breakout` Greek exit
 (+0.80% a trade, 8 of 9 symbols, p = 0.11, 34 trades). Neither is a basis for a live rule.
 
+**Walk-forward validation, 2026-11-06** (`scripts/walk_forward_evidence.py`, parameters re-chosen on every fold):
+the pairing claim is **not validated**. Within symbol, IBKR gave +0.089 (p = 0.065, and -0.038 in the earlier half) on
+5 symbols; Kraken gave -0.056 (p = 0.82). Within one strategy on one symbol it stayed negative on both. One effect
+survived, outside the pre-set test: IBKR within-quarter, +0.171 (p = 0.002). It compares assets with each other, so it
+may be asset trend persistence rather than strategy choice. The `momentum_breakout` Greek exit had too few
+out-of-sample trades, and `zscore_ou` has no parameter grid. Nothing here supports a live sizing change.
+
 **The idea:** size a position by what the algorithm's own record says this signal is likely to do next, net of
 costs and over its usual holding period. Today a size comes from how volatile the name has been, and when the
 budget runs short every position is cut by the same fraction of its notional.

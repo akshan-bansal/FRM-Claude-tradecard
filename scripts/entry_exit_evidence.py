@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import statistics
 import sys
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pandas as pd
@@ -30,7 +31,7 @@ from trading_live_claude.analysis.entry_exit import (  # noqa: E402
 )
 from trading_live_claude.analysis.forward_read import net_return  # noqa: E402
 from trading_live_claude.analysis.strategy_calibration import greek_probability, prior_vol  # noqa: E402
-from trading_live_claude.backtest.engine import BacktestEngine  # noqa: E402
+from trading_live_claude.backtest.engine import BacktestEngine, Trade  # noqa: E402
 from trading_live_claude.risk.spectral_var import load_engine  # noqa: E402
 from trading_live_claude.strategies.base import StrategyContext  # noqa: E402
 
@@ -53,8 +54,14 @@ def _greek_exit_path(close: pd.Series, start: int, end: int, hold: float, period
     return tuple(out)
 
 
-def collect(bars: dict[str, pd.DataFrame], periods: float, per_side_bps: float) -> tuple[list[PathTrade], int]:
-    engine = BacktestEngine()
+def pinned_trades(name: str, symbol: str, df: pd.DataFrame) -> list[Trade]:
+    """The strategy's trades over the whole sample at its pinned calibrated parameters."""
+    return BacktestEngine().run(calibrate_for(name, symbol), df, symbol).trades
+
+
+def collect(bars: dict[str, pd.DataFrame], periods: float, per_side_bps: float, *,
+            trades_for: Callable[[str, str, pd.DataFrame], list[Trade]] = pinned_trades,
+            strategies: Sequence[str] = STRATEGIES) -> tuple[list[PathTrade], int]:
     cost = 2.0 * per_side_bps / 10_000.0
     rows: list[PathTrade] = []
     shorts = 0
@@ -75,9 +82,9 @@ def collect(bars: dict[str, pd.DataFrame], periods: float, per_side_bps: float) 
         exit_agree = pd.concat(exits, axis=1).mean(axis=1)
         at_bar = {pd.Timestamp(t): i for i, t in enumerate(df["time"])}
         close = df["close"]
-        for name in STRATEGIES:
+        for name in strategies:
             try:
-                trades = engine.run(calibrate_for(name, symbol), df, symbol).trades
+                trades = trades_for(name, symbol, df)
             except Exception as e:
                 print(f"[entry-exit] {symbol} {name}: {type(e).__name__}", flush=True)
                 continue

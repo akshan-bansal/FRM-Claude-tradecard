@@ -63,3 +63,19 @@ def test_noise_shows_no_skill_and_real_signal_does() -> None:
     assert noise is not None and real is not None
     assert noise.p_value > 0.05 and real.p_value < 0.01 and real.bucket_means[-1] > real.bucket_means[0]
     assert skill(_reads(edge[:10], edge[:10])) is None
+
+
+def test_grouped_skill_ignores_differences_between_groups() -> None:
+    from trading_live_claude.analysis.forward_read import Read, grouped_skill
+    rng = np.random.default_rng(4)
+    reads = []
+    for g, level in enumerate((-0.05, 0.0, 0.05)):          # the read tracks each group's level only
+        for i in range(60):
+            reads.append(Read(_trade(i * 3 + g, level + float(rng.normal(0, 0.02)), symbol=f"S{g}"),
+                              level + float(rng.normal(0, 1e-6)), 5, 50))
+    pooled = skill(reads, n_rotations=200)
+    within = grouped_skill(reads, lambda r: r.trade.symbol, n_rotations=200)
+    assert pooled is not None and within is not None
+    assert pooled.rank_ic > 0.5 and within.p_value > 0.05
+    real = [Read(r.trade, r.trade.net_return + float(rng.normal(0, 0.005)), 5, 50) for r in reads]
+    assert grouped_skill(real, lambda r: r.trade.symbol, n_rotations=200).p_value < 0.01  # type: ignore[union-attr]

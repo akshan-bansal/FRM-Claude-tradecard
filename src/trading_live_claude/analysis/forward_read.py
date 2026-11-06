@@ -9,7 +9,7 @@ Research only. Nothing on the trading path imports it, and a read is never a str
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -80,3 +80,37 @@ def skill(reads: Sequence[Read], *, buckets: int = 5, n_rotations: int = 2000, s
     p = float((1 + np.sum(null >= observed)) / (n_rotations + 1))
     groups = np.array_split(np.argsort(edge, kind="stable"), buckets)
     return Skill(len(edge), observed, p, tuple(float(realized[g].mean()) for g in groups))
+
+
+@dataclass(frozen=True)
+class GroupedSkill:
+    groups: int
+    n: int
+    rank_ic: float       # trade-weighted mean of each group's Spearman
+    p_value: float       # one-sided, reads rotated through time inside each group
+
+
+def grouped_skill(reads: Sequence[Read], key: Callable[[Read], Hashable], *, min_group: int = 8,
+                  n_rotations: int = 1000, seed: int = 7) -> GroupedSkill | None:
+    """Does the read rank trades *within* a group? Differences between groups cannot count, by construction."""
+    groups: dict[Hashable, list[Read]] = {}
+    for r in reads:
+        groups.setdefault(key(r), []).append(r)
+    kept = []
+    for rows in groups.values():
+        rows = sorted(rows, key=lambda r: r.trade.entry)
+        edge = np.array([r.edge for r in rows])
+        if len(rows) >= min_group and np.ptp(edge) > 0:
+            kept.append((edge, np.array([r.trade.net_return for r in rows])))
+    if not kept:
+        return None
+    weights = np.array([len(e) for e, _ in kept], float)
+
+    def stat(edges: Sequence[np.ndarray]) -> float:
+        return float(np.average([spearmanr(e, y).statistic for e, (_, y) in zip(edges, kept, strict=True)], weights=weights))
+
+    observed = stat([e for e, _ in kept])
+    rng = np.random.default_rng(seed)
+    null = [stat([np.roll(e, int(rng.integers(1, len(e)))) for e, _ in kept]) for _ in range(n_rotations)]
+    p = float((1 + np.sum(np.array(null) >= observed)) / (n_rotations + 1))
+    return GroupedSkill(len(kept), int(weights.sum()), observed, p)
