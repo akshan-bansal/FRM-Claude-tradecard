@@ -12,6 +12,10 @@ time instead of ad-hoc:
    ONLY out-of-sample. ``robust`` requires WFE >= 0.5 AND positive OOS score AND >= 10 OOS trades;
    everything else is ``watch``. This is the only stage whose numbers are trustworthy.
 
+``--order pattern-first`` reverses stages 2 and 3 for comparison: on each walk-forward fold a composite
+pattern is found on the training window, then confirmed out-of-sample (``analysis/pattern_first.py``).
+It has no full-history panel, so every screened name is walked forward and ``--wf-top`` does not apply.
+
 Run:  python -m uv run python scripts/sweep_universe.py --min 1 --max 45
 """
 from __future__ import annotations
@@ -25,6 +29,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from trading_live_claude.analysis.pattern_first import pattern_walk_forward
 from trading_live_claude.analysis.universe import HELD_ASSETS, min_oos_trades, wf_protocol
 from trading_live_claude.backtest import BacktestEngine
 from trading_live_claude.backtest.costs import CostModel
@@ -218,6 +223,9 @@ def main() -> None:
                     action=argparse.BooleanOptionalAction,
                     help="Force currently-held names (HELD_ASSETS) into the panel and walk-forward "
                          "stages regardless of price / liquidity filters. Default ON.")
+    ap.add_argument("--order", choices=("stats-first", "pattern-first"), default="stats-first",
+                    help="stats-first: in-sample panel, then walk-forward (the default). pattern-first: on "
+                         "each fold, find a composite pattern on the training window and confirm it on the next.")
     args = ap.parse_args()
 
     print(f"[1/3] loading cache (>= {args.min_bars} bars)...", flush=True)
@@ -255,6 +263,10 @@ def main() -> None:
             print(f"      carry-held: {sym} @ ${px:.2f} added to candidates", flush=True)
         if carried:
             cand = pd.concat([cand, pd.DataFrame(carried)], ignore_index=True)
+
+    if args.order == "pattern-first":
+        pattern_first(frames, cand, args.tag)
+        return
 
     print(f"[2/3] in-sample panel over {len(cand)} names...", flush=True)
     rows = []
@@ -313,6 +325,35 @@ def main() -> None:
     print(wf[["sym", "held", "price", "strategy", "oos_score", "wfe", "oos_trades", "tier"]]
           .to_string(index=False, float_format=lambda v: f"{v:.2f}"))
     print(f"\nreport -> {wf_path}")
+
+
+def pattern_first(frames: dict[str, pd.DataFrame], cand: pd.DataFrame, tag: str) -> None:
+    """Stages 2 and 3 reversed, inside each fold. Same tier rule as the default order."""
+    print(f"[2/2] pattern-first walk-forward on {len(cand)} names...", flush=True)
+    rows = []
+    for _, r in cand.iterrows():
+        s = str(r["sym"])
+        cls = classify_symbol(s.replace("_TO", ".TO").replace("_UN_", ".UN."))
+        protocol = wf_protocol(cls)
+        df = frames[s]
+        eng = BacktestEngine(cost_model=CostModel.from_price(float(df["close"].iloc[-1]), is_etf=is_etf_like(s)))
+        w = pattern_walk_forward(df, s, eng, train_bars=protocol.train_bars, test_bars=protocol.test_bars,
+                                 step_bars=protocol.step_bars)
+        if w is None:
+            print(f"      {s}: no pattern on any fold", flush=True)
+            continue
+        min_trades = min_oos_trades(cls)
+        tier = "robust" if (w["wfe"] >= 0.5 and w["oos_score"] > 0 and w["oos_trades"] >= min_trades) else "watch"
+        rows.append({"sym": s, "price": r["price"], **w, "asset_class": cls, "min_trades": min_trades,
+                     "tier": tier, "held": s in HELD_ASSETS or s.replace("_", ".") in HELD_ASSETS})
+        print(f"      {s}: OOS {w['oos_score']:.2f} WFE {w['wfe']:.2f} trades {w['oos_trades']} "
+              f"win {w['oos_win_rate']:.0%} stable {w['pattern_stability']:.0%} -> {tier}", flush=True)
+    out = pd.DataFrame(rows)
+    path = f"reports/sweep_{tag}_patternfirst.csv"
+    out.to_csv(path, index=False)
+    if not out.empty:
+        print(f"\nrobust: {(out.tier == 'robust').sum()}   watch: {(out.tier == 'watch').sum()}")
+    print(f"report -> {path}")
 
 
 if __name__ == "__main__":
