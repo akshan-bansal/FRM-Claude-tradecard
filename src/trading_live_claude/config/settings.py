@@ -180,6 +180,9 @@ class Settings(BaseSettings):
     spectral_var_cap: float | None = Field(default=None, gt=0.0, le=1.0)  # None = gate off
     spectral_var_level: float = Field(default=0.99, gt=0.5, lt=1.0)
     spectral_var_horizon: int = Field(default=1, ge=1, le=60)
+    # Gap risk (risk/gap_risk.py): size entries for the close-to-open jump a polled stop cannot catch.
+    gap_risk_level: float | None = Field(default=0.99, gt=0.5, lt=1.0)   # None = gate off
+    gap_risk_min_gaps: int = Field(default=250, ge=20)
     hedge_symbol: str = ""                   # UUP to run the dollar-hedge overlay
     # Set this to the money you plan to trade. Whole-unit rounding, the minimum ticket and fees all scale
     # with it, so a rehearsal at another size does not translate.
@@ -333,6 +336,8 @@ _TRADING_KNOB_FIELDS: tuple[str, ...] = (
     "spectral_var_cap",
     "spectral_var_level",
     "spectral_var_horizon",
+    "gap_risk_level",
+    "gap_risk_min_gaps",
     "hedge_symbol",
     "paper_starting_equity",
     "paper_costs",

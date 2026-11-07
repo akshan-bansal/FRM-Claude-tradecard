@@ -25,6 +25,10 @@ from ..brokers.models import OrderAction
 from ..execution.daily_budget import DailyBudgetState
 from ..execution.router import OrderIntent, Router
 from ..execution.venue_costs import VenueCostModel
+from ..risk.gap_risk import GapCheck
+from ..risk.gap_risk import short_reason as gap_short
+from ..risk.gap_risk import summary_text as gap_summary
+from ..risk.gap_risk import unavailable_reason as gap_unavailable
 from ..risk.heat import PortfolioHeat
 from ..risk.kill_switch import KillState
 from ..risk.quantity import QuantityRule
@@ -109,6 +113,26 @@ class _Spectral:
         return SpectralCheck(None, float(o["max_shares"]), summary, o)
 
 
+class _Gap:
+    def __init__(self, observed: Mapping[str, Any], thr: Mapping[str, Any]) -> None:
+        self.observed, self.thr = dict(observed), dict(thr)
+
+    def thresholds(self) -> dict[str, Any]:
+        return self.thr
+
+    def check(self, symbol: str, *, shares: float, entry: float, equity: float) -> GapCheck:
+        o, t = self.observed, self.thr
+        if "exempt" in o:
+            return GapCheck(None, None, "", o)
+        if "error" in o:
+            return GapCheck(gap_unavailable(symbol, str(o["error"])), None, "", o)
+        if "max_shares" not in o:
+            return GapCheck(gap_short(int(o.get("n_gaps", 0)), symbol, int(t["min_gaps"])), None, "", o)
+        summary = gap_summary(float(t["level"]), float(o["loss_fraction"]), float(o["gap_usd"]),
+                              float(o["budget_usd"]))
+        return GapCheck(None, float(o["max_shares"]), summary, o)
+
+
 def gate_version_now(thresholds: Mapping[str, Any]) -> str:
     return content_hash({"gate_source": inspect.getsource(Router._gate),
                          "thresholds": dict(thresholds)})
@@ -157,6 +181,8 @@ def replay_row(row: Mapping[str, Any]) -> dict[str, Any]:
     if thr.get("spectral_var") and "spectral_var" in observed:
         router.spectral_gate = _Spectral(observed["spectral_var"], thr["spectral_var"],  # type: ignore[assignment]
                                          str(p["symbol"]))
+    if thr.get("gap_risk") and "gap_risk" in observed:
+        router.gap_gate = _Gap(observed["gap_risk"], thr["gap_risk"])  # type: ignore[assignment]
     intent = OrderIntent(symbol=str(p["symbol"]), action=OrderAction(p["action"]),
                          shares=float(p["requested_shares"]), entry=float(p["entry"]),
                          stop=float(p["stop"]),

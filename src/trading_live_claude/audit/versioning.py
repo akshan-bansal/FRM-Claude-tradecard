@@ -126,6 +126,8 @@ def gate_thresholds(router: object) -> dict[str, Any]:
     out["basket_gate"] = getattr(basket, "venue", None) if basket is not None else None
     spectral = getattr(router, "spectral_gate", None)
     out["spectral_var"] = spectral.thresholds() if spectral is not None else None
+    gap = getattr(router, "gap_gate", None)
+    out["gap_risk"] = gap.thresholds() if gap is not None else None
     return out
 
 

@@ -44,6 +44,7 @@ from .journal import OrderJournal
 
 if TYPE_CHECKING:
     from ..audit.ledger import Ledger
+    from ..risk.gap_risk import GapRiskGate
     from ..risk.spectral_var import SpectralVarGate
 
 RouterMode = Literal["paper", "dry-run", "live", "autonomous"]
@@ -250,6 +251,10 @@ class Router:
         # default. When set it runs after the size caps on ENTRIES only, and can only trim an
         # intent or reject it; it never enlarges one and never touches an exit.
         self.spectral_gate: SpectralVarGate | None = None
+        # Gap-risk gate (risk/gap_risk.py). Sizes an entry for the jump from one session's close to
+        # the next open, which a polled stop cannot catch, and counts that loss in heat. Entries
+        # only; trims or rejects, never enlarges. None = off; sessions attach it from trading.yaml.
+        self.gap_gate: GapRiskGate | None = None
         # Audit ledger (audit/ledger.py). Dual-written beside the journals; None = no ledger, and
         # the router behaves exactly as it did before the ledger existed.
         self.ledger = ledger
@@ -699,6 +704,37 @@ class Router:
                         reasons.append(f"after spectral VaR trim: notional ${notional:,.2f} below "
                                        f"min ${self.min_ticket_usd}")
 
+        # 11b. Gap risk. A stop is checked only while the venue is polled, so the open after a close
+        # can fill it well past the stop. Trim so that loss fits the per-trade budget, then count it
+        # in heat where it exceeds the stop's risk. Entries only, after the size caps and VaR.
+        if (self.gap_gate is not None and intent.action == OrderAction.BUY and not reasons
+                and not reduces and equity > 0 and intent.shares > 0):
+            gap = self.gap_gate.check(intent.symbol, shares=intent.shares, entry=intent.entry, equity=equity)
+            observed["gap_risk"] = gap.observed
+            if gap.reason:
+                reasons.append(gap.reason)
+            elif gap.max_shares is not None:
+                if gap.max_shares < intent.shares:
+                    fit = self.quantity_rule_for(intent.symbol).floor(gap.max_shares, intent.entry)
+                    if fit <= 0:
+                        reasons.append(f"gap risk: {gap.summary} admits no tradeable size")
+                    else:
+                        trims.append({"symbol": intent.symbol, "cap": "gap_risk", "from_shares": intent.shares,
+                                      "to_shares": fit, "summary": gap.summary})
+                        intent.shares = fit
+                        notional = intent.shares * intent.entry
+                        if notional < self.min_ticket_usd:
+                            reasons.append(f"after gap-risk trim: notional ${notional:,.2f} below "
+                                           f"min ${self.min_ticket_usd}")
+                if not reasons:
+                    gap_usd = gap.gap_usd(intent.shares, intent.entry)
+                    heat = self.heat.snapshot(equity=equity,
+                                              open_risk_dollars=existing_risk + max(intent.risk_dollars, gap_usd))
+                    observed["gap_heat_pct"] = heat.heat_pct
+                    if heat.breached:
+                        reasons.append(f"portfolio heat with gap risk {heat.heat_pct:.2%} > cap "
+                                       f"{self.heat.cap_pct:.2%}")
+
         # 12. Cost-aware size floor. Last, because a trim can turn a viable ticket into one that cannot
         # pay for itself, and the floor must judge what would actually be sent.
         if (self.max_round_trip_cost_ratio > 0.0 and intent.action == OrderAction.BUY
@@ -1013,7 +1049,7 @@ class Router:
         Recomputed when an opt-in gate is attached after construction, since that changes it.
         """
         from ..audit.versioning import risk_check_version
-        key = (id(self.basket_gate), id(self.spectral_gate))
+        key = (id(self.basket_gate), id(self.spectral_gate), id(self.gap_gate))
         if self._risk_check_version is None or self._rcv_key != key:
             self._risk_check_version = risk_check_version(self)
             self._rcv_key = key
