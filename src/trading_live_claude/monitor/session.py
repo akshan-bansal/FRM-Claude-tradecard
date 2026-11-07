@@ -28,9 +28,12 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+import pandas as pd
+
 from ..analysis.params import PARAMS_MODES, build_strategy, running_params
 from ..analysis.symbol_validation import preflight
 from ..analysis.universe import CRYPTO_SLEEVE, validated_for
+from ..analysis.venue_calendar import venue_of
 from ..audit.ledger import Ledger
 from ..audit.versioning import session_provenance
 from ..brokers.base import Broker, BrokerError
@@ -528,6 +531,60 @@ def _print_bias(bias: Mapping[str, float], emit: Emit) -> None:
         emit(f"    {sym:>12}  x{bias[sym]:.2f}  ({label})")
 
 
+# Fewer shared trading days than this cannot carry a correlation. The IB bias already skips a name with
+# fewer bars than this.
+MIN_SHARED_DAYS = 60
+
+
+def _dated_returns(bars: pd.DataFrame, symbol: str) -> pd.Series:
+    """Daily returns keyed by the date each session traded, so the allocator compares the same day.
+
+    The allocator joins names on their index. Keyed by row number, it compared bars that only shared a
+    position, days apart once two calendars' holidays differ. A raw timestamp is no key either: feeds
+    stamp a daily bar at the session's open in UTC (14:30Z or 13:30Z either side of DST, and the prior
+    UTC evening for Sydney), at local midnight, or as a bare date read as midnight UTC. The venue's own
+    clock gives the trading date for all of them except the bare date, which already is one: read in
+    New York, midnight UTC is the evening before.
+    """
+    stamps = pd.DatetimeIndex(pd.to_datetime(bars["time"], utc=True))
+    utc = stamps.tz_localize(None)
+    local = stamps.tz_convert(venue_of(symbol).tz).tz_localize(None).normalize()
+    days = local.where(utc != utc.normalize(), utc)
+    closes = pd.Series(bars["close"].to_numpy(dtype=float), index=days).sort_index(kind="stable")
+    closes = closes[~closes.index.duplicated(keep="last")]
+    return closes.pct_change().dropna()
+
+
+def _paired_by_date(returns: Mapping[str, pd.Series], scores: Mapping[str, float], *,
+                    emit: Emit = _quiet) -> dict[str, pd.Series]:
+    """The returns to allocate over, once the scored names share at least ``MIN_SHARED_DAYS`` dates.
+
+    The allocator compares names only on the dates they all traded, so one short or disjoint history
+    cuts everyone's window to what it shares. While that falls short, the name with the fewest days is
+    set aside, and a name set aside stays neutral. When fewer than two scored names are left there is
+    nothing to compare, and the result is empty: the bias is off, not floored.
+    """
+    kept = dict(returns)
+    scored = [s for s in kept if scores.get(s, 0.0) > 0.0]
+    if len(scored) < 2:
+        return kept
+    while True:
+        shared = kept[scored[0]].index
+        for s in scored[1:]:
+            shared = shared.intersection(kept[s].index)
+        if len(shared) >= MIN_SHARED_DAYS:
+            return kept
+        short = min(scored, key=lambda s: (len(kept[s]), s))
+        log.warning("session.allocator.set_aside", symbol=short, shared_days=len(shared), needed=MIN_SHARED_DAYS)
+        emit(f"allocator: {short} leaves {len(shared)} shared trading days, fewer than {MIN_SHARED_DAYS}; "
+             f"it stays neutral")
+        del kept[short]
+        scored.remove(short)
+        if len(scored) < 2:
+            emit("allocator: no two names share enough trading days; bias OFF")
+            return {}
+
+
 def allocator_weight_bias(market: Any, symbols: Sequence[str], overlay_for: Any = None, *,
                           emit: Emit = _quiet) -> Any:
     """Correlation-aware per-symbol size bias for the equity pool, or ``None`` when it cannot be computed.
@@ -547,9 +604,10 @@ def allocator_weight_bias(market: Any, symbols: Sequence[str], overlay_for: Any 
             try:
                 df = market.recent(s, bars=252, interval="1d")
                 if not df.empty and "close" in df.columns:
-                    returns[s] = df["close"].pct_change().dropna()
+                    returns[s] = _dated_returns(df, s)
             except Exception as e:
                 log.warning("session.allocator.fetch_failed", symbol=s, error=str(e))
+        returns = _paired_by_date(returns, scores, emit=emit)
         if not returns:
             return None
         res = PortfolioAllocator(max_weight=0.20, max_sleeve_weight=1.0, min_score=0.0).allocate(
@@ -559,7 +617,10 @@ def allocator_weight_bias(market: Any, symbols: Sequence[str], overlay_for: Any 
         _print_bias(bias, emit)
         if overlay_for is not None:
             emit("live overlay applied to the allocation through apply_overlay.")
-            return OverlaidBias(res, eqw, symbols, overlay_for)
+            # A scored name with no returns here (fetch failed, or set aside) stays neutral, as it does
+            # without the overlay, instead of reading as a zero weight.
+            unpaired = set(scores) - set(returns)
+            return OverlaidBias(res, eqw, [s for s in symbols if s not in unpaired], overlay_for)
         return lambda sym, _m=bias: _m.get(sym, 1.0)
     except Exception as e:
         emit(f"allocator bias OFF: {e}")
@@ -578,18 +639,20 @@ def _ib_weight_bias(market: Any, symbols: Sequence[str], overlay_for: Any, *, em
             df = market.history(sym, years=2.0, interval="1d")
             if df is None or len(df) < 60:
                 continue
-            rets = df["close"].pct_change().dropna()
+            rets = _dated_returns(df, sym)
             returns[sym] = rets
             vol = float(rets.std(ddof=0) * np.sqrt(252.0)) or 1e-9
             scores[sym] = max(0.0, float(rets.mean() * 252.0) / vol)
         except Exception as e:
             emit(f"allocator: {sym} fetch failed ({e}); bias defaults to 1.0")
+    returns = _paired_by_date(returns, scores, emit=emit)
     bias = {s: 1.0 for s in symbols}
     if returns:
         result = PortfolioAllocator(max_weight=0.30, max_sleeve_weight=1.0, min_score=0.0).allocate(
             returns, scores, regime_scalar=1.0)
         if result.weights:
-            bias.update({s: result.weights.get(s, 0.0) * len(returns) for s in symbols})
+            # Only the names allocated over: one that failed, was too short or was set aside keeps 1.0.
+            bias.update({s: result.weights.get(s, 0.0) * len(returns) for s in returns})
     _print_bias(bias, emit)
 
     def _for(symbol: str) -> float:

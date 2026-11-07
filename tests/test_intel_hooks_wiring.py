@@ -57,8 +57,10 @@ def test_no_key_leaves_the_overlay_off_and_the_runner_running() -> None:
 
 class _CloseMarket:
     def recent(self, symbol: str, bars: int, interval: str = "1d") -> pd.DataFrame:
+        # Dated like MarketData's bars: the allocator pairs names by trading day, not by row.
         drift = {"AAA": 0.001, "BBB": 0.002}[symbol]
-        return pd.DataFrame({"close": [100.0 * (1 + drift * i + 0.01 * ((i * 7) % 5 - 2)) for i in range(bars)]})
+        return pd.DataFrame({"time": pd.bdate_range(end="2026-11-02", periods=bars, tz="UTC"),
+                             "close": [100.0 * (1 + drift * i + 0.01 * ((i * 7) % 5 - 2)) for i in range(bars)]})
 
 
 def test_a_symbol_outside_the_validated_list_stays_neutral(monkeypatch: pytest.MonkeyPatch) -> None:

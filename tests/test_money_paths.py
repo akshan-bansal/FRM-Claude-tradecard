@@ -505,7 +505,8 @@ class _Market:
         if self.frame is not None:
             return self.frame
         rng = pd.Series([100.0 + i * (1 + hash(symbol) % 3) for i in range(260)])
-        return pd.DataFrame({"close": rng})
+        # Dated like MarketData's bars: the allocator pairs names by trading day, not by row.
+        return pd.DataFrame({"time": pd.bdate_range(end="2026-11-02", periods=260, tz="UTC"), "close": rng})
 
     def recent(self, symbol: str, **_k: Any) -> pd.DataFrame:
         return self._df(symbol)
