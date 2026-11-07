@@ -2052,6 +2052,16 @@ model's own simulated band (FHS-GJR), and the data, across all eight underlyings
 
    Candidates: log-OU for VXN and VXD, a 3/2-type model for VIX and OVX. Positivity comes from
    the dynamics, so the floor goes away.
+
+   **Tested 2026-11-06, research only** (`BSM_Spectral/bsm_spacetime.py`,
+   `reports/spacetime_greeks_2026-11-06/`). Log-OU has the lowest AIC on all four indices,
+   VIX and OVX included, and the 3/2 fit fails on VXD. Walk-forward on a 63-day digital's 5-day
+   model P&L, log-OU beats the random walk on pinball loss by 2.0–5.2% on every index, each at
+   Holm-adjusted p < 0.0001. All dynamics are too wide (breaches 0–0.8% against 1%), so the
+   ranking holds but the calibration does not. Next: swap the random walk in `var_snapshot`
+   for log-OU, which moves the gate's version hash, and confirm on held-out windows as 12.1
+   does. One timescale explains only part of the variance-ratio drop (model 0.62–0.88 against
+   data 0.36–0.55), which points at item 3.
 2. **Clock.**
    - Crypto weekend days carry 0.54 (BTC, CI 0.44–0.63) and 0.66 (ETH) of a weekday's variance,
      but `year_frac` counts calendar days equally.
