@@ -61,6 +61,7 @@ LedgerEvent = Literal[
     "SESSION_PLAN",            # every setting the session runs on, and the fingerprint to compare by
     # signal -> gate
     "STRATEGY_SIGNAL", "SIGNAL_SUPPRESSED", "SIZED",
+    "SIZING_READ",             # the forward read and the size it would have given, in shadow: acts on nothing
     "THESIS_SIGNAL",           # what a thesis would have said, in shadow: stream `thesis`, acts on nothing
     "FORCED_EXIT",             # the monitor closing a position on Router.check_forced_exits
     "RISK_CHECK", "RISK_TRIMMED", "RISK_REJECTED",

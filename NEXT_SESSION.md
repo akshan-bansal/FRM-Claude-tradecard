@@ -4013,3 +4013,35 @@ telemetry; the shim is loopback-only with no scripted remote path.
 with strategy `MarketContext` adoption → UX and connectivity polish once the card is a physical object.
 
 Published brief: <https://claude.ai/code/artifact/9567c2ac-b2bd-4797-adf5-2edbce2a4d90>
+
+## Forward-read sizing — phase 4 built, shadow not yet on (2026-11-09)
+
+Scope and every result so far: `POSITION_SIZING_SCOPE.md`. Phase 3 on Kraken counts as a pass by the user's
+decision (5 of 6 checks; bootstrap p = 0.098 missed 0.05). Work is on `feat/news-sentiment-layer` in
+`.claude/worktrees/news-sentiment`, **all uncommitted**.
+
+**Done:**
+- Deep Kraken daily bars from Kraken's OHLCVT archive by byte range (16 MB, not 9.5 GB):
+  `scripts/fetch_kraken_ohlcvt_daily.py`, bars in `data/cache/kraken_ohlcvt/` (832 to 4,770 a pair, through
+  2026-11-08), `tests/test_kraken_ohlcvt.py`. `strategy_calibration.load_bars` reads them via `--bars-dir`.
+- Walk-forward on that history: pairing claim validated (`reports/walk_forward_deep/`).
+- Phase 3 A/B: `analysis/sizing_ab.py`, `scripts/sizing_ab.py`, `tests/test_sizing_ab.py`,
+  `reports/sizing_ab/` (trade cache `kraken_trades.pkl`).
+- Phase 4 so far: `SIZING_READ` added to `LedgerEvent`; `forward_read_shadow: ""` added to settings, the YAML key
+  list and `config/trading.example.yaml`; `forward_read.read_at` split out of `causal_reads` (same formula);
+  `sizing_ab.tilt_for` split out of `tilts`; `monitor/forward_read_shadow.py` (`ForwardReadShadow.load/read`);
+  `scripts/build_forward_read_table.py`, table written to `data/forward_read/kraken.parquet` (3,701 trades,
+  version `6e5f4474d10b202a`, load about 5 s).
+
+**Phase 4 built 2026-11-09** (shadow wired through `monitor/live_loop.py`, `SessionPlan`, `trading doctor`, the
+parity test and `docs/ENGINE_WIRING.md`; `tests/test_forward_read_shadow.py`; a two-poll Kraken paper check logged
+two `SIZING_READ` rows with matching intent ids). **Remaining:**
+1. Turn the shadow on for the Kraken paper sessions: `forward_read_shadow: data/forward_read/kraken.parquet` in
+   `config/trading.yaml`, then let reads mature.
+2. Decide how many matured reads before phase 5 (decision 2, proposed 100 across Kraken and IBKR), and write the
+   scorer that compares each `SIZING_READ` with its trade's realized return.
+3. IBKR table: needs deeper IBKR history first.
+4. Commit the worktree (`feat/news-sentiment-layer`) when the user asks.
+
+**Also open:** IBKR history stays shallow until the user runs `python scripts/ib_connector_login.py`; the IBKR
+scope wording (decision 3); the second A/B on the sleeve's own book was offered and not taken.

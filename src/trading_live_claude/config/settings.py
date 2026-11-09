@@ -168,6 +168,9 @@ class Settings(BaseSettings):
     parallel_sizing: bool = True             # each poll's entries sized jointly
     mute_alerts: str = ""                    # comma-separated symbols: still traded and journaled
     max_round_trip_cost_ratio: float = Field(default=0.0, ge=0.0)  # 0 = off
+    # Phase 4 of POSITION_SIZING_SCOPE.md: path to a forward-read trade table. Logs the read and the size it
+    # would have given beside every entry; the order keeps today's size. Empty = off.
+    forward_read_shadow: str = ""
     params: Literal["default", "wf", "calibrated"] = "default"     # where strategy parameters come from
     sizing_v2: bool = True                   # Kraken's own lot rules; refuses to start without them
     ib_futures_only: bool = False            # True narrows IB to futures. North American equities never go there
@@ -321,6 +324,7 @@ _TRADING_KNOB_FIELDS: tuple[str, ...] = (
     "parallel_sizing",
     "mute_alerts",
     "max_round_trip_cost_ratio",
+    "forward_read_shadow",
     "params",
     "sizing_v2",
     "ib_futures_only",

@@ -84,6 +84,7 @@ oversold_entry_only: ts_momentum
 parallel_sizing: true             # each poll's entries sized jointly
 mute_alerts: ""                   # comma-separated symbols: still traded and journaled
 max_round_trip_cost_ratio: 0      # 0 = off. Kraken's fee alone is ~52 bps round trip
+forward_read_shadow: ""          # forward-read table: logs the size a read would give, trades today's. "" = off
 params: default                   # default, wf or calibrated
 sizing_v2: true                   # Kraken's own lot rules; refuses to start without them
 ib_futures_only: false            # true narrows IB to futures. North American equities never go there

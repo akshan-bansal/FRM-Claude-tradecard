@@ -1,6 +1,6 @@
 """Validate the open findings on walk-forward trades: parameters re-chosen on each training fold, scored on the next.
 
-    python scripts/walk_forward_evidence.py --venue kraken
+    python scripts/walk_forward_evidence.py --venue kraken [--bars-dir data/cache/kraken_ohlcvt]
     python scripts/walk_forward_evidence.py --venue ibkr --bars-dir <folder of SYMBOL.parquet>
 
 Fixed before the run:

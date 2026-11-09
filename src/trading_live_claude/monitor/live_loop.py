@@ -149,8 +149,13 @@ class LiveMonitor:
         parallel_sizing: bool = False,
         mute_symbols: frozenset[str] | set[str] | None = None,
         weight_bias_range: tuple[float, float] = (0.1, 3.0),
+        forward_read_shadow: Any = None,
     ) -> None:
         self.weight_bias_range = weight_bias_range
+        # Phase 4 of POSITION_SIZING_SCOPE.md (opt-in): beside each entry, the forward read and the share count it
+        # would have asked for, journaled and ledgered as SIZING_READ. It never changes ``sized``.
+        self.forward_read_shadow = forward_read_shadow
+        self._shadow_reads: dict[str, dict[str, object]] = {}
         self._halt_noted = False
         # Warm-up cadence: poll faster for the first ``warmup_minutes`` after launch, then fall back
         # to ``interval_seconds`` without a restart (a restart would flatten the book). Used to
@@ -757,6 +762,7 @@ class LiveMonitor:
                     annual_vol=annual_vol, conviction=conviction,
                     qty_rule=qty_rule or WHOLE_UNITS,
                 )
+                shadow_read = self._forward_read(strat.name, symbol, annual_vol, sized)
                 # Cross-path tier 3: persistence-driven halt. Queries the intel graph via the
                 # injected ``persistence_for`` callable; blocks the router submit (but not the
                 # alert) when the symbol's overlay class has been exposed to a persistently-
@@ -818,6 +824,8 @@ class LiveMonitor:
                                    else qty_rule.why_zero(sized.raw_shares, price) if (qty_rule and sized.shares <= 0)
                                    else ""),
                     }
+                    if shadow_read is not None:
+                        journal_row["forward_read"] = shadow_read
                     if not (routable and self.parallel_sizing):
                         policy.journal(journal_row)
                 # Alert on the entry SIGNAL regardless of sizeability — the monitor is an
@@ -1168,9 +1176,16 @@ class LiveMonitor:
         """STRATEGY_SIGNAL for an entry that goes on to the router, SIGNAL_SUPPRESSED (with the
         reason) for one that does not. Without the second, an empty ledger would look the same as
         a broken one."""
+        shadow = self._shadow_reads.pop(symbol, None)
         if self.ledger is None:
             return
         bar_ts = self._bar_stamp(df)
+        if shadow is not None:
+            try:
+                self.ledger.append("SIZING_READ", {**shadow, "bar_ts": str(bar_ts), "suppressed": reason or None},
+                                   intent_id=intent_id, strategy_id=str(getattr(strat, "name", "")))
+            except Exception as e:                # a shadow row must never break a poll
+                log.warning("monitor.sizing_read_failed", symbol=symbol, error=str(e))
         payload = {"symbol": symbol, "price": price, "trigger": trigger, "atr": atr, "sizing": sizing,
                    "v4_entry": bool(v4),
                    "shares": float(getattr(sized, "shares", 0) or 0),
@@ -1183,6 +1198,22 @@ class LiveMonitor:
                                strategy_version=self._strategy_version_of(strat))
         except Exception as e:                    # never let the audit path break a poll
             log.warning("monitor.ledger_signal_failed", symbol=symbol, error=str(e))
+
+    def _forward_read(self, strategy: str, symbol: str, annual_vol: float | None,
+                      sized: object) -> dict[str, object] | None:
+        """The shadow read for this entry, kept for its ledger row. None when off or when the read fails."""
+        if self.forward_read_shadow is None:
+            return None
+        try:
+            read = cast("dict[str, object]", self.forward_read_shadow.read(
+                strategy, symbol, as_of=datetime.now(UTC), annual_vol=annual_vol,
+                raw_shares=float(getattr(sized, "raw_shares", 0.0) or 0.0)))
+        except Exception as e:                    # the shadow acts on nothing, so it may not stop an entry
+            log.warning("monitor.forward_read_failed", symbol=symbol, error=str(e))
+            return None
+        read["shares_today"] = float(getattr(sized, "shares", 0.0) or 0.0)
+        self._shadow_reads[symbol] = read
+        return read
 
     def _strategy_version_of(self, strat: object) -> str | None:
         from ..audit.versioning import strategy_version

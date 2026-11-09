@@ -28,6 +28,7 @@ from trading_live_claude.analysis.strategy_calibration import (  # noqa: E402
     prior_vol,
     score_input,
 )
+from trading_live_claude.analysis.universe import CRYPTO_SLEEVE  # noqa: E402
 from trading_live_claude.backtest.engine import BacktestEngine  # noqa: E402
 from trading_live_claude.data.kraken_ohlc import kraken_ohlc  # noqa: E402
 from trading_live_claude.intel.graph import load_edges  # noqa: E402
@@ -51,6 +52,18 @@ def load_bars(venue: str, bars_dir: Path | None) -> dict[str, pd.DataFrame]:
             df["time"] = pd.to_datetime(df["time"], utc=True)
         return out
     bars: dict[str, pd.DataFrame] = {}
+    if bars_dir is not None:       # deep daily bars from scripts/fetch_kraken_ohlcvt_daily.py
+        for pair in PAIRS:
+            path = bars_dir / f"{CRYPTO_SLEEVE[pair].pair}_daily.parquet"
+            if not path.exists():
+                print(f"[bars] {pair}: no {path.name}", flush=True)
+                continue
+            df = pd.read_parquet(path)
+            df["time"] = pd.to_datetime(df["time"], utc=True)
+            gap = df["time"].diff().dt.days > 3     # a thin early market: start after its last long gap
+            start = df.loc[gap, "time"].max() if gap.any() else df["time"].min()
+            bars[pair] = df[df["time"] >= start].reset_index(drop=True)
+        return bars
     for pair in PAIRS:
         bars[pair] = kraken_ohlc(pair.replace("/", ""), interval=1440)
         time.sleep(1.5)

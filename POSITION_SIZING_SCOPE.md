@@ -30,6 +30,37 @@ survived, outside the pre-set test: IBKR within-quarter, +0.171 (p = 0.002). It 
 may be asset trend persistence rather than strategy choice. The `momentum_breakout` Greek exit had too few
 out-of-sample trades, and `zscore_ou` has no parameter grid. Nothing here supports a live sizing change.
 
+**Walk-forward on deep Kraken history, 2026-11-08** (Kraken's OHLCVT archive through 2026-09-30 plus the REST tail,
+`scripts/fetch_kraken_ohlcvt_daily.py`; 832 to 4,770 daily bars a pair): the pairing claim is **validated on Kraken**,
+by the same pre-set test. 3,701 out-of-sample trades, 3,650 reads. Within symbol +0.173 (p = 0.001, the floor of
+1,000 rotations), +0.085 in the earlier half and +0.274 in the later. Within one strategy on one symbol it is
+-0.211, so the read chooses the pairing and must not time trades inside one. This is the same test rerun on more
+data, not a new variant, but it is the second Kraken run of it and is counted as such. IBKR stays unvalidated
+(+0.089, p = 0.065) until its history is deepened. Phase 3 (a backtest A/B of pairing-level weights) may start on
+Kraken; nothing changes a live size.
+
+**Phase 3 A/B, Kraken, 2026-11-08** (`scripts/sizing_ab.py`, rules fixed in its docstring before the run): **not
+passed**. On the same 3,701 trades, forward-read sizing beat volatility sizing on `sortino_over_dd` (0.71 against 0.49)
+and in both halves, with less exposure (0.73 against 0.80) and less turnover, but the month-block bootstrap gave
+p = 0.098 against a bar of 0.05. Both books are poor: drawdowns of -88% and -94%, about 37 to 40 times turnover a year
+and 16 to 18% a year lost to costs, because every grid strategy trades every pair at once. That is not the desk's book,
+so this says little about the sleeve as it trades. One variant run.
+
+**Phase 3: passed by the user's decision, 2026-11-08.** Forward-read sizing met 5 of the 6 pre-set checks: better
+`sortino_over_dd` over the whole period and in both halves, and no more exposure or turnover than volatility sizing.
+It missed the sixth, bootstrap p = 0.098 against 0.05. The user accepted the result as a pass, so phase 4 (shadow
+on paper) may start. The report in `reports/sizing_ab/` keeps the test's own verdict.
+
+**Phase 4 built, 2026-11-09:** shadow on paper. Set `forward_read_shadow` in `config/trading.yaml` (or
+`--forward-read-shadow`) to the table `scripts/build_forward_read_table.py` writes (`data/forward_read/kraken.parquet`:
+3,701 walk-forward trades, version `6e5f4474d10b202a`). Each sized entry then gets the read and the raw share count
+it would have asked for, in `state/sizing_decisions.jsonl` (`forward_read`) and a `SIZING_READ` ledger row with the
+entry's intent id. Orders keep today's size: a test pins that, and a failed read never stops an entry. The shadow size
+is today's raw size times the phase 3 tilt, before allocation and gates. A two-poll Kraken paper check logged both
+entries (XRP and XLM, `bollinger`); both reads were negative, so the shadow would have halved them. The knob is in
+`SessionPlan` and its fingerprint, so paper and money read it alike; the autonomous daemon is not wired to it.
+Phase 5 needs matured reads first (decision 2, proposed 100 across Kraken and IBKR) and the user's approval.
+
 **The idea:** size a position by what the algorithm's own record says this signal is likely to do next, net of
 costs and over its usual holding period. Today a size comes from how volatile the name has been, and when the
 budget runs short every position is cut by the same fraction of its notional.
@@ -163,6 +194,10 @@ Fixed before any result is seen:
 * A read may size above today's volatility-target size.
 * Kraken is the base run, without disturbing the crypto sessions: evidence reads public data only.
 * IBKR is the venue for North American equities, plus Australia, Hong Kong and Japan options, derivatives and futures.
+
+**Decided by the user, 2026-11-08:**
+
+* Phase 3 on Kraken counts as a pass, though its bootstrap p (0.098) missed the 0.05 bar. Phase 4 may start.
 
 **Still open:**
 

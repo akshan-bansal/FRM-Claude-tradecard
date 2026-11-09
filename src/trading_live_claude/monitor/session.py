@@ -138,6 +138,7 @@ class SessionOptions:
     oversold_entry: bool | None = None
     oversold_entry_only: str | None = None
     parallel_sizing: bool | None = None
+    forward_read_shadow: str | None = None
     mute_alerts: str | None = None
     max_cost_ratio: float | None = None
     max_positions: int | None = None
@@ -213,6 +214,7 @@ class SessionPlan:
     oversold_entry: bool
     oversold_entry_only: tuple[str, ...]
     parallel_sizing: bool
+    forward_read_shadow: str               # forward-read table path, logged in shadow; "" = off
     sizing_v2: bool
     mute_alerts: tuple[str, ...]
     require_card: bool
@@ -376,6 +378,7 @@ def plan_session(settings: Any, *, venue: str, mode: RouterMode, symbols: Sequen
         oversold_entry=bool(pick(o.oversold_entry, settings.oversold_entry)),
         oversold_entry_only=_names(pick(o.oversold_entry_only, settings.oversold_entry_only)),
         parallel_sizing=bool(pick(o.parallel_sizing, settings.parallel_sizing)),
+        forward_read_shadow=str(pick(o.forward_read_shadow, settings.forward_read_shadow) or ""),
         sizing_v2=bool(pick(o.sizing_v2, settings.sizing_v2)),
         mute_alerts=_names(pick(o.mute_alerts, settings.mute_alerts), upper=True),
         require_card=require_card,
@@ -837,12 +840,30 @@ def _sizing_policy(plan: SessionPlan, feed: Broker, router: Any, state_dir: Path
                         journal_path=state_dir / "sizing_decisions.jsonl", session_id=session_id)
 
 
+def _forward_read_shadow(plan: SessionPlan, emit: Emit) -> Any:
+    """The phase 4 shadow, or None. A table that will not load stops the session rather than run unlogged."""
+    if not plan.forward_read_shadow:
+        return None
+    from .forward_read_shadow import ForwardReadShadow
+    try:
+        shadow = ForwardReadShadow.load(plan.forward_read_shadow)
+    except (OSError, ValueError) as e:
+        raise SessionError(f"forward_read_shadow table {plan.forward_read_shadow!r} did not load: {e}. "
+                           "Fix the path or set it to \"\" to turn the shadow off.") from e
+    emit(f"forward-read table {shadow.table_version}: {len(shadow.trades)} trades, reference ratio "
+         f"{shadow.reference if shadow.reference is None else round(shadow.reference, 4)}.")
+    return shadow
+
+
 def _announce(plan: SessionPlan, session_id: str | None, state_dir: Path, emit: Emit) -> None:
     """Say which optional behaviour this session is running with."""
     emit(f"prices in {plan.account_currency}: every quote, position and gate figure is converted at the Bank of "
          "Canada's daily rate. A fill keeps its own currency.")
     emit(f"allocator weights: {'every ' + format(plan.allocator_refresh_seconds, 'g') + 's' if plan.allocator_refresh_seconds else 'once at startup'}.")
     emit(f"sizing: {'parallel (joint allocation per poll)' if plan.parallel_sizing else 'sequential'}.")
+    if plan.forward_read_shadow:
+        emit(f"forward-read shadow ON: {plan.forward_read_shadow}. Logs the read and the size it would give "
+             "(SIZING_READ); orders keep today's size.")
     if plan.profit_lock:
         emit(f"profit lock ON: arms at +1 ATR, giveback 3 -> 1 ATR by +4 ATR. Exempt: {', '.join(plan.profit_lock_exempt) or 'none'}.")
     if plan.candle_exit:
@@ -999,6 +1020,7 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
         oversold_entry=OversoldEntry() if plan.oversold_entry else None,
         oversold_entry_only=set(plan.oversold_entry_only),
         parallel_sizing=plan.parallel_sizing, mute_symbols=set(plan.mute_alerts),
+        forward_read_shadow=_forward_read_shadow(plan, emit),
         **monitor_policy(settings),
     )
     monitor_ref.append(monitor)
@@ -1085,6 +1107,8 @@ def add_session_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--warmup-minutes", dest="warmup_minutes", type=float, default=None)
     ap.add_argument("--parallel-sizing", dest="parallel_sizing", action=bool_flag, default=None,
                     help="Allocate each poll's entries jointly before routing any of them. The Router still gates each.")
+    ap.add_argument("--forward-read-shadow", dest="forward_read_shadow", default=None,
+                    help="Forward-read table to log beside each entry (SIZING_READ). Orders keep today's size.")
     ap.add_argument("--mute-alerts", dest="mute_alerts", default=None,
                     help="Comma-separated symbols whose alerts are muted (still traded and journaled).")
     ap.add_argument("--max-cost-ratio", dest="max_cost_ratio", type=float, default=None,
@@ -1114,6 +1138,7 @@ def options_from_args(args: argparse.Namespace, *, level: bool | None = None) ->
                           paper_equity=args.paper_equity, audit_ledger=args.audit_ledger,
                           flatten_on_exit=args.flatten_on_exit, warmup_interval=args.warmup_interval,
                           warmup_minutes=args.warmup_minutes, parallel_sizing=args.parallel_sizing,
+                          forward_read_shadow=args.forward_read_shadow,
                           mute_alerts=args.mute_alerts, max_cost_ratio=args.max_cost_ratio,
                           max_positions=args.max_positions, params=args.params, sizing_v2=args.sizing_v2,
                           account_currency=getattr(args, "account_currency", None),

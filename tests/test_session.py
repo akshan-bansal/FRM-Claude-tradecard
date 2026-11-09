@@ -84,7 +84,7 @@ def test_a_money_plan_differs_from_paper_only_where_it_must(venue: str) -> None:
     {"card_shim_host": "10.0.0.2"}, {"card_attach": True}, {"position_cap_mode": "static"},
     {"position_cap_ref_vol": 0.3}, {"stale_quote_frozen_s": 60.0}, {"on_stale_quote": "warn"}, {"params": "wf"},
     {"persistence_min_polls": 3}, {"persistence_max_age_hours": 12.0}, {"allocator_refresh_seconds": 600.0},
-    {"allocator_bias_floor": 0.2}, {"allocator_bias_cap": 2.0}, {"account_currency": "USD"},
+    {"allocator_bias_floor": 0.2}, {"allocator_bias_cap": 2.0}, {"account_currency": "USD"}, {"forward_read_shadow": "data/forward_read/kraken.parquet"},
 ])
 def test_every_knob_reaches_paper_and_money_alike(knob: dict[str, Any]) -> None:
     """A practised setting has to be the setting that runs. Moving one must move both plans, and equally."""

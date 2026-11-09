@@ -61,6 +61,8 @@ def wiring_rows(settings: Any) -> list[Row]:
         Row("data", "on_stale_quote", settings.on_stale_quote, "every runner: raise skips a frozen symbol"),
         Row("sizing", "parallel_sizing / sizing_v2", f"{settings.parallel_sizing} / {settings.sizing_v2}",
             "sizing_v2 is Kraken's lot rules"),
+        Row("sizing", "forward_read_shadow", settings.forward_read_shadow or "off",
+            "phase 4: logs the read and the size it would give; orders keep today's size"),
         Row("exits", "profit_lock / candle_exit / overbought_exit / oversold_entry",
             f"{settings.profit_lock} / {settings.candle_exit} / {settings.overbought_exit} / {settings.oversold_entry}",
             "off unless set; a flag turns one on for a run"),

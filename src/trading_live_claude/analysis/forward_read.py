@@ -5,7 +5,8 @@ Phases 0 to 2 of ``POSITION_SIZING_SCOPE.md``. A read for a trade uses only trad
 thin cell reads near no edge. :func:`skill` scores reads against realized net returns, with a null that rotates reads
 through time so that any drift they share with returns is not counted as skill.
 
-Research only. Nothing on the trading path imports it, and a read is never a strategy feature.
+Research, plus the phase 4 shadow (``monitor/forward_read_shadow.py``), which logs a read and acts on nothing. A read
+is never a strategy feature.
 """
 from __future__ import annotations
 
@@ -52,18 +53,26 @@ def causal_reads(trades: Sequence[TradeRow], *, shrink: float = 10.0, purge_days
                  min_strategy: int = 5) -> list[Read]:
     """A read per trade that has enough earlier evidence. Trades without it get none rather than a guess."""
     ordered = sorted(trades, key=lambda t: (t.entry, t.strategy, t.symbol))
-    purge = timedelta(days=purge_days)
     out: list[Read] = []
     for t in ordered:
-        known = [p for p in ordered if p.strategy == t.strategy and p.exit + purge <= t.entry]
-        if len(known) < min_strategy:
-            continue
-        cell = [p.net_return for p in known if p.symbol == t.symbol]
-        pool = [p.net_return for p in known]
-        parent = float(np.mean(pool)) * len(pool) / (len(pool) + shrink)
-        edge = (sum(cell) + shrink * parent) / (len(cell) + shrink)
-        out.append(Read(t, edge, len(cell), len(pool)))
+        got = read_at(ordered, t.strategy, t.symbol, t.entry, shrink=shrink, purge_days=purge_days,
+                      min_strategy=min_strategy)
+        if got is not None:
+            out.append(Read(t, *got))
     return out
+
+
+def read_at(trades: Sequence[TradeRow], strategy: str, symbol: str, as_of: datetime, *, shrink: float = 10.0,
+            purge_days: float = 5.0, min_strategy: int = 5) -> tuple[float, int, int] | None:
+    """``(edge, n_cell, n_strategy)`` for a signal at ``as_of``, from trades closed a purge before it; else None."""
+    purge = timedelta(days=purge_days)
+    known = [p for p in trades if p.strategy == strategy and p.exit + purge <= as_of]
+    if len(known) < min_strategy:
+        return None
+    cell = [p.net_return for p in known if p.symbol == symbol]
+    pool = [p.net_return for p in known]
+    parent = float(np.mean(pool)) * len(pool) / (len(pool) + shrink)
+    return (sum(cell) + shrink * parent) / (len(cell) + shrink), len(cell), len(pool)
 
 
 def skill(reads: Sequence[Read], *, buckets: int = 5, n_rotations: int = 2000, seed: int = 7) -> Skill | None:
