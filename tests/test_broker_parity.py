@@ -1,11 +1,10 @@
 """What the brokers report and charge, so a paper result means what a money result would.
 
 Every network call is mocked. Paper: fills cross the spread and pay the venue's costs. Kraken: equity and
-positions describe the whole book. Questrade: a token's environment is checked, not assumed.
+positions describe the whole book.
 """
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +18,6 @@ from trading_live_claude.brokers.kraken import KrakenBroker, _asset_to_routed_sy
 from trading_live_claude.brokers.models import Order, OrderAction, OrderType, Quote
 from trading_live_claude.brokers.paper import PaperBroker
 from trading_live_claude.execution.venue_costs import VenueCostModel
-from trading_live_claude.brokers.questrade import QuestradeBroker, environment_of
-from trading_live_claude.brokers.token_store import TokenSet
 
 # ---------------------------------------------------------------- paper fills
 
@@ -236,35 +233,3 @@ def test_an_unreadable_trade_history_leaves_the_entry_unknown(private: dict[str,
         assert b.positions("KRAKEN")[0].averageEntryPrice == 0.0
 
 
-# ---------------------------------------------------------------- Questrade's environment
-
-def _questrade(tmp: Path, api_server: str) -> QuestradeBroker:
-    b = QuestradeBroker.from_settings(refresh_token="r", encryption_key=_key(), state_dir=tmp)
-    b._tokens = TokenSet(access_token="a", refresh_token="r", api_server=api_server,
-                         expires_at_epoch=time.time() + 600, token_type="Bearer")
-    return b
-
-
-def _key() -> str:
-    from cryptography.fernet import Fernet
-    return Fernet.generate_key().decode()
-
-
-def test_environment_is_read_from_the_api_server() -> None:
-    assert environment_of("https://api01.iq.questrade.com/") == "live"
-    assert environment_of("https://api01.practice.questrade.com/") == "practice"
-
-
-def test_a_live_token_cannot_pass_as_practice(tmp_path: Path) -> None:
-    """AUTONOMOUS_ACCOUNT=practice with a real token used to mean real orders, under a practice label."""
-    b = _questrade(tmp_path, "https://api01.iq.questrade.com/")
-    with pytest.raises(BrokerError, match="live environment"):
-        b.verify_environment("practice")
-    b.verify_environment("live")
-
-
-def test_a_practice_token_cannot_pass_as_live(tmp_path: Path) -> None:
-    b = _questrade(tmp_path, "https://api01.practice.questrade.com/")
-    with pytest.raises(BrokerError, match="practice environment"):
-        b.verify_environment("live")
-    b.verify_environment("practice")

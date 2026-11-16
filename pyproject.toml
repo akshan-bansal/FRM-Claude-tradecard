@@ -1,7 +1,7 @@
 [project]
 name = "trading-live-claude"
 version = "0.1.0"
-description = "Claude Code-driven algorithmic trading framework for Questrade. Paper-first, live behind explicit flag."
+description = "Claude Code-driven algorithmic trading framework for Interactive Brokers and Kraken. Paper-first, live behind explicit flag."
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT" }

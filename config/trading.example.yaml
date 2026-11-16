@@ -11,7 +11,7 @@ default_strategy: bollinger
 default_symbols: "XIC.TO,VOO,IWM"
 timezone: America/Toronto
 # Currency used for equity, sizing, and heat math. Pick the side of your
-# Questrade multi-currency account that actually holds cash. CAD for Canadian
+# multi-currency IB account that actually holds cash. CAD for Canadian
 # accounts (XIC.TO etc.); USD for US-funded accounts (VOO, AAPL etc.).
 account_currency: CAD
 
@@ -86,7 +86,15 @@ mute_alerts: ""                   # comma-separated symbols: still traded and jo
 max_round_trip_cost_ratio: 0      # 0 = off. Kraken's fee alone is ~52 bps round trip
 params: default                   # default, wf or calibrated
 sizing_v2: true                   # Kraken's own lot rules; refuses to start without them
-ib_futures_only: false            # true narrows IB to futures. North American equities never go there
+ib_futures_only: false            # true narrows an IB book to futures; equities are refused there
+# Which IB transport serves each region (brokers/ib_access.py). Regions: north_america (US, TSX, TSX-V),
+# europe (LSE), asia_pacific (ASX, Tokyo, Hong Kong), futures. Transports: socket (TWS / IB Gateway),
+# web (Client Portal), connector (read-only, never orders). Data falls back in the order listed;
+# orders never fall back. Empty keeps the defaults shown here.
+ib_access: {}
+#   data:   {north_america: [socket, web, connector], futures: [web, connector]}
+#   orders: {north_america: socket, europe: socket, asia_pacific: socket, futures: web}
+#   account: socket
 persistence_min_polls: 5
 persistence_max_age_hours: 6      # an older run counts as no run, and is logged
 allocator_refresh_seconds: 3600   # weights recomputed between polls; 0 = boot only
@@ -112,15 +120,10 @@ forced_exits: false
 # A symbol not named takes its strategy family's default (only bollinger acts on level by default).
 entry_triggers: {}
 
-# === Questrade target ===
-# practice | live. 'practice' = Questrade's free practice account; 'live' = real money.
-questrade_env: practice
-# Empty string = use first account returned by the API.
-questrade_account_number: ""
-
 # === Autonomous mode (Claude-driven daemon) ===
 autonomous_enabled: false
-autonomous_account: practice
+autonomous_account: practice       # practice = IB paper (DU) login; Kraken has none, use paper
+autonomous_venue: ib               # ib or kraken: one broker per daemon
 autonomous_auto_start_on_session: false
 autonomous_interval_seconds: 600     # 10 minutes
 autonomous_strategy: bollinger

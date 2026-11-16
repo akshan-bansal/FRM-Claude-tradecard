@@ -38,9 +38,9 @@ def test_a_yaml_change_is_seen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
 def test_an_environment_change_is_seen(monkeypatch: pytest.MonkeyPatch) -> None:
     """The daemon writes to the environment after the first call."""
     before = get_settings()
-    monkeypatch.setenv("QUESTRADE_ENV", "live")
+    monkeypatch.setenv("AUTONOMOUS_VENUE", "kraken")
     after = get_settings()
-    assert after is not before and after.questrade_env == "live"
+    assert after is not before and after.autonomous_venue == "kraken"
 
 
 def test_a_clear_rebuilds() -> None:

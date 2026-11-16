@@ -86,11 +86,3 @@ def test_market_data_forwards_standardized_interval_to_broker(tmp_path: Path) ->
     assert wire == "ThirtyMinutes"
 
 
-def test_questrade_broker_translates_thirtyminutes_to_halfhour() -> None:
-    # Questrade REST uses its own lexicon; the broker translates the standardized
-    # word on its own side so MarketData stays broker-agnostic.
-    from trading_live_claude.brokers.questrade import _QT_INTERVAL_ALIAS
-
-    assert _QT_INTERVAL_ALIAS["ThirtyMinutes"] == "HalfHour"
-    # Unrecognized words pass through unchanged
-    assert _QT_INTERVAL_ALIAS.get("OneDay", "OneDay") == "OneDay"

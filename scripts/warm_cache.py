@@ -1,4 +1,4 @@
-"""Pre-warm the local candle cache for a list of symbols via Questrade.
+"""Pre-warm the local candle cache for a list of symbols via IB (crypto via Kraken).
 
 Precondition for the sweep: ``scripts/sweep_universe.py`` reads ``data/cache/*.parquet`` and
 skips anything with too few bars. If a name isn't cached at all, it's silently dropped from the
@@ -27,20 +27,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from trading_live_claude.analysis.universe import HELD_ASSETS, SEED_UNIVERSE
-from trading_live_claude.brokers.questrade import QuestradeBroker
+from trading_live_claude.brokers import Broker
 from trading_live_claude.config import get_settings
 from trading_live_claude.data.cache import CandleCache
 from trading_live_claude.data.market import MarketData
+from trading_live_claude.monitor.session import venue_feed
 
 
-def _make_broker() -> QuestradeBroker:
-    """Same construction as cli._make_questrade — no positional argument, keyword-only fields."""
-    s = get_settings()
-    return QuestradeBroker.from_settings(
-        refresh_token=s.questrade_refresh_token,
-        encryption_key=s.token_encryption_key,
-        state_dir=s.state_dir,
-    )
+def _make_broker(venue: str = "ib") -> Broker:
+    """Read-only, built by the same factory the sessions use."""
+    feed, _ = venue_feed(get_settings(), venue, money=False)
+    return feed
 
 
 def main() -> None:

@@ -56,7 +56,7 @@ For an existing long position:
 ## Hard rules
 
 - **Never bypass the Router.** Every order goes through `trading place-order`. If REJECTED, accept it and move on.
-- **Never `--mode live`** unless the user has explicitly typed live mode in this session AND `config/trading.yaml` already has `execution_mode: live` AND `questrade_env: live`. Otherwise default to whatever `execution_mode` says.
+- **Never `--mode live`** unless the user has explicitly typed live mode in this session AND `config/trading.yaml` already has `execution_mode: live` AND the venue's login is its real account (on IB, not a DU paper account). Otherwise default to whatever `execution_mode` says.
 - **Never edit `config/trading.yaml` to loosen a gate** during a `/trade-check`. If a gate keeps firing, tell the user.
 - **Never clear the kill-switch.** Ever. That's the user's call.
 - **Refuse to trade if `state/HALTED` exists.** Check with `Bash: test -f state/HALTED`.

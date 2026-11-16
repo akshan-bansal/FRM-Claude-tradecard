@@ -304,9 +304,8 @@ def test_canonical_venues_cover_every_broker_venue_attribute() -> None:
     from trading_live_claude.brokers.kraken import KrakenBroker
     from trading_live_claude.brokers.models import CANONICAL_VENUES
     from trading_live_claude.brokers.paper import PaperBroker
-    from trading_live_claude.brokers.questrade import QuestradeBroker
     from trading_live_claude.brokers.routed import VenueRoutedFeed
-    for cls in (QuestradeBroker, KrakenBroker, IBBroker, IBWebBroker, PaperBroker,
+    for cls in (KrakenBroker, IBBroker, IBWebBroker, PaperBroker,
                 VenueRoutedFeed):
         assert cls.venue in CANONICAL_VENUES, f"{cls.__name__}.venue={cls.venue!r} not canonical"
 

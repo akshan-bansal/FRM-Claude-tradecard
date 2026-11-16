@@ -1,6 +1,6 @@
 ---
 name: live-signal-monitor
-description: Use when the user wants real-time signal detection and alerting on a watchlist of symbols. NEVER places orders directly; it only logs and alerts on entry/exit triggers. Bridges research strategies to live operation in a read-only manner. For order placement, defer to the questrade-execution skill.
+description: Use when the user wants real-time signal detection and alerting on a watchlist of symbols. NEVER places orders directly; it only logs and alerts on entry/exit triggers. Bridges research strategies to live operation in a read-only manner. For order placement, defer to the order-execution skill.
 ---
 
 # live-signal-monitor
@@ -9,7 +9,7 @@ You run the polling loop that detects entry/exit signals in near-real-time and e
 
 ## Recipe
 
-1. **Fetch real-time quotes** for each symbol via `broker.quote(symbol)`. On the free Questrade tier this comes with a small delay (~20s). Document this in the alert footer.
+1. **Fetch real-time quotes** for each symbol via `broker.quote(symbol)`. Without an IB market-data subscription the quote is delayed (~15 min); Kraken's ticker is live. Document this in the alert footer.
 2. **Maintain a rolling window of recent EOD bars** in memory via `MarketData.recent(symbol, bars=required_history_bars+5)`.
 3. **Recompute indicators on each new bar.** Re-running the strategy's `generate_signals` over the rolling window is intentional — vectorized is fast enough that incremental updates aren't worth the complexity.
 4. **Evaluate signal conditions** by reading the *last row* of the resulting DataFrame: `entry==1`, `exit==1`, or neither.
@@ -27,7 +27,7 @@ For a single-snapshot probe: `--iterations 1`.
 
 ## Always
 
-- Default polling interval: 60 seconds. Anything tighter starts hitting Questrade rate limits.
+- Default polling interval: 60 seconds. Anything tighter starts hitting IB's pacing limits.
 - Warn the user if their list has > 25 symbols — quotes endpoint becomes slow.
 - Truncate Telegram messages to < 4000 chars (Telegram's hard limit).
 - Use UTC timestamps in logs; render Toronto-local in alerts.
@@ -35,8 +35,8 @@ For a single-snapshot probe: `--iterations 1`.
 ## Never
 
 - Place orders.
-- Persist secrets in logs (Questrade token, Telegram token).
-- Suggest "let me just add the order placement here" — that belongs in the `questrade-execution` skill.
+- Persist secrets in logs (Kraken keys, IB connector tokens, Telegram token).
+- Suggest "let me just add the order placement here" — that belongs in the `order-execution` skill.
 
 ## Trigger phrases
 

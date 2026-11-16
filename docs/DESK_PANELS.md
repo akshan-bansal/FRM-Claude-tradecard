@@ -25,7 +25,7 @@ own token. Now:
 ```bash
 # one shim, owning the port, the token and the desk panel, declaring all three books
 python scripts/approval_shim.py --db state/approval.db --state-dir state --session-id <primary> \
-  --book questrade:<qt-session>:CAD:equity \
+  --book ib:<equity-session>:CAD:equity \
   --book kraken:<kr-session>:USD:crypto \
   --book ib:<ib-session>:USD:derivatives
 

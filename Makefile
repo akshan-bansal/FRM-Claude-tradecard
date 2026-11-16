@@ -7,7 +7,7 @@ help:
 	@echo "  format     Run ruff format"
 	@echo "  type       Run mypy --strict"
 	@echo "  test       Run pytest with coverage"
-	@echo "  status     Live-only: read Questrade accounts"
+	@echo "  status     Read the IB accounts (trading status --venue kraken for Kraken)"
 	@echo "  backtest   Example: make backtest STRAT=ema_crossover SYM=AAPL"
 	@echo "  paper      Example: make paper STRAT=ema_crossover SYMS=AAPL,XIC.TO"
 	@echo "  risk       Print current risk report"

@@ -1,6 +1,6 @@
 ---
 name: backtest-expert
-description: Use when the user wants to systematically backtest a trading strategy described in plain English. Turns a strategy spec + a Questrade-fetchable symbol into a vectorized backtest with Sharpe, max drawdown, win rate, equity curve, and an overfitting risk flag if the in-sample window is under 2 years. Mirrors the workflow from "Top 5 Claude Code Skills for Algorithmic Trading" (skill #1) but rewired to use Questrade for data instead of EODHD.
+description: Use when the user wants to systematically backtest a trading strategy described in plain English. Turns a strategy spec + an IB- or Kraken-fetchable symbol into a vectorized backtest with Sharpe, max drawdown, win rate, equity curve, and an overfitting risk flag if the in-sample window is under 2 years. Mirrors the workflow from "Top 5 Claude Code Skills for Algorithmic Trading" (skill #1) but rewired to use the desk's own brokers (IB, Kraken) for data instead of EODHD.
 ---
 
 # backtest-expert
@@ -10,7 +10,7 @@ You are the backtest analyst for this repo. Follow this seven-step recipe verbat
 ## Recipe
 
 1. **Confirm strategy rules and parameters.** Ask the user for the strategy key (one of `STRATEGIES` in `src/trading_live_claude/strategies/__init__.py`) and any overrides. If they describe a *new* strategy in English, route them to write a `Strategy` subclass first — the `strategy-reviewer` agent can audit it.
-2. **Fetch historical OHLCV.** Use the local CLI: `uv run trading backtest --strategy <NAME> --symbol <SYMBOL> --years <N> --interval 1d`. Data is sourced from Questrade and cached as parquet under `data/cache/`.
+2. **Fetch historical OHLCV.** Use the local CLI: `uv run trading backtest --strategy <NAME> --symbol <SYMBOL> --years <N> --interval 1d`. Data comes from IB (equities, futures) or Kraken (crypto pairs), chosen from the symbol, and is cached as parquet under `data/cache/`.
 3. **Compute indicators from scratch.** Strategies in `signals/indicators.py` are pure pandas/numpy. No black-box TA libs. Never recommend `talib`/`pandas-ta` — keep the dependency surface small.
 4. **Generate entry/exit signals.** The `Strategy.generate_signals()` contract produces `entry`/`exit` columns. Confirm with the user the strategy is long-only (current bundle is) before suggesting any short logic.
 5. **Vectorized backtest.** `BacktestEngine.run()` returns Sharpe, Sortino, max DD, win rate, exposure, CAGR, and a trade ledger. You do not need to recompute these.
@@ -27,7 +27,7 @@ You are the backtest analyst for this repo. Follow this seven-step recipe verbat
 
 - Place an order, even on the paper broker, from this skill. Backtesting is read-only.
 - Modify the engine's slippage/commission constants without flagging it as a deliberate model choice.
-- Run on intraday intervals without confirming Questrade's data retention for that interval supports the requested window.
+- Run on intraday intervals without confirming the venue keeps that much history at that interval (Kraken's OHLC stops at 720 bars; IB limits small bars).
 
 ## Trigger phrases
 
@@ -41,4 +41,4 @@ You are the backtest analyst for this repo. Follow this seven-step recipe verbat
 
 ## Article alignment
 
-Skill #1 in [Top 5 Claude Code Skills for Algorithmic Trading](https://medium.datadriveninvestor.com/top-5-claude-code-skills-for-algorithmic-trading-49620fa2b02c) (upstream: `tradermonty/claude-trading-skills`). Recipe is the same; data source is Questrade instead of EODHD.
+Skill #1 in [Top 5 Claude Code Skills for Algorithmic Trading](https://medium.datadriveninvestor.com/top-5-claude-code-skills-for-algorithmic-trading-49620fa2b02c) (upstream: `tradermonty/claude-trading-skills`). Recipe is the same; data source is IB and Kraken instead of EODHD.

@@ -4,13 +4,15 @@ Claude Code project memory. Loaded automatically when working in this repo.
 
 ## What this repo is
 
-Algorithmic trading framework. Strategies → signals → risk gates → Questrade orders. Paper-mode default. Live mode behind multi-step confirmation.
+Algorithmic trading framework. Strategies → signals → risk gates → orders on two brokers: **Interactive Brokers** for
+equities (every listing) and derivatives, **Kraken** for crypto. Questrade was retired on 2026-11-16 and its code removed.
+Paper-mode default. Live mode behind multi-step confirmation.
 
 ## Config layout
 
 This repo splits configuration so you can manage it freely without ever touching secrets:
 
-- **`.env`** — secrets only. Refresh token, encryption key, optional SMTP/Telegram creds. Gitignored. **Reading `.env` is denied** in `.claude/settings.json`. You cannot see it.
+- **`.env`** — secrets only. Kraken API keys, the token encryption key, optional SMTP/Telegram creds. Gitignored. **Reading `.env` is denied** in `.claude/settings.json`. You cannot see it.
 - **`config/trading.yaml`** — every non-secret knob (strategy, symbols, risk caps, autonomous config). Gitignored (per-machine). **You can read and write this freely.**
 - **`config/trading.example.yaml`** — committed template; what `trading.yaml` should look like.
 
@@ -20,11 +22,11 @@ Use `uv run trading tune` (or the `/tune` command) to backtest a strategy x symb
 
 ## Non-negotiables
 
-- **Never bypass the risk gate.** All order intents go through `execution.router.Router`. Even tests must use the paper router, never instantiate a Questrade broker for tests.
+- **Never bypass the risk gate.** All order intents go through `execution.router.Router`. Even tests must use the paper router, never a live IB or Kraken broker.
 - **Never set `EXECUTION_MODE=live` in code, tests, or example snippets.** Live mode is a runtime decision by the human only.
 - **Indicators are shifted before comparison.** Adding a strategy? Use `signals.generator.no_lookahead(df)` and write a regression test that fails on lookahead.
 - **`state/` files are ground truth.** Don't compute equity, positions, or peak-from-scratch — read from journal.
-- **Refresh tokens are one-shot.** The Questrade broker rewrites `state/tokens.json` atomically on every refresh. Don't add a second code path that reads/writes that file.
+- **Stored tokens have one writer.** The IB connector's `TokenStore` rewrites its encrypted file under `state/` atomically. Don't add a second code path that reads/writes it.
 
 ## Default style
 
@@ -49,8 +51,8 @@ Default flow: `uv run trading backtest --strategy NAME --symbol TICKER --years N
 ## When the user asks to "go live"
 
 Three checks before you run anything:
-1. Confirm `QUESTRADE_ENV=practice` for at least one full week of paper trading first, and that
-   `trading audit query session-plans` shows the money session's fingerprint matching those paper sessions
+1. Confirm at least one full week of paper trading on the same venue first (IB paper login or a simulated book), and
+   that `trading audit query session-plans` shows the money session's fingerprint matching those paper sessions
 2. Confirm `state/HALTED` does not exist
 3. Confirm the user has typed the live-mode confirmation phrase
 
@@ -61,7 +63,9 @@ If any check fails, stop and report — do not edit the .env to make it pass.
 - CLI: `src/trading_live_claude/cli.py`
 - Router (the bottleneck): `src/trading_live_claude/execution/router.py`
 - Risk gates: `src/trading_live_claude/risk/`
-- Questrade client: `src/trading_live_claude/brokers/questrade.py`
+- IB access (one broker over TWS, Client Portal and the connector, by region): `src/trading_live_claude/brokers/ib_access.py`
+- Kraken client: `src/trading_live_claude/brokers/kraken.py`
+- Which broker trades what: `src/trading_live_claude/desk_policy.py`
 
 ## Two trading modes — pick the right one
 
@@ -82,7 +86,7 @@ This repo supports **two distinct ways to trade** that share the same Router and
 This repo supports a fully-autonomous Claude-driven trading loop. **Read these rules before touching anything related to it.**
 
 - The daemon process is owned by the user's system, not by Claude. Claude can start/stop/inspect it, but the loop runs in `trading_live_claude.cli:autonomous_run` as a detached process with its own pid.
-- A daemon spawned in this repo can place real Questrade orders if `AUTONOMOUS_ACCOUNT=live`. Default and reset value is `practice`, which refuses to start on a live token. `AUTONOMOUS_ACCOUNT=paper` rehearses the daemon: its own gates and budget on a simulated broker.
+- A daemon spawned in this repo can place real orders on `autonomous_venue` (`ib` or `kraken`, one broker per daemon) if `AUTONOMOUS_ACCOUNT=live`. Default and reset value is `practice`, which must be an IB paper (DU) login and refuses a live one; Kraken has no practice account. `AUTONOMOUS_ACCOUNT=paper` rehearses the daemon: its own gates and budget on a simulated broker.
 - Autonomous router mode requires the runtime env var `AUTONOMOUS_ENABLED=true` AND `autonomous_enabled=true` in `.env`. The CLI sets the env var when calling `autonomous start`; the daemon then re-checks on every Router construction.
 - The daemon respects ALL the standard gates (kill-switch, heat, per-trade risk, max positions, min ticket) PLUS a daily trade-count and daily notional cap.
 
@@ -115,7 +119,7 @@ opt-in per-run via `--require-card` on any runner but the daemon, or `require_ca
 - **Autonomous mode cannot be wrapped.** `AUTONOMOUS_ENABLED=true` + card approval are
   mutually exclusive; the wrapper raises at construction. Pick one loop.
 - **WYSIWYS canonical bytes.** The card signs a `|`-joined string that includes the
-  broker venue (`ib` / `ib_web` / `kraken` / `questrade` / `paper` / `global`), action, symbol, shares, entry, notional,
+  broker venue (`ib` / `ib_web` / `kraken` / `paper` / `global`; `questrade` is still read on old prompts), action, symbol, shares, entry, notional,
   account, intent id, and nonce. A MITM cannot silently swap the broker or resize the
   intent — the signature won't verify.
 - **Thesis from the VS engine.** `intel/vs_engine.py` composes a `<=140` char thesis
@@ -147,7 +151,7 @@ python scripts/paper_kraken.py --interval 20 --iterations 2 --require-card --car
 python scripts/approval_card_sim.py --shim http://127.0.0.1:8787 --auto accept --poll 1 --auth-token <token>
 ```
 `--require-card` exists on `scripts/paper_kraken.py`, `scripts/paper_ib.py` and `cli signal --paper`
-(the QT path, added 2026-09-28 with `--card-shim-host/--card-shim-port/--card-ttl`).
+(any venue, with `--card-shim-host/--card-shim-port/--card-ttl`).
 `scripts/approval_shim.py` runs the shim standalone, for a loop that doesn't boot its own.
 Note: with the card on, the flatten-on-exit sells also need an ACCEPT.
 
@@ -169,7 +173,8 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
 ## Audit trail (docs/compliance/AUDIT_SCOPE.md)
 
 - Every runner writes the hash-chained ledger under `state/ledger/<date>.<stream>.jsonl`, one stream
-  per process (`qt`, `qt-paper`, `qt-live`, `autonomous`, `kraken`, `ib`; `manual`, `control`, `recon`
+  per process (`kraken`, `kraken-live`, `ib`, `ib-live`, `autonomous`; `qt`, `qt-paper`, `qt-live` are Questrade's history,
+  read and never written; `manual`, `control`, `recon`
   and `thesis` are shared and locked). Live and autonomous are strict: a failed ledger write stops the order.
 - Never edit or delete a ledger row. A correction is a new `CORRECTION` row. Never "repair" a chain.
 - `OrderIntent.intent_id` is the one identity from signal to execution; the approval stores reuse it.
@@ -200,8 +205,11 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
   it is the human's express call: `trading kill --from-paper --confirm "HALT MONEY"`. Claude neither promotes a halt nor clears either file.
 - **The gates read the home currency.** Every runner prices quotes, positions and equity in `account_currency` (CAD) at the Bank of
   Canada's daily rate (`brokers/fx.py`). A fill keeps its own currency; the audit layer converts it by trade date.
-- `QUESTRADE_ENV` and `AUTONOMOUS_ACCOUNT=practice` route nothing: the token alone decides the account, and a
-  money session refuses to start when the token's environment does not match. Practise on paper.
+- **Two brokers, split by class** (`desk_policy.py`): Kraken carries crypto only, IB carries every equity listing and
+  derivatives, and each refuses the other's. `ib_futures_only` narrows an IB book to futures. `ib_access` in trading.yaml
+  picks the IB transport per region; reads fall back across transports, orders never do, and the connector never orders.
+- `AUTONOMOUS_ACCOUNT=practice` routes nothing: the login decides the account, and a money session refuses to start
+  when it does not match (`check_account_environment`: IB paper logins are DU accounts). Practise on paper.
 - `supports_level_trigger` means a strategy emits `entry_level`; `level_trigger_default` means the monitor
   acts on it unasked. Backtests read `entry` alone, so emitting the column must never change `entry`.
 - Gates that stop new risk must not trap the way out. An order that only reduces a position the routed
@@ -218,11 +226,11 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
 
 `.claude/skills/`:
 - `backtest-expert` — strategy spec → vectorized backtest
-- `market-data-pipeline` — OHLCV / quotes via Questrade
+- `market-data-pipeline` — OHLCV / quotes via IB and Kraken
 - `signal-generation` — rules → signals (with lookahead check)
 - `risk-management` — sizing, VaR, heat, kill switch
 - `live-signal-monitor` — polling loop, alerts only, never orders
-- `questrade-execution` — signal → risk gate → live order (own skill)
+- `order-execution` — signal → risk gate → order on IB or Kraken (own skill)
 - `claude-trader` — LLM-driven trading decisions (`/trade-check`); algorithms are helpers
 
 `.claude/commands/`:

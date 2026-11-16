@@ -127,7 +127,7 @@ def rebuild_cmd() -> None:
 
 
 @audit_app.command("recon")
-def recon_cmd(venue: str = typer.Argument(..., help="questrade | kraken | ib"),
+def recon_cmd(venue: str = typer.Argument(..., help="kraken | ib"),
               days: int = typer.Option(7, help="Look back this many days."),
               grace: float = typer.Option(900.0, help="Seconds before a silent order is a break."),
               ) -> None:
@@ -136,11 +136,8 @@ def recon_cmd(venue: str = typer.Argument(..., help="questrade | kraken | ib"),
     from .ledger import Ledger
     from .recon import reconcile
     settings = get_settings()
-    if venue == "questrade":
-        from ..cli import _make_questrade
-        broker: Any = _make_questrade(settings)
-        account = settings.questrade_account_number or broker.accounts()[0].number
-    elif venue == "kraken":
+    broker: Any
+    if venue == "kraken":
         from ..brokers.kraken import KrakenBroker
         broker = KrakenBroker(api_key=settings.kraken_api_key or "",
                               api_secret=settings.kraken_api_secret or "", enable_live_orders=False)
@@ -151,7 +148,7 @@ def recon_cmd(venue: str = typer.Argument(..., help="questrade | kraken | ib"),
                           client_id=settings.ib_client_id)
         account = getattr(settings, "ib_account", "") or ""
     else:
-        console.print("[red]venue must be questrade, kraken or ib[/red]")
+        console.print("[red]venue must be kraken or ib[/red]")
         raise typer.Exit(code=2)
     writer = Ledger(_ledger_dir(), stream="recon", mode="recon", shared=True)
     s = reconcile(writer, broker, account, since=datetime.now(UTC) - timedelta(days=days),

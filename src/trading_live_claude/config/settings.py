@@ -25,7 +25,6 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ExecutionMode = Literal["paper", "dry-run", "live", "autonomous"]
-QuestradeEnv = Literal["practice", "live"]
 # practice is checked against the token and refused if the token is live; paper is a rehearsal: the same
 # autonomous gates and budget on a simulated broker.
 AutonomousAccount = Literal["paper", "practice", "live"]
@@ -43,7 +42,6 @@ class Settings(BaseSettings):
     )
 
     # === Secrets (env only) ===
-    questrade_refresh_token: str = ""
     token_encryption_key: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -83,8 +81,6 @@ class Settings(BaseSettings):
 
     # === Trading knobs (yaml-managed) ===
     execution_mode: ExecutionMode = "paper"
-    questrade_env: QuestradeEnv = "practice"
-    questrade_account_number: str = ""
 
     risk_pct_per_trade: float = Field(default=0.01, ge=0.0001, le=0.05)
     portfolio_heat_cap: float = Field(default=0.05, ge=0.001, le=1.0)
@@ -267,15 +263,6 @@ class Settings(BaseSettings):
     def autonomous_symbols_list(self) -> list[str]:
         return [s.strip().upper() for s in self.autonomous_symbols.split(",") if s.strip()]
 
-    @property
-    def is_live_capable(self) -> bool:
-        return bool(
-            self.questrade_refresh_token
-            and self.token_encryption_key
-            and self.execution_mode == "live"
-            and self.questrade_env == "live"
-        )
-
     def ensure_dirs(self) -> None:
         for d in (self.state_dir, self.log_dir, self.data_cache_dir, Path("reports"), Path("config")):
             d.mkdir(parents=True, exist_ok=True)
@@ -283,8 +270,6 @@ class Settings(BaseSettings):
 
 _TRADING_KNOB_FIELDS: tuple[str, ...] = (
     "execution_mode",
-    "questrade_env",
-    "questrade_account_number",
     "risk_pct_per_trade",
     "portfolio_heat_cap",
     "risk_model",

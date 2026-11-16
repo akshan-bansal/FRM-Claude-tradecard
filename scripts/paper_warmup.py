@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import sys
 
-from trading_live_claude.brokers import PaperBroker, QuestradeBroker
+from trading_live_claude.brokers import PaperBroker
 from trading_live_claude.config import get_settings
 from trading_live_claude.data import CandleCache, MarketData
 from trading_live_claude.execution import Router
+from trading_live_claude.monitor.session import venue_feed
 from trading_live_claude.monitor import LiveMonitor
 from trading_live_claude.risk import PositionSizer
 from trading_live_claude.strategies import STRATEGIES
@@ -21,11 +22,7 @@ from trading_live_claude.strategies import STRATEGIES
 
 def main() -> int:
     s = get_settings()
-    feed = QuestradeBroker.from_settings(
-        refresh_token=s.questrade_refresh_token,
-        encryption_key=s.token_encryption_key,
-        state_dir=s.state_dir,
-    )
+    feed, _ = venue_feed(s, "ib", money=False)        # read-only: paper fills against IB quotes
     paper = PaperBroker(feed=feed, starting_equity=100_000, journal_dir=s.state_dir)
     market = MarketData(feed, cache=CandleCache(s.data_cache_dir))
     sizer = PositionSizer(risk_pct=s.risk_pct_per_trade)

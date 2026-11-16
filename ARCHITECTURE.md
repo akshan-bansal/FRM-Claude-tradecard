@@ -22,7 +22,7 @@ live trading is a human-only decision behind a typed confirmation.
 ## The core pipeline (8 stages — the vertical spine)
 
 1. **Data ingestion** — market feeds → OHLCV, L2 order books, fundamentals.
-   `questrade` · `kraken_ohlc` · `kraken_l2` · `coinbase_l2` · `bitstamp_l2` · `fundamentals_edgar` · `market` · `cache`
+   `kraken_ohlc` · `kraken_l2` · `coinbase_l2` · `bitstamp_l2` · `fundamentals_edgar` · `market` · `cache`
 2. **Signals & models** — features, strictly no-lookahead (indicators shifted before comparison).
    `signals.generator` (no_lookahead) · `indicators` · `candlesticks` · `valuation` ·
    `models.kalman` · `cointegration` · `timeseries` (ARIMA/GARCH) · `regime` · `selection` (GBT) ·
@@ -42,7 +42,8 @@ live trading is a human-only decision behind a typed confirmation.
    `hedge` · `risk_model` · `allocation`
 7. **Execution router** *(control point — red; the single bottleneck)* — every order intent crosses
    `execution.router.Router`. `asset_router` · `daily_budget` · `journal`
-8. **Brokers** — `questrade` · `paper` · `kraken_auth` · `token_store`
+8. **Brokers** — `ib_access` (IB by region over `ib` socket, `ib_web`, `ib_connector`) · `kraken` · `paper` ·
+   `kraken_auth` · `token_store`. Questrade was retired on 2026-11-16 (`desk_policy.py`).
 
 ---
 

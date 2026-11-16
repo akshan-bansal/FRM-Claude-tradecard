@@ -4,7 +4,6 @@ from .ib_web import CPGatewayAuth, IBWebAuth, IBWebBroker, OAuth2JWTAuth
 from .kraken import KrakenBroker
 from .models import Account, Candle, Order, OrderAction, OrderSide, OrderType, Position, Quote
 from .paper import PaperBroker
-from .questrade import QuestradeBroker
 from .token_store import TokenStore
 
 __all__ = [
@@ -29,7 +28,6 @@ __all__ = [
     "OrderType",
     "PaperBroker",
     "Position",
-    "QuestradeBroker",
     "Quote",
     "StockDetails",
     "TokenExpired",

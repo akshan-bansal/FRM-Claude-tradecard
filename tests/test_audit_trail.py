@@ -577,34 +577,6 @@ def test_the_desk_reports_each_chain_as_measured(tmp_path: Path) -> None:
     assert not chains["bad"]["ok"] and "payload" in chains["bad"]["reason"]
 
 
-def test_questrade_executions_sum_every_fee_and_take_the_symbol_currency(monkeypatch) -> None:
-    from trading_live_claude.brokers.questrade import QuestradeBroker
-    b = QuestradeBroker.__new__(QuestradeBroker)          # no token flow: _request is stubbed
-
-    class _Resp:
-        def __init__(self, body: dict) -> None:
-            self._body = body
-
-        def json(self) -> dict:
-            return self._body
-
-    def fake(method: str, endpoint: str, **_kw):
-        if endpoint.endswith("/executions"):
-            return _Resp({"executions": [{
-                "id": 53817310, "orderId": 177106005, "symbol": "XIC.TO", "symbolId": 23891,
-                "side": "Buy", "quantity": 10, "price": 31.05, "commission": 4.95,
-                "orderPlacementCommission": 0.0, "executionFee": 0.0035, "secFee": 0.0,
-                "canadianExecutionFee": 0.01, "timestamp": "2026-10-30T14:31:02.120000-04:00"}]})
-        assert endpoint == "symbols/23891"
-        return _Resp({"symbols": [{"currency": "CAD"}]})
-
-    monkeypatch.setattr(b, "_request", fake)
-    (e,) = b.executions("12345678")
-    assert e.exec_id == "questrade:53817310" and e.order_id == "177106005"
-    assert e.fee == pytest.approx(4.9635) and e.currency == "CAD"
-    assert e.currency_source == "questrade symbol record" and e.time.utcoffset() is not None
-
-
 def test_the_sqlite_store_keeps_the_signature_and_the_ledger_gets_it(tmp_path: Path) -> None:
     """Paper sessions use SqliteApprovalStore; its approval must carry the same evidence."""
     from trading_live_claude.execution.approval_sqlite import (

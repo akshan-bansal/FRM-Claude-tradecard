@@ -5,10 +5,9 @@ goes through one builder, `monitor/session.py`, and differs from its counterpart
 
 | | Paper | Money |
 |---|---|---|
-| Questrade | `trading paper`, `trading signal --paper` | `trading live` |
 | Kraken | `trading paper --venue kraken`, `scripts/paper_kraken.py` | `trading live --venue kraken` |
-| IB | `trading paper --venue ib`, `scripts/paper_ib.py` | `trading live --venue ib` |
-| Daemon | `AUTONOMOUS_ACCOUNT=paper` | `AUTONOMOUS_ACCOUNT=live` |
+| IB (equities, futures) | `trading paper --venue ib`, `trading signal --paper`, `scripts/paper_ib.py` | `trading live --venue ib` |
+| Daemon (`autonomous_venue`: ib or kraken) | `AUTONOMOUS_ACCOUNT=paper` | `AUTONOMOUS_ACCOUNT=live` |
 
 ## How to check it
 
@@ -60,7 +59,6 @@ come from `execution/venue_costs.py`, the same model the cost floor reads. The s
 
 | Venue | Commission | Slippage |
 |---|---|---|
-| Questrade | $4.95 per fill | 5 bps |
 | Kraken | 26 bps taker | 5 bps |
 | IB | $0.005 per share, $1.00 minimum, capped at 1% of value | 5 bps |
 
@@ -74,16 +72,16 @@ come from `execution/venue_costs.py`, the same model the cost floor reads. The s
   - The rate is a daily one. A big intraday move in the currency is not in the gates until the next rate.
   - Names still say USD where the money is now CAD: `min_ticket_usd`, `daily_max_notional_usd`, and the card's `notional_usd`,
     which the card signs. Changing the wire form needs a spec version, so it stays for now.
-  - Flat and per-share fees in `venue_costs.py` are read as CAD. A Questrade fee on a US name, or IB's per-share fee, is really USD.
+  - Flat and per-share fees in `venue_costs.py` are read as CAD. IB's per-share fee is really USD.
   - `venues.py` calls `.L` GBP, while London prices usually arrive in pence, and an unknown suffix reads as a US listing. Check
     a symbol's price and currency before trading one for the first time.
   - An alert for `SOL/USD` shows a CAD price, and says so.
-- **Whole units.** Kraken sizes in its own lots. Questrade and IB are whole shares in both modes, so the size of the
+- **Whole units.** Kraken sizes in its own lots. IB is whole shares in both modes, so the size of the
   account decides what can trade there.
 - **Two halts.** A simulated book's drawdown trips `state/HALTED_PAPER` and stops paper. Money stops for it only when a
   human says `trading kill --from-paper --confirm "HALT MONEY"`. `trading kill` still stops everything.
-- **Questrade practice.** `practicelogin.questrade.com/oauth2/token` returned 404 on 2026-11-01, so a practice login
-  cannot be routed to. The token decides the account, and a money session refuses to start on a mismatch.
+- **IB practice.** `practice` means IB's paper login (DU accounts). The login decides the account, and a money session
+  refuses to start when it does not match what was asked for. Kraken has no practice account.
 - **`trading live`'s last lines.** The rule against setting a live execution mode in tests means no test enters the
   command itself. It is now a thin call into the code paper runs through, but do a supervised first run.
 
@@ -91,9 +89,9 @@ come from `execution/venue_costs.py`, the same model the cost floor reads. The s
 
 | Key | Layer | Needed for |
 |---|---|---|
-| `QUESTRADE_REFRESH_TOKEN`, `TOKEN_ENCRYPTION_KEY` | Data | Questrade, paper and money |
+| `TOKEN_ENCRYPTION_KEY` | Data | IB connector tokens |
 | `KRAKEN_API_KEY`, `KRAKEN_API_SECRET` | Execution | Kraken money. Paper needs none. |
-| IB | Data | No key: log in to the gateway in a browser |
+| IB | Data | No key: log in to TWS / IB Gateway, or to Client Portal in a browser. `ib_access` picks which per region |
 | `WORLDMONITOR_API_KEY` | Intel | Overlay and thesis trims, every runner |
 | `ANTHROPIC_API_KEY` | Intel | Held agent layer only, not trading |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Alerts | Phone alerts |

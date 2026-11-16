@@ -104,26 +104,21 @@ def _fetch_ib_hourly(symbols: tuple[str, ...], as_futures: bool = False) -> dict
 
 
 def _fetch_qt_hourly(symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
-    """Pull ~30 days of hourly bars per symbol from Questrade. Returns {symbol: DataFrame}.
+    """Pull ~30 days of hourly bars per symbol from IB. Returns {symbol: DataFrame}.
 
-    Questrade caps intraday history at ~30 days. That's ~22 trading days × 6.5 regular-
+    The window stays at ~30 days, as it was on Questrade, so the heatmap reads the same. That's ~22 trading days × 6.5 regular-
     hours cells per weekday = ~130 (hour, weekday) observations per symbol, or ~4-5 obs
     per cell — the same sparse-but-visual regime as the Kraken crypto branch.
     """
-    from trading_live_claude.brokers.questrade import QuestradeBroker
     from trading_live_claude.config import get_settings
+    from trading_live_claude.monitor.session import venue_feed
 
-    settings = get_settings()
-    broker = QuestradeBroker.from_settings(
-        refresh_token=settings.questrade_refresh_token,
-        encryption_key=settings.token_encryption_key,
-        state_dir=settings.state_dir,
-    )
+    broker, _ = venue_feed(get_settings(), "ib", money=False)
     out: dict[str, pd.DataFrame] = {}
     end = datetime.now(UTC)
     start = end - timedelta(days=30)
     for sym in symbols:
-        print(f"[liq-heatmap]   fetching {sym} hourly (30d, QT)...", flush=True)
+        print(f"[liq-heatmap]   fetching {sym} hourly (30d, IB)...", flush=True)
         try:
             bars = broker.candles(sym, start, end, interval="OneHour")
         except Exception as e:

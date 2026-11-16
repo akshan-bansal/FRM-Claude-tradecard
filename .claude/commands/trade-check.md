@@ -9,11 +9,11 @@ You are the trader. Algorithms are your helpers. Decide if and how to trade THIS
 ## Phase 1 — gather state (parallel where possible)
 
 Run all in parallel:
-1. `uv run trading status` — equity, primary account
-2. `uv run trading positions` — current holdings + open PnL
-3. `uv run trading risk-report` — heat %, kill-switch state
+1. `uv run trading status --venue <ib|kraken>` — equity, primary account (ib for equities and futures, kraken for crypto)
+2. `uv run trading positions --venue <ib|kraken>` — current holdings + open PnL
+3. `uv run trading risk-report --venue <ib|kraken>` — heat %, kill-switch state
 4. `uv run trading autonomous status` — daily caps + state
-5. `uv run python -c "from trading_live_claude.config import get_settings;s=get_settings();print(s.autonomous_symbols, s.account_currency, s.execution_mode, s.questrade_env)"` — config snapshot
+5. `uv run python -c "from trading_live_claude.config import get_settings;s=get_settings();print(s.autonomous_symbols, s.autonomous_venue, s.account_currency, s.execution_mode)"` — config snapshot
 
 Read the latest 20 lines of `state/orders.jsonl` if it exists (Bash: `tail -n 20 state/orders.jsonl`).
 
@@ -31,7 +31,7 @@ Weigh:
 - **Regime**: is the broad market up/down/flat? Check with a quick web search if useful.
 - **Risk state**: heat %, daily-loss progress, kill-switch.
 - **Position sizing reality**: at current equity, can a trade clear `min_ticket_usd`? At ~$100 equity, only ZAG.TO and XIC.TO fit; VOO/IWM/AAPL/MSFT cost more than the whole account.
-- **Commission drag**: $4.95 min sell commission. If account is small and edge per trade is small, hold over trade.
+- **Commission drag**: IB charges per share with a minimum per order; Kraken charges ~0.26% taker (`execution/venue_costs.py`). If the account is small and edge per trade is small, hold over trade.
 - **Existing positions**: do you have anything open already that conflicts?
 
 Write a one-paragraph rationale BEFORE deciding.

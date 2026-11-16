@@ -1,8 +1,8 @@
 # trading-live-claude
 
-Claude Code–driven algorithmic trading framework for **Questrade** (Canadian + US equities / ETFs). Paper-trading by default. Live trading behind explicit flags + risk gates.
+Claude Code–driven algorithmic trading framework for **Interactive Brokers** (equities on every listing, futures) and **Kraken** (crypto). Paper-trading by default. Live trading behind explicit flags + risk gates.
 
-Claude also ships with 5 algorithm tools (skills) — market data, signal generation, backtesting, risk management, and live execution — all wired to Questrade as the single data + execution source.
+Claude also ships with 5 algorithm tools (skills) — market data, signal generation, backtesting, risk management, and live execution — all wired to the same two brokers for data and execution. Questrade was the original broker; it was retired on 2026-11-16.
 
 ---
 
@@ -40,7 +40,7 @@ flowchart TB
         Cmp -->|no| Sleep[Sleep N seconds]
     end
 
-    Router1 --> Broker[Questrade]
+    Router1 --> Broker[IB or Kraken]
     Router2 --> Broker
 ```
 
@@ -68,9 +68,9 @@ Claude wakes itself every 10 min. **Stops when you close Claude.** For 24/7 trad
 | `/tune` | Backtests 5 strategies × 18 symbols; rewrites `config/trading.yaml` |
 | `/backtest <strategy> <symbol> [years]` | One-off backtest, markdown report |
 | `/signal-check <strategy> <symbols>` | Snapshot live signals; never places orders |
-| `/paper-trade <strategy> <symbols> [iters]` | Paper session vs Questrade quotes |
+| `/paper-trade <strategy> <symbols> [iters]` | Paper session vs IB or Kraken quotes |
 | `/autonomous` (`status`/`start`/`stop`/`tail`) | Deterministic-daemon manager |
-| `/positions` | Current Questrade holdings |
+| `/positions` | Current IB and Kraken holdings |
 | `/risk-report` | Equity, heat %, kill-switch state |
 | `/live-trade-confirm <strategy> <symbols>` | Pre-flight checklist for human-live |
 | `/kill <reason>` | Emergency halt — refuses every order until cleared |
@@ -86,9 +86,9 @@ Claude wakes itself every 10 min. **Stops when you close Claude.** For 24/7 trad
 
 ### Auto-trading flow (zero ongoing typing)
 
-1. Edit `.env`: paste `QUESTRADE_REFRESH_TOKEN` + `TOKEN_ENCRYPTION_KEY`.
-2. Edit `config/trading.yaml`: set `autonomous_enabled: true`, `autonomous_auto_start_on_session: true`, `autonomous_account: practice` (or `live` after funding).
-3. `uv sync && uv run python scripts/refresh_token.py`.
+1. Edit `.env`: paste `TOKEN_ENCRYPTION_KEY` (and Kraken API keys if the daemon trades Kraken). Log in to TWS / IB Gateway for IB.
+2. Edit `config/trading.yaml`: set `autonomous_enabled: true`, `autonomous_auto_start_on_session: true`, `autonomous_account: practice` (or `live` after funding), and `autonomous_venue: ib` or `kraken`.
+3. `uv sync && uv run trading status --venue ib` (or `--venue kraken`) to check the login.
 4. Open Claude Code in the repo. Daemon auto-spawns. Trades every `autonomous_interval_seconds`.
 5. Optional: `/tune` weekly to re-pick strategy + symbols from latest data, then `/autonomous stop && /autonomous start` to apply.
 
@@ -103,12 +103,12 @@ Claude wakes itself every 10 min. **Stops when you close Claude.** For 24/7 trad
 
 ## ⚠️ Risk disclosure
 
-**This software can place real orders against your real Questrade account.** Algorithmic trading carries substantial financial risk. Bugs, network failures, stale tokens, and bad strategies can lose money fast. By using this repo you accept that:
+**This software can place real orders against your real Interactive Brokers or Kraken account.** Algorithmic trading carries substantial financial risk. Bugs, network failures, stale tokens, and bad strategies can lose money fast. By using this repo you accept that:
 
 - You are solely responsible for every order placed.
 - Paper-mode is the default. `--live` mode requires a typed confirmation phrase + explicit env vars.
 - Read [`RISK_DISCLOSURE.md`](RISK_DISCLOSURE.md) before flipping the live switch.
-- Test exhaustively in `practice` (Questrade's free practice account) before touching real money.
+- Test exhaustively on paper (IB's paper login, or a simulated book) before touching real money.
 
 ---
 
@@ -119,10 +119,10 @@ Claude wakes itself every 10 min. **Stops when you close Claude.** For 24/7 trad
 uv sync
 
 # 2. Bootstrap config — TWO files
-cp .env.example .env                              # secrets only (refresh token, encryption key)
+cp .env.example .env                              # secrets only (encryption key, Kraken keys)
 cp config/trading.example.yaml config/trading.yaml # trading knobs (Claude can read/write this)
-# Open https://login.questrade.com/APIAccess/UserApps.aspx and create an app.
-# Generate a refresh token, paste into .env (QUESTRADE_REFRESH_TOKEN=...).
+# IB: install TWS or IB Gateway and enable the API (paper port 7497 / 4002); or run Client Portal.
+# Kraken: public data needs no key; money sessions need KRAKEN_API_KEY / KRAKEN_API_SECRET in .env.
 # Generate the encryption key:  uv run python scripts/generate_encryption_key.py  (paste into .env)
 
 # 3. Validate connection (read-only)
@@ -181,7 +181,7 @@ Anything Claude needs to "decide" lives in `trading.yaml`. Anything secret lives
 
 The autonomous daemon runs `trading_live_claude.cli:autonomous_run` in a detached process. Every `AUTONOMOUS_INTERVAL_SECONDS` (default 1200 = 20 minutes) it:
 
-1. Pulls latest Questrade quotes + recent bars for `AUTONOMOUS_SYMBOLS`
+1. Pulls latest quotes + recent bars for `AUTONOMOUS_SYMBOLS` from `autonomous_venue` (IB or Kraken)
 2. Re-runs `AUTONOMOUS_STRATEGY` to get entry/exit signals
 3. For any new entry/exit signal: sizes via `PositionSizer`, gates via `Router`, places against the account (`AUTONOMOUS_ACCOUNT=practice|live`)
 4. Logs to `state/orders.jsonl` / `state/fills.jsonl` / `state/rejected.jsonl`
@@ -202,8 +202,8 @@ If `AUTONOMOUS_AUTO_START_ON_SESSION=true`, the SessionStart hook auto-spawns th
 
 | Layer | Module | Purpose |
 |---|---|---|
-| Broker | `brokers/questrade.py` | OAuth refresh, accounts, positions, market data, order placement |
-| Data | `data/market.py`, `data/cache.py` | Historical candles + live quotes (Questrade), parquet cache |
+| Broker | `brokers/ib_access.py`, `brokers/kraken.py` | IB by region over TWS, Client Portal and the connector; Kraken; accounts, positions, market data, orders |
+| Data | `data/market.py`, `data/cache.py` | Historical candles + live quotes (IB, Kraken), parquet cache |
 | Risk | `risk/sizing.py`, `risk/var.py`, `risk/kill_switch.py` | ATR sizing, fixed-fractional, portfolio heat, Historical VaR, kill-switch |
 | Signals | `signals/indicators.py`, `signals/generator.py` | EMA/SMA/RSI/MACD/ATR/Bollinger, no-lookahead enforcement |
 | Strategies | `strategies/` (`STRATEGIES` registry) | 44 registered strategies across 14 families (see below) |
@@ -227,7 +227,7 @@ If `AUTONOMOUS_AUTO_START_ON_SESSION=true`, the SessionStart hook auto-spawns th
 - **Seasonality:** `turn_of_month`, `day_of_week`, `month_of_year`
 - **Pairs / model-based:** `pairs`, `kalman_pairs`, `arima_garch`
 
-Optional exit layers on the QT `signal` command (off by default): `--profit-lock` (V1),
+Optional exit layers on the `signal` command (off by default): `--profit-lock` (V1),
 `--candle-exit` (V2) and `--overbought-exit` (V3), each with an `--*-exempt` strategy list. See
 `signals/profit_lock.py`, `signals/candle_exit.py` and `signals/overbought_exit.py`.
 
@@ -235,12 +235,12 @@ Optional exit layers on the QT `signal` command (off by default): `--profit-lock
 
 Seven skills auto-load when this repo is the working directory:
 
-1. **backtest-expert** — turns a plain-English strategy spec into a vectorized backtest (article skill #1, rewired for Questrade)
-2. **market-data-pipeline** — standardized OHLCV fetch via Questrade (article skill #2)
+1. **backtest-expert** — turns a plain-English strategy spec into a vectorized backtest (article skill #1, rewired for IB and Kraken)
+2. **market-data-pipeline** — standardized OHLCV fetch via IB and Kraken (article skill #2)
 3. **signal-generation** — strategy rules → executable signals, lookahead-bias check (article skill #3)
 4. **risk-management** — ATR sizing, VaR, portfolio heat, kill-switch (article skill #4)
 5. **live-signal-monitor** — polling loop + alerts, no execution (article skill #5)
-6. **questrade-execution** — own skill: signal → risk gate → Questrade order, paper/live aware
+6. **order-execution** — own skill: signal → risk gate → IB or Kraken order, paper/live aware
 7. **claude-trader** — Claude as the trader: weighs the algorithms' signals and decides (`/trade-check`)
 
 ### Claude slash commands (`.claude/commands/`)
@@ -250,7 +250,7 @@ Seven skills auto-load when this repo is the working directory:
 - `/paper-trade` — start a paper session
 - `/live-trade-confirm` — multi-step live-trade approval ritual
 - `/risk-report` — current account exposure, heat, VaR
-- `/positions` — show current Questrade positions
+- `/positions` — show current IB and Kraken positions
 - `/kill` — hit the kill-switch immediately
 - `/trade-check` — Claude decides whether and how to trade right now (routes through the Router)
 - `/trade-now` — place one order Claude already decided on
@@ -277,15 +277,15 @@ flowchart TB
     Sig --> Risk[Risk<br/>Sizer / Heat / VaR / KillSwitch / DailyBudget]
     Risk --> Router[Execution Router]
     Router --> Paper[Paper Broker<br/>in-memory book]
-    Router --> Live[Questrade REST client]
+    Router --> Live[IB or Kraken client]
     Live --> Token[OAuth + Fernet-encrypted<br/>Token Store]
     Live --> Quotes[Quotes + Candles + Orders]
 ```
 
 The same `Strategy` + `Signal` pipeline runs in four modes:
-- **Backtest** — historical OHLCV from Questrade, executes against simulated book
-- **Paper** — live quotes from Questrade, executes against in-memory simulated book
-- **Live** — live quotes from Questrade, executes against your real Questrade account (human-confirmed)
+- **Backtest** — historical OHLCV from IB or Kraken, executes against simulated book
+- **Paper** — live quotes from IB or Kraken, executes against in-memory simulated book
+- **Live** — live quotes from IB or Kraken, executes against your real account there (human-confirmed)
 - **Autonomous** — same as live, but Claude-driven via daemon or LLM session, no per-order typed confirm
 
 ### Every order passes the same risk gate chain
@@ -308,7 +308,7 @@ flowchart LR
     G7 -->|no| Rejected
     G7 -->|yes| G8{daily caps OK?<br/>autonomous only}
     G8 -->|no| Rejected
-    G8 -->|yes| Place[Submit to Questrade]
+    G8 -->|yes| Place[Submit to IB or Kraken]
     Place --> BrokerNo{Broker<br/>accepted?}
     BrokerNo -->|no| Rejected
     BrokerNo -->|yes| Filled[fills.jsonl]
@@ -339,15 +339,15 @@ stateDiagram-v2
 
 ## Tokens & security
 
-- The refresh token is one-shot: every successful refresh returns a **new** refresh token. The broker layer atomically rewrites `state/tokens.json` (encrypted with `TOKEN_ENCRYPTION_KEY`) on each refresh.
-- Lose `state/tokens.json` → re-generate a refresh token at the Questrade app portal and update `.env`.
+- The IB connector's tokens are encrypted with `TOKEN_ENCRYPTION_KEY` under `state/` and rewritten atomically on each refresh.
+- Lose them → log in to the IB connector again. TWS / IB Gateway and Client Portal logins live in their own apps.
 - `.env` is gitignored. Never commit it.
 
 ---
 
 ## Disclaimer
 
-Not affiliated with Questrade or Anthropic. Educational use. No warranty. Past backtest performance does not predict future results. Read the source before running anything live.
+Not affiliated with Interactive Brokers, Kraken or Anthropic. Educational use. No warranty. Past backtest performance does not predict future results. Read the source before running anything live.
 
 ## 12. Paper and money are one build
 

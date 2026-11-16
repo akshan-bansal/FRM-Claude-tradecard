@@ -11,12 +11,13 @@ Workflow by subcommand:
 ### `status` (default if no args)
 Run `uv run trading autonomous status`. Render output as-is.
 
-### `start [--account practice|live]`
-1. First, run `uv run trading status` to confirm Questrade auth works.
+### `start [--account practice|live] [--venue ib|kraken]`
+1. First, run `uv run trading status --venue <ib|kraken>` to confirm the daemon's broker login works.
+   The daemon trades one broker: `autonomous_venue` (default `ib`). `practice` must be an IB paper (DU) login; Kraken has no practice account, so rehearse it with `--account paper`.
 2. Then `uv run trading autonomous status` — if daemon already running, abort.
-3. Read `.env` indirectly: `uv run python -c "from trading_live_claude.config import get_settings;s=get_settings();print(s.autonomous_enabled, s.autonomous_account, s.autonomous_daily_max_trades, s.autonomous_daily_max_notional_usd)"`.
+3. Read `.env` indirectly: `uv run python -c "from trading_live_claude.config import get_settings;s=get_settings();print(s.autonomous_enabled, s.autonomous_account, s.autonomous_venue, s.autonomous_daily_max_trades, s.autonomous_daily_max_notional_usd)"`.
 4. If `autonomous_enabled` is False, refuse and tell user to set `AUTONOMOUS_ENABLED=true` in `.env` themselves.
-5. Run `uv run trading autonomous start` (pass `--account` if provided).
+5. Run `uv run trading autonomous start` (pass `--account` and `--venue` if provided).
 6. After start, immediately run `uv run trading autonomous tail --lines 20` to surface boot logs.
 
 ### `stop`

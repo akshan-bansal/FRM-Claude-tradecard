@@ -602,11 +602,10 @@ def test_broker_literal_covers_every_declared_broker_venue() -> None:
     from trading_live_claude.brokers.ib_web import IBWebBroker
     from trading_live_claude.brokers.kraken import KrakenBroker
     from trading_live_claude.brokers.paper import PaperBroker
-    from trading_live_claude.brokers.questrade import QuestradeBroker
     from trading_live_claude.brokers.routed import VenueRoutedFeed
     from trading_live_claude.execution.approval_asgi import Broker
 
     accepted = set(get_args(Broker))
-    for cls in (IBBroker, IBWebBroker, KrakenBroker, QuestradeBroker, PaperBroker,
+    for cls in (IBBroker, IBWebBroker, KrakenBroker, PaperBroker,
                 VenueRoutedFeed):
         assert cls.venue in accepted, f"{cls.__name__}.venue={cls.venue!r} not in Broker literal"

@@ -1,4 +1,7 @@
-"""Pydantic models at the broker boundary. Mapped from Questrade JSON to typed objects."""
+"""Pydantic models at the broker boundary: every adapter maps its own JSON onto these typed objects.
+
+The camelCase field names come from the Questrade API this framework was first written against.
+"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -134,7 +137,7 @@ class Order(BaseModel):
     isAllOrNone: bool = False
     isAnonymous: bool = False
 
-    # Risk metadata (not sent to Questrade — used by router/journal)
+    # Risk metadata (never sent to a broker — used by router/journal)
     intended_stop: float | None = Field(default=None, exclude=True)
     intended_target: float | None = Field(default=None, exclude=True)
     risk_dollars: float | None = Field(default=None, exclude=True)
@@ -142,26 +145,6 @@ class Order(BaseModel):
     # The broker's own order reference when it is not an integer (a Kraken txid). ``id`` stays the
     # integer handle the journals use; this is what a cancel or an execution lookup needs.
     broker_ref: str | None = Field(default=None, exclude=True)
-
-    def to_questrade_payload(self) -> dict:
-        body: dict = {
-            "accountNumber": self.accountId,
-            "symbolId": self.symbolId,
-            "quantity": self.totalQuantity,
-            "icebergQuantity": 0,
-            "isAllOrNone": self.isAllOrNone,
-            "isAnonymous": self.isAnonymous,
-            "orderType": self.orderType.value,
-            "timeInForce": self.timeInForce.value,
-            "action": self.action.value,
-            "primaryRoute": self.primaryRoute,
-            "secondaryRoute": self.secondaryRoute,
-        }
-        if self.limitPrice is not None:
-            body["limitPrice"] = self.limitPrice
-        if self.stopPrice is not None:
-            body["stopPrice"] = self.stopPrice
-        return body
 
 
 class Execution(BaseModel):

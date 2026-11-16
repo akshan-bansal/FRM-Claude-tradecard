@@ -1,4 +1,4 @@
-"""Broker protocol. Both QuestradeBroker and PaperBroker implement this."""
+"""Broker protocol. Every adapter (Kraken, the IB transports, IBAccess) and PaperBroker implement this."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -33,7 +33,7 @@ class Broker(Protocol):
     """Minimal broker surface for strategies/router."""
 
     name: str
-    # Where orders actually go ("questrade", "kraken", "ib", "ib_web", "paper", "global"). Every
+    # Where orders actually go ("kraken", "ib", "ib_web", "paper", "global"). Every
     # concrete broker sets it; declared here so callers can rely on it (audit gap, 2026-09-18).
     venue: str
 

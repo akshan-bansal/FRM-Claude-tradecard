@@ -57,7 +57,7 @@ def test_orders_jsonl_records_decisions(tmp_path: Path) -> None:
     assert "ts" in row
 
 
-def test_trading_live_refuses_a_mismatched_questrade_env(tmp_path: Path, monkeypatch) -> None:
+def test_trading_live_refuses_a_login_for_the_wrong_account(tmp_path: Path, monkeypatch) -> None:
     """2026-09-18: `trading live` used to only warn. A refusal from the session stops the command
     with exit code 2 and says why. The check itself is `check_money_ready`, tested in test_session.py."""
     from types import SimpleNamespace
@@ -68,10 +68,10 @@ def test_trading_live_refuses_a_mismatched_questrade_env(tmp_path: Path, monkeyp
     from trading_live_claude.monitor.session import SessionError
 
     def _refuse(*_a, **_k):
-        raise SessionError("QUESTRADE_ENV says practice but the token is live")
+        raise SessionError("Asked for IB practice, but the login is a live account. Log in to paper.")
 
     monkeypatch.setattr(cli, "get_settings", lambda: SimpleNamespace(log_level="WARNING", log_dir=tmp_path))
     monkeypatch.setattr(cli, "start_session", _refuse)
     res = CliRunner().invoke(cli.app, ["live", "--symbols", "AAPL", "--confirm", "I UNDERSTAND THE RISK"])
     assert res.exit_code == 2
-    assert "QUESTRADE_ENV" in res.output
+    assert "login is a live account" in res.output
