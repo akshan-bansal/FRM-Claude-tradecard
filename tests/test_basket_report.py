@@ -28,11 +28,13 @@ def test_crypto_screen_is_labelled_in_sample_not_walk_forward() -> None:
     assert ev["kind"] == "screened_in_sample" and "oos_score" not in ev and "screen_score" in ev
 
 
-def test_ib_refuses_equities_with_a_reason() -> None:
-    rep = build_report("ib", ["AAPL", "GC"])
+def test_each_venue_refuses_the_other_venues_class_with_a_reason() -> None:
+    rep = build_report("ib", ["AAPL", "GC", "BTC/USD"])
     by = {r["symbol"]: r for r in rep["rows"]}
-    assert by["AAPL"]["policy_refusal"] and by["GC"]["policy_refusal"] is None
+    assert by["BTC/USD"]["policy_refusal"] and by["AAPL"]["policy_refusal"] is None and by["GC"]["policy_refusal"] is None
     assert rep["scope"]["refused"] == 1
+    kraken = {r["symbol"]: r for r in build_report("kraken", ["BTC/USD", "AAPL"])["rows"]}
+    assert kraken["AAPL"]["policy_refusal"] and kraken["BTC/USD"]["policy_refusal"] is None
 
 
 def test_no_closes_means_no_statistics_and_the_row_says_why() -> None:
@@ -54,9 +56,9 @@ def test_correlation_and_weights_cover_only_symbols_with_stats() -> None:
 
 
 def test_refused_symbols_stay_out_of_the_aggregates() -> None:
-    rep = build_report("ib", ["AAPL", "GC", "SI"],
-                       closes={"AAPL": _close(1), "GC": _close(2), "SI": _close(3)})
-    assert rep["scope"]["with_stats"] == 2 and "AAPL" not in rep["allocator_weights"]
+    rep = build_report("ib", ["BTC/USD", "GC", "SI"],
+                       closes={"BTC/USD": _close(1), "GC": _close(2), "SI": _close(3)})
+    assert rep["scope"]["with_stats"] == 2 and "BTC/USD" not in rep["allocator_weights"]
 
 
 def test_stale_energy_source_withholds_energy_theses() -> None:

@@ -54,8 +54,10 @@ def region_of(symbol: str) -> Region:
 class IBAccessPlan:
     """Which transport serves each region. ``orders`` may name a region's transport or ``None`` (no orders)."""
 
+    # TWS resolves a future only through a FuturesBook its caller attaches, so futures data starts on Client Portal.
     data: Mapping[Region, tuple[Transport, ...]] = field(default_factory=lambda: {
-        r: ("socket", "web", "connector") for r in REGIONS})
+        "north_america": ("socket", "web", "connector"), "europe": ("socket", "web", "connector"),
+        "asia_pacific": ("socket", "web", "connector"), "futures": ("web", "connector")})
     # TWS places stock orders; its live futures orders are not implemented, so futures go through Client Portal.
     orders: Mapping[Region, Transport | None] = field(default_factory=lambda: {
         "north_america": "socket", "europe": "socket", "asia_pacific": "socket", "futures": "web"})
@@ -139,7 +141,7 @@ class IBAccess:
                 continue
             try:
                 return call(self.transport(name))
-            except BrokerError as e:
+            except (BrokerError, OSError, TimeoutError) as e:   # OSError covers refused and reset connections
                 last = e
                 log.warning("ib_access.read_fell_back", region=region, what=what, transport=name, error=str(e))
         raise BrokerError(f"IB {what} for {region}: every data transport failed"

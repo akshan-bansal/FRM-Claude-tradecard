@@ -54,7 +54,7 @@ def _book() -> StrategyBook:
     return StrategyBook(default=EmaCrossover())
 
 
-def _plan(settings: Settings, venue: str = "questrade", mode: str = "paper", **kw: Any) -> sess.SessionPlan:
+def _plan(settings: Settings, venue: str = "ib", mode: str = "paper", **kw: Any) -> sess.SessionPlan:
     return plan_session(settings, venue=venue, mode=mode, symbols=["AAA"], book=_book(), **kw)  # type: ignore[arg-type]
 
 
@@ -99,7 +99,7 @@ def test_every_knob_reaches_paper_and_money_alike(knob: dict[str, Any]) -> None:
 def test_the_fingerprint_ignores_only_what_has_to_differ() -> None:
     paper = _plan(_settings(paper_starting_equity=5_000.0), mode="paper")
     assert paper.fingerprint() == _plan(_settings(), mode="live").fingerprint()
-    other = plan_session(_settings(), venue="questrade", mode="live", symbols=["BBB"], book=_book())
+    other = plan_session(_settings(), venue="ib", mode="live", symbols=["BBB"], book=_book())
     assert paper.fingerprint() != other.fingerprint()
 
 
@@ -131,7 +131,7 @@ def test_streams_stay_separate() -> None:
 
 def test_paper_costs_are_per_venue_and_can_be_overridden() -> None:
     assert _plan(_settings(), "kraken").paper_costs["commission_bps"] == 26.0
-    assert _plan(_settings(), "questrade").paper_costs["flat_per_fill"] == 4.95
+    assert _plan(_settings(), "ib").paper_costs["per_share"] > 0                 # IB charges per share
     p = _plan(_settings(paper_costs={"kraken": {"commission_bps": 40.0}}), "kraken")
     assert p.paper_costs["commission_bps"] == 40.0 and p.paper_costs["slippage_bps"] == 5.0
     assert _plan(_settings(), "kraken", "live").paper_costs == {}
@@ -155,38 +155,42 @@ def test_kraken_trades_its_sleeve_with_the_sleeves_parameters() -> None:
 
 
 def test_the_yaml_strategy_map_reaches_any_venue() -> None:
-    book = resolve_book(_settings(strategy_map="XIC.TO=bollinger"), "questrade", "macd")
+    book = resolve_book(_settings(strategy_map="XIC.TO=bollinger"), "ib", "macd")
     assert book.default.name == "macd" and book.per_symbol["XIC.TO"].name == "bollinger"
-    assert resolve_symbols(_settings(), "questrade", "AAA", book) == ["AAA", "XIC.TO"]
+    assert resolve_symbols(_settings(), "ib", "AAA", book) == ["AAA", "XIC.TO"]
 
 
 def test_bad_strategy_inputs_say_what_is_wrong() -> None:
     with pytest.raises(SessionError, match="Unknown strategy"):
-        resolve_book(_settings(), "questrade", "nope")
+        resolve_book(_settings(), "ib", "nope")
     with pytest.raises(SessionError, match="SYMBOL=strategy"):
-        resolve_book(_settings(strategy_map="XIC.TO"), "questrade")
+        resolve_book(_settings(strategy_map="XIC.TO"), "ib")
 
 
 def test_ib_defaults_and_futures_join_the_symbols() -> None:
     book = resolve_book(_settings(), "ib")
     assert book.default.name == "bollinger"
-    assert resolve_symbols(_settings(), "ib", "", book) == list(sess.DEFAULT_IB_SYMBOLS)
+    # IB carries the equity book Questrade used to, so the yaml symbol list is its default.
+    assert resolve_symbols(_settings(), "ib", "", book) == _settings().symbols_list
+    assert resolve_symbols(_settings(default_symbols=""), "ib", "", book) == list(sess.DEFAULT_IB_SYMBOLS)
     assert resolve_symbols(_settings(), "ib", "", book, ["es"]) == ["ES"]        # a futures run names its whole book
     assert resolve_symbols(_settings(), "ib", "7203.T", book, ["es"]) == ["7203.T", "ES"]
 
 
 # ---------------------------------------------------------------- what must be true before real money
 
-class _Questrade:
-    venue = name = "questrade"
+class _IBLogin:
+    """An IB login with the given account numbers. DU accounts are IB's paper logins."""
 
-    def __init__(self, error: str | None = None) -> None:
-        self.error, self.checked = error, None
+    venue = name = "ib"
 
-    def verify_environment(self, expected: str) -> None:
-        self.checked = expected
+    def __init__(self, *numbers: str, error: str | None = None) -> None:
+        self.numbers, self.error = numbers or ("DU123",), error
+
+    def accounts(self) -> list[Account]:
         if self.error:
             raise BrokerError(self.error)
+        return [Account(type="Margin", number=n, status="Active", isPrimary=i == 0) for i, n in enumerate(self.numbers)]
 
 
 PHRASE = "I UNDERSTAND THE RISK"
@@ -194,32 +198,44 @@ PHRASE = "I UNDERSTAND THE RISK"
 
 def _live_settings(**kw: Any) -> SimpleNamespace:
     """Stands in for settings on a live run, so no test sets a real live execution mode."""
-    return SimpleNamespace(execution_mode="live", questrade_env="live", ib_use_paper=False, **kw)
+    return SimpleNamespace(execution_mode="live", ib_use_paper=False, **kw)
 
 
 def test_money_refuses_without_the_execution_mode() -> None:
     with pytest.raises(SessionError, match="EXECUTION_MODE"):
-        check_money_ready(_settings(), _plan(_settings(), mode="live"), _Questrade(), live_confirmation=PHRASE)  # type: ignore[arg-type]
+        check_money_ready(_settings(), _plan(_settings(), mode="live"), _IBLogin(), live_confirmation=PHRASE)  # type: ignore[arg-type]
 
 
 def test_money_refuses_without_the_phrase() -> None:
     plan = _plan(_settings(), mode="live")
     with pytest.raises(SessionError, match="confirmation phrase"):
-        check_money_ready(_live_settings(), plan, _Questrade(), live_confirmation="yes")  # type: ignore[arg-type]
+        check_money_ready(_live_settings(), plan, _IBLogin(), live_confirmation="yes")  # type: ignore[arg-type]
 
 
-def test_a_token_for_the_wrong_environment_refuses_to_start() -> None:
-    feed = _Questrade("This Questrade token is for the live environment")
-    with pytest.raises(SessionError, match="live environment"):
-        check_money_ready(_live_settings(), _plan(_settings(), mode="live"), feed, live_confirmation=PHRASE)  # type: ignore[arg-type]
-    assert feed.checked == "live"
-
-
-def test_the_daemon_checks_the_account_it_was_told_to_use() -> None:
-    feed = _Questrade()
+def test_the_daemon_checks_the_ib_login_is_the_account_it_was_told_to_use() -> None:
     plan = _plan(_settings(), mode="autonomous")
-    check_money_ready(_live_settings(), plan, feed, expected_env="practice")  # type: ignore[arg-type]
-    assert feed.checked == "practice"
+    check_money_ready(_live_settings(), plan, _IBLogin("DU1"), expected_env="practice")  # type: ignore[arg-type]
+    check_money_ready(_live_settings(), plan, _IBLogin("U1"), expected_env="live")  # type: ignore[arg-type]
+    with pytest.raises(SessionError, match="login is a live account"):
+        check_money_ready(_live_settings(), plan, _IBLogin("U1"), expected_env="practice")  # type: ignore[arg-type]
+    with pytest.raises(SessionError, match="IB's paper account"):
+        check_money_ready(_live_settings(), plan, _IBLogin("DU1"), expected_env="live")  # type: ignore[arg-type]
+    with pytest.raises(SessionError, match="exposes no accounts"):
+        check_money_ready(_live_settings(), plan, _NoAccounts(), expected_env="live")  # type: ignore[arg-type]
+    with pytest.raises(SessionError, match="Could not read"):
+        check_money_ready(_live_settings(), plan, _IBLogin(error="gateway down"), expected_env="live")  # type: ignore[arg-type]
+
+
+class _NoAccounts:
+    def accounts(self) -> list[Account]:
+        return []
+
+
+def test_kraken_has_no_practice_account() -> None:
+    plan = plan_session(_settings(), venue="kraken", mode="autonomous", symbols=["BTC/USD"], book=_book())
+    with pytest.raises(SessionError, match="Kraken has no practice account"):
+        check_money_ready(_live_settings(), plan, object(), expected_env="practice", allow_screened=True)  # type: ignore[arg-type]
+    check_money_ready(_live_settings(), plan, object(), expected_env="live", allow_screened=True)  # type: ignore[arg-type]
 
 
 def test_kraken_money_refuses_a_screened_sleeve_unless_told() -> None:
@@ -253,7 +269,7 @@ def test_autonomous_cannot_be_wrapped_by_the_card(tmp_path: Path, monkeypatch: p
 class _Feed:
     """Quotes and candles only. Nothing behind it can place an order."""
 
-    name = venue = "questrade"
+    name = venue = "ib"
 
     def accounts(self) -> list[Account]:
         return [Account(type="Margin", number="REAL-1", status="Active", isPrimary=True)]
@@ -377,25 +393,29 @@ def test_without_background_it_still_refreshes_inline() -> None:
 
 def test_the_doctor_never_shows_a_secret() -> None:
     secret = "SECRET-VALUE-123"
-    settings = _settings(questrade_refresh_token=secret, token_encryption_key=secret, kraken_api_key=secret,
+    settings = _settings(token_encryption_key=secret, kraken_api_key=secret,
                          kraken_api_secret=secret, worldmonitor_api_key=secret,
                          telegram_bot_token=secret, telegram_chat_id=secret, smtp_host=secret)
     rows = wiring_rows(settings)
     assert all(secret not in " ".join((r.layer, r.item, r.state, r.needed_for)) for r in rows)
     assert {r.state for r in rows if r.item == "KRAKEN_API_KEY"} == {"set"}
-    assert missing_for_money(settings) == {"questrade": [], "kraken": [], "ib": []}
+    assert missing_for_money(settings) == {"kraken": [], "ib": []}
 
 
 def test_the_doctor_names_what_is_missing() -> None:
-    missing = missing_for_money(_settings(questrade_refresh_token="", token_encryption_key="", kraken_api_key="",
-                                          kraken_api_secret=""))
-    assert missing["kraken"] == ["KRAKEN_API_KEY", "KRAKEN_API_SECRET"]
-    assert missing["questrade"] == ["QUESTRADE_REFRESH_TOKEN", "TOKEN_ENCRYPTION_KEY"]
+    missing = missing_for_money(_settings(token_encryption_key="", kraken_api_key="", kraken_api_secret=""))
+    assert missing == {"kraken": ["KRAKEN_API_KEY", "KRAKEN_API_SECRET"], "ib": []}
+
+
+def test_the_doctor_shows_the_ib_transport_plan() -> None:
+    rows = {r.item: r.state for r in wiring_rows(_settings(ib_access={"orders": {"europe": None}}))}
+    assert "'europe': None" in rows["ib_access"] and "QUESTRADE_ENV" not in rows
+    assert rows["ib_access"].startswith("{") and wiring_rows(_settings(ib_access={"orders": {"europe": "connector"}}))
 
 
 def test_every_secret_is_named_in_the_env_template() -> None:
     template = (REPO / ".env.example").read_text(encoding="utf-8")
-    for key in ("QUESTRADE_REFRESH_TOKEN", "TOKEN_ENCRYPTION_KEY", "KRAKEN_API_KEY", "KRAKEN_API_SECRET",
+    for key in ("TOKEN_ENCRYPTION_KEY", "KRAKEN_API_KEY", "KRAKEN_API_SECRET",
                 "WORLDMONITOR_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
         assert f"{key}=" in template, key
 

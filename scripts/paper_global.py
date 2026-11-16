@@ -5,8 +5,8 @@ One PaperBroker, one Router (one kill-switch, heat budget and leverage cap) meas
 each stale-guarded. ``SessionRouter`` queues intents for closed venues, releases them after the
 open auction, and applies spread / board-lot controls. Nothing touches a real account.
 
-Per the desk venue split, IB carries futures plus overseas-listed equities (.L, .AX, .T, .HK);
-US/TSX equities trade on Questrade and are refused. FX is not sourced from IB, so every instrument
+Per the desk venue split, IB carries futures and equities on every listing (US, TSX, .L, .AX, .T,
+.HK) and Kraken carries crypto. FX is not sourced from IB, so every instrument
 must already be in the numeraire: run one book per currency. Futures rows in a different currency
 from the numeraire are skipped, not refused, so the same universe file serves every book. The
 futures contract multiplier (contract size, not FX) is still applied.
@@ -58,7 +58,7 @@ from trading_live_claude.data.cache import CandleCache
 from trading_live_claude.data.market import MarketData
 from trading_live_claude.desk_policy import (
     VenuePolicyError,
-    assert_ib_no_questrade_equities,
+    assert_no_crypto_on_ib,
     assert_single_currency,
     require_explicit_book_sizing,
 )
@@ -158,8 +158,8 @@ def main() -> None:
 
     equities = [s.strip().upper() for s in args.equities.split(",") if s.strip()]
     try:
-        # Desk venue split: US/TSX equities trade on Questrade; overseas listings may use IB.
-        assert_ib_no_questrade_equities(equities)
+        # Desk venue split: crypto trades on Kraken, so --equities may not name a pair.
+        assert_no_crypto_on_ib(equities)
     except VenuePolicyError as e:
         raise SystemExit(f"[global-paper] refusing: {e}") from e
     if args.crypto.strip().lower() == "sleeve":

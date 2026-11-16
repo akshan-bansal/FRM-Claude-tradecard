@@ -252,7 +252,7 @@ def analyse_basket(venue: str, symbols: list[str], state_dir: Path, root: Path =
     from ..intel.routing import classify_instrument
     from .basket import normalize
     syms = list(normalize(symbols))
-    broker = {"qt": "questrade"}.get(venue, venue)
+    broker = venue
     closes: dict[str, Any] = {}
     fetch_errors: dict[str, str] = {}
     if venue == "kraken":

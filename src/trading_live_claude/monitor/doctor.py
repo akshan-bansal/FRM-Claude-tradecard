@@ -32,20 +32,25 @@ def _edges(state_dir: Path) -> str:
 def wiring_rows(settings: Any) -> list[Row]:
     """One row per thing a layer depends on."""
     state_dir = Path(settings.state_dir)
+    from ..brokers.ib_access import IBAccessPlan
+    try:
+        ib_plan = str(IBAccessPlan.from_mapping(settings.ib_access).describe())
+    except ValueError as e:
+        ib_plan = f"invalid: {e}"
     rows = [
-        Row("data", "QUESTRADE_REFRESH_TOKEN", _secret(settings, "questrade_refresh_token"),
-            "Questrade paper and money (first login only, once tokens are stored)"),
-        Row("data", "TOKEN_ENCRYPTION_KEY", _secret(settings, "token_encryption_key"), "Questrade paper and money"),
-        Row("data", "stored Questrade tokens", "present" if (state_dir / "tokens.json.enc").exists() else "none yet",
-            "Questrade after first login"),
         Row("data", "Kraken public data", "no key needed", "Kraken paper"),
-        Row("data", "IB gateway", f"{settings.ib_web_host}:{settings.ib_web_port} (login in the browser)", "IB paper and money"),
+        Row("data", "IB socket", f"{settings.ib_host}:{settings.ib_paper_port if settings.ib_use_paper else settings.ib_live_port}"
+            " (TWS or IB Gateway)", "IB, regions the plan sends to it"),
+        Row("data", "IB gateway", f"{settings.ib_web_host}:{settings.ib_web_port} (login in the browser)",
+            "IB, regions the plan sends to it"),
+        Row("data", "TOKEN_ENCRYPTION_KEY", _secret(settings, "token_encryption_key"), "IB connector tokens"),
+        Row("data", "ib_access", ib_plan, "which IB transport serves each region"),
         Row("execution", "KRAKEN_API_KEY", _secret(settings, "kraken_api_key"), "Kraken money"),
         Row("execution", "KRAKEN_API_SECRET", _secret(settings, "kraken_api_secret"), "Kraken money"),
         Row("execution", "EXECUTION_MODE", settings.execution_mode, "must be live for `trading live`"),
-        Row("execution", "QUESTRADE_ENV", settings.questrade_env, "must match the token's environment for money"),
         Row("execution", "AUTONOMOUS_ENABLED", str(settings.autonomous_enabled), "the autonomous daemon"),
         Row("execution", "AUTONOMOUS_ACCOUNT", settings.autonomous_account, "paper rehearses; live is real money"),
+        Row("execution", "AUTONOMOUS_VENUE", settings.autonomous_venue, "the one broker the daemon trades"),
         Row("execution", "IB_USE_PAPER", str(settings.ib_use_paper), "IB socket account"),
         Row("execution", "ib_auto_confirm_prompts", str(settings.ib_auto_confirm_prompts),
             "off: an IB warning prompt rejects the order"),
@@ -76,6 +81,5 @@ def wiring_rows(settings: Any) -> list[Row]:
 
 def missing_for_money(settings: Any) -> dict[str, list[str]]:
     """Per venue, the keys a money session still lacks."""
-    need = {"questrade": ["questrade_refresh_token", "token_encryption_key"],
-            "kraken": ["kraken_api_key", "kraken_api_secret"], "ib": []}
+    need = {"kraken": ["kraken_api_key", "kraken_api_secret"], "ib": []}
     return {venue: [k.upper() for k in keys if not getattr(settings, k, "")] for venue, keys in need.items()}

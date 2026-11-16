@@ -203,9 +203,9 @@ def _cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, audit_explodes: boo
 
     seen = SimpleNamespace(sink="unset", applied=0, cli=cli)
     settings = SimpleNamespace(log_level="WARNING", log_dir=tmp_path, data_cache_dir=tmp_path,
-                               execution_mode="paper", questrade_env="practice")
+                               execution_mode="paper")
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
-    monkeypatch.setattr(cli, "_make_questrade", lambda _s: object())
+    monkeypatch.setattr(cli, "_make_broker", lambda _s, _v, **_k: object())
     monkeypatch.setattr(cli, "CandleCache", lambda _d: object())
 
     rows = [TuneResult("bollinger", s, 1.0, -0.1, 0.1, 0.5, 20, 2.0 - i * 0.1)

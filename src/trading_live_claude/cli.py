@@ -18,7 +18,7 @@ from rich.table import Table
 from .analysis import build_signal_matrix, render_matrix_markdown
 from .audit.ledger import Ledger
 from .backtest import BacktestEngine
-from .brokers import PaperBroker, QuestradeBroker
+from .brokers import Broker, PaperBroker
 from .brokers.fresh import guard_feed
 from .config import get_settings
 from .daemon import AutonomousDaemon
@@ -44,7 +44,7 @@ from .integrations.lean_algorithm import (
 from .logging_setup import configure_logging, get_logger
 from .monitor import Alerter
 from .monitor.alerter import AlertConfig
-from .monitor.session import SessionError, SessionOptions, build_alerter, start_session
+from .monitor.session import SessionError, SessionOptions, build_alerter, start_session, venue_feed
 from .optimize import PARAM_GRIDS, optimize_parameters
 from .risk import KillSwitch
 from .scoring.objective import DEFAULT_METRIC_WEIGHTS, OBJECTIVES, make_dot_product
@@ -100,7 +100,7 @@ log = get_logger(__name__)
 
 _DEFAULT_REPORTS_DIR = Path("reports")
 
-_O_VENUE = typer.Option("questrade", help="questrade, kraken or ib.")
+_O_VENUE = typer.Option("ib", help="ib (equities and derivatives) or kraken (crypto).")
 _O_SYMBOLS = typer.Option("", help="Comma-separated symbols. Default: the venue's own list (Kraken: the sleeve).")
 _O_STRATEGY = typer.Option("", help="Fallback strategy key. Default: the venue's (Kraken: the sleeve's own).")
 _O_STRATEGY_MAP = typer.Option(
@@ -130,7 +130,9 @@ _O_SPECTRAL_CAP = typer.Option(None, help="Spectral VaR gate: cap an entry's tai
 _O_SPECTRAL_LEVEL = typer.Option(None, help="Spectral VaR confidence level.")
 _O_SPECTRAL_HORIZON = typer.Option(None, help="Spectral VaR horizon in days.")
 _O_FUTURES = typer.Option("", help="IB only: futures roots to resolve as FUT front-month, e.g. 'ES,NQ,GC'.")
-_O_TRANSPORT = typer.Option("web", help="IB only: web (Client Portal Gateway) or socket (TWS/IB Gateway).")
+_O_TRANSPORT = typer.Option(
+    "auto", help="IB only: auto (each region on the transport ib_access in trading.yaml names), "
+                 "web (Client Portal), socket (TWS/IB Gateway) or connector (read-only).")
 
 
 _O_CARD_HOST = typer.Option(
@@ -222,18 +224,35 @@ def _roots(text: str) -> list[str]:
 # ----- helpers ---------------------------------------------------------------
 
 
-def _make_questrade(settings) -> QuestradeBroker:
-    if not settings.questrade_refresh_token:
-        console.print("[red]QUESTRADE_REFRESH_TOKEN missing. See README §Quick start.[/red]")
-        raise typer.Exit(code=2)
-    if not settings.token_encryption_key:
-        console.print("[red]TOKEN_ENCRYPTION_KEY missing. Generate one and put it in .env.[/red]")
-        raise typer.Exit(code=2)
-    return QuestradeBroker.from_settings(
-        refresh_token=settings.questrade_refresh_token,
-        encryption_key=settings.token_encryption_key,
-        state_dir=settings.state_dir,
-    )
+def _venue_of(symbols: list[str]) -> str:
+    """Kraken for crypto pairs, IB for everything else. A list that needs both is refused."""
+    crypto = ["/" in s and not s.startswith("/") for s in symbols]
+    if all(crypto) and crypto:
+        return "kraken"
+    if not any(crypto):
+        return "ib"
+    console.print("[red]These symbols span Kraken (crypto) and IB; run each venue separately.[/red]")
+    raise typer.Exit(code=2)
+
+
+def _make_broker(settings, venue: str, *, money: bool = False) -> Broker:
+    """The venue's adapter. It places orders only with ``money``; reads go wherever its plan says."""
+    try:
+        broker, _keepalive = venue_feed(settings, venue, money=money)
+    except SessionError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=2) from e
+    return broker
+
+
+def _account(settings, broker: Broker, venue: str) -> str:
+    if venue == "ib" and settings.ib_account:
+        return settings.ib_account
+    accounts = broker.accounts()
+    if not accounts:
+        console.print(f"[red]No accounts on the {venue} login.[/red]")
+        raise typer.Exit(code=1)
+    return accounts[0].number
 
 
 def _make_qc(settings) -> QuantConnectClient:
@@ -290,12 +309,12 @@ def main_callback() -> None:
 
 
 @app.command()
-def status() -> None:
-    """Read-only sanity check: token exchange, account, balances."""
+def status(venue: str = _O_VENUE) -> None:
+    """Read-only sanity check: login, accounts, balances."""
     settings = get_settings()
-    broker = _make_questrade(settings)
+    broker = _make_broker(settings, venue)
     accounts = broker.accounts()
-    table = Table(title="Questrade accounts")
+    table = Table(title=f"{venue} accounts")
     for col in ("number", "type", "status", "primary"):
         table.add_column(col)
     for a in accounts:
@@ -317,7 +336,7 @@ def backtest(
 ) -> None:
     """Run a single-symbol backtest and save a markdown report."""
     settings = get_settings()
-    broker = _make_questrade(settings)
+    broker = _make_broker(settings, _venue_of([symbol.upper()]))
     cache = CandleCache(settings.data_cache_dir)
     market = MarketData(broker, cache=cache)
     df = market.history(symbol=symbol, years=years, interval=interval)
@@ -347,6 +366,7 @@ def signal(
     hedge: bool = _O_HEDGE,
     intel_overlay: bool = _O_INTEL,
     overlay_refresh: float = _O_INTEL_REFRESH,
+    venue: str = _O_VENUE,
     paper: bool = typer.Option(
         False,
         "--paper/--dry-run",
@@ -387,10 +407,10 @@ def signal(
     audit_ledger: bool = typer.Option(
         True, "--audit-ledger/--no-audit-ledger",
         help="Record every signal, gate decision and order to the hash-chained audit ledger "
-             "under state/ledger (stream qt). On by default.",
+             "under state/ledger (the venue's stream). On by default.",
     ),
 ) -> None:
-    """Live-signal monitor on Questrade quotes. Never places real orders.
+    """Live-signal monitor on the venue's quotes. Never places real orders.
 
     Article skill #5 ("live-signal-monitor"): output signal only. Use --strategy-map
     to monitor each symbol with its own strategy (e.g. the tuner's best-per-symbol);
@@ -398,9 +418,9 @@ def signal(
     """
     given = locals()
     _run_session(
-        get_settings(), iterations=iterations, venue="questrade", mode="paper" if paper else "dry-run",
+        get_settings(), iterations=iterations, venue=venue, mode="paper" if paper else "dry-run",
         symbols=symbols, strategy=strategy, strategy_map=strategy_map, label="[signal]",
-        options=_options_from(given, intel_refresh=overlay_refresh, stream="qt"),
+        options=_options_from(given, intel_refresh=overlay_refresh),
     )
 
 
@@ -589,15 +609,11 @@ def clear_kill(
 
 
 @app.command()
-def positions() -> None:
-    """Show current Questrade positions for the primary account."""
+def positions(venue: str = _O_VENUE) -> None:
+    """Show the venue's open positions for the primary account."""
     settings = get_settings()
-    broker = _make_questrade(settings)
-    accounts = broker.accounts()
-    if not accounts:
-        console.print("[red]No accounts.[/red]")
-        return
-    acc = settings.questrade_account_number or accounts[0].number
+    broker = _make_broker(settings, venue)
+    acc = _account(settings, broker, venue)
     pos = broker.positions(acc)
     if not pos:
         console.print("[dim]No open positions.[/dim]")
@@ -617,14 +633,11 @@ def positions() -> None:
 
 
 @app.command("risk-report")
-def risk_report() -> None:
-    """Print current portfolio heat + VaR + kill-switch state."""
+def risk_report(venue: str = _O_VENUE) -> None:
+    """Print current portfolio heat + VaR + kill-switch state for one venue's book."""
     settings = get_settings()
-    broker = _make_questrade(settings)
-    accounts = broker.accounts()
-    if not accounts:
-        return
-    acc = settings.questrade_account_number or accounts[0].number
+    broker = _make_broker(settings, venue)
+    acc = _account(settings, broker, venue)
     eq = broker.equity(acc, currency=settings.account_currency)
     pos = broker.positions(acc)
     notional = sum(abs(p.openQuantity) * p.currentPrice for p in pos)
@@ -687,10 +700,10 @@ def tune(
 ) -> None:
     """Backtest a strategy x symbol grid; write the winning config to config/trading.yaml."""
     settings = get_settings()
-    broker = _make_questrade(settings)
     cache = CandleCache(settings.data_cache_dir)
 
     sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()] or list(DEFAULT_TUNE_UNIVERSE)
+    broker = _make_broker(settings, _venue_of(sym_list))
     strat_list = [s.strip() for s in strategies.split(",") if s.strip()] or list(DEFAULT_TUNE_STRATEGIES)
 
     console.print(
@@ -858,7 +871,7 @@ def optimize(
     """Grid-search a strategy's tunable parameters on one symbol; print the best combos.
 
     Free, native alternative to QC's paid cloud optimizer — sweeps the strategy's knobs
-    over Questrade data and ranks by the chosen objective (default Sortino/|maxDD|).
+    over the venue's data and ranks by the chosen objective (default Sortino/|maxDD|).
     """
     if strategy not in PARAM_GRIDS:
         console.print(f"[red]No parameter grid for '{strategy}'. Available: {sorted(PARAM_GRIDS)}[/red]")
@@ -868,7 +881,7 @@ def optimize(
         raise typer.Exit(code=2)
 
     settings = get_settings()
-    broker = _make_questrade(settings)
+    broker = _make_broker(settings, _venue_of([symbol.upper()]))
     cache = CandleCache(settings.data_cache_dir)
     results = optimize_parameters(
         broker, cache, strategy=strategy, symbol=symbol, objective=objective, years=years
@@ -937,10 +950,9 @@ def signal_matrix(
             weights[axis] = float(val)
         rank = "dot_product"  # weights imply the dot-product objective
     settings = get_settings()
-    broker = _make_questrade(settings)
-    market = MarketData(broker, cache=CandleCache(settings.data_cache_dir))
-
     sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()] or list(DEFAULT_TUNE_UNIVERSE)
+    broker = _make_broker(settings, _venue_of(sym_list))
+    market = MarketData(broker, cache=CandleCache(settings.data_cache_dir))
     strat_list = [s.strip() for s in strategies.split(",") if s.strip()] or None
 
     frames: dict[str, pd.DataFrame] = {}
@@ -1005,9 +1017,9 @@ def route(
         raise typer.Exit(code=2)
 
     settings = get_settings()
-    broker = _make_questrade(settings)
-    market = MarketData(broker, cache=CandleCache(settings.data_cache_dir))
     sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()] or list(DEFAULT_TUNE_UNIVERSE)
+    broker = _make_broker(settings, _venue_of(sym_list))
+    market = MarketData(broker, cache=CandleCache(settings.data_cache_dir))
     strat_list = [s.strip() for s in strategies.split(",") if s.strip()] or None
 
     frames: dict[str, pd.DataFrame] = {}
@@ -1189,9 +1201,9 @@ def qc_ingest(
         console.print(f"[yellow]Clone QC strategies for these thin families before live:[/yellow] {gaps}")
 
     if with_native:
-        broker = _make_questrade(settings)
-        market = MarketData(broker, cache=CandleCache(settings.data_cache_dir))
         sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()] or list(DEFAULT_TUNE_UNIVERSE)
+        broker = _make_broker(settings, _venue_of(sym_list))
+        market = MarketData(broker, cache=CandleCache(settings.data_cache_dir))
         frames: dict[str, pd.DataFrame] = {}
         for sym in sym_list:
             try:
@@ -1487,6 +1499,7 @@ def autonomous_status() -> None:
 @autonomous_app.command("start")
 def autonomous_start(
     account: str = typer.Option("", help="Override autonomous_account: paper|practice|live"),
+    venue: str = typer.Option("", help="Override autonomous_venue: ib|kraken. One broker per daemon."),
 ) -> None:
     """Spawn the autonomous daemon. Background process; survives this shell."""
     settings = get_settings()
@@ -1505,9 +1518,18 @@ def autonomous_start(
         console.print(f"[red]Invalid account '{chosen_account}'. Use paper, practice or live.[/red]")
         raise typer.Exit(code=2)
 
+    chosen_venue = (venue or settings.autonomous_venue).lower()
+    if chosen_venue not in {"ib", "kraken"}:
+        console.print(f"[red]Invalid venue '{chosen_venue}'. Use ib or kraken.[/red]")
+        raise typer.Exit(code=2)
+    if chosen_venue == "kraken" and chosen_account == "practice":
+        console.print("[red]Kraken has no practice account. Use --account paper to rehearse it.[/red]")
+        raise typer.Exit(code=2)
+
     extra_env = {
         AUTONOMOUS_ENV_VAR: "true",
         "AUTONOMOUS_ACCOUNT_RUNTIME": chosen_account,
+        "AUTONOMOUS_VENUE_RUNTIME": chosen_venue,
     }
     daemon = AutonomousDaemon(settings.state_dir, settings.log_dir)
     argv = [sys.executable, "-m", "trading_live_claude.cli", "autonomous", "run"]
@@ -1516,7 +1538,7 @@ def autonomous_start(
     except RuntimeError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(code=2) from e
-    console.print(f"[green]Autonomous daemon started (pid={pid}, account={chosen_account}).[/green]")
+    console.print(f"[green]Autonomous daemon started (pid={pid}, venue={chosen_venue}, account={chosen_account}).[/green]")
     console.print(f"  stdout log: {daemon.stdout_log}")
     console.print(f"  stderr log: {daemon.stderr_log}")
 
@@ -1547,13 +1569,18 @@ def autonomous_run() -> None:
         console.print(f"[red]Invalid AUTONOMOUS_ACCOUNT_RUNTIME='{chosen_account}'.[/red]")
         raise typer.Exit(code=2)
 
+    chosen_venue = os.environ.get("AUTONOMOUS_VENUE_RUNTIME", settings.autonomous_venue).lower()
+    if chosen_venue not in {"ib", "kraken"}:
+        console.print(f"[red]Invalid AUTONOMOUS_VENUE_RUNTIME='{chosen_venue}'.[/red]")
+        raise typer.Exit(code=2)
+
     # paper is a rehearsal: the daemon's own gates and budget on a simulated broker. practice and live are
-    # checked against the token, which alone decides the account; a mismatch refuses to start.
+    # checked against the login (IB's paper accounts are DU; Kraken has no practice account).
     rehearsal = chosen_account == "paper"
-    log.info("autonomous.loop.start", account=chosen_account, strategy=settings.autonomous_strategy,
+    log.info("autonomous.loop.start", venue=chosen_venue, account=chosen_account, strategy=settings.autonomous_strategy,
              symbols=settings.autonomous_symbols_list, interval=settings.autonomous_interval_seconds)
     _run_session(
-        settings, venue="questrade", mode="autonomous", symbols=settings.autonomous_symbols_list,
+        settings, venue=chosen_venue, mode="autonomous", symbols=settings.autonomous_symbols_list,
         strategy=settings.autonomous_strategy, expected_env=None if rehearsal else chosen_account,
         rehearsal=rehearsal, label=f"[autonomous/{chosen_account}]",
     )
@@ -1624,17 +1651,13 @@ def place_order(
         raise typer.Exit(code=2)
     action = OrderAction.BUY if side_lower == "buy" else OrderAction.SELL
 
-    feed = _make_questrade(settings)
+    venue = _venue_of([symbol.upper()])
+    feed = _make_broker(settings, venue, money=chosen_mode == "autonomous")
     broker = feed
     if chosen_mode == "paper":
         broker = PaperBroker(feed=guard_feed(feed, settings), starting_equity=100_000.0,
                              journal_dir=settings.state_dir)
-
-    accounts = broker.accounts()
-    if not accounts:
-        console.print("[red]No account.[/red]")
-        raise typer.Exit(code=1)
-    account_number = settings.questrade_account_number or accounts[0].number
+    account_number = _account(settings, broker, venue)
     equity = broker.equity(account_number, currency=settings.account_currency)
 
     # Approximate existing open-risk dollars (2% of notional as a stand-in stop).

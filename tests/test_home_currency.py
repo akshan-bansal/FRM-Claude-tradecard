@@ -271,13 +271,12 @@ def test_a_paper_fill_in_the_same_currency_needs_no_rate() -> None:
 
 # ---------------------------------------------------------------- what IB may carry
 
-@pytest.mark.parametrize("symbol", ["GC", "/GC", "/SIL", "7203.T", "VOD.L", "BHP.AX", "0700.HK"])
-def test_ib_takes_derivatives_and_overseas_listings(symbol: str) -> None:
+@pytest.mark.parametrize("symbol", ["GC", "/GC", "/SIL", "7203.T", "VOD.L", "BHP.AX", "0700.HK", "AAPL", "XIC.TO"])
+def test_ib_takes_derivatives_and_every_equity_listing(symbol: str) -> None:
     assert ib_refusal(symbol) is None
 
 
-@pytest.mark.parametrize(("symbol", "why"), [("AAPL", "trade on Questrade"), ("XIC.TO", "trade on Questrade"),
-                                             ("BTC/USD", "trades on Kraken")])
+@pytest.mark.parametrize(("symbol", "why"), [("BTC/USD", "trades on Kraken"), ("ETH/USD", "trades on Kraken")])
 def test_ib_refuses_what_belongs_elsewhere(symbol: str, why: str) -> None:
     assert why in (ib_refusal(symbol) or "")
 

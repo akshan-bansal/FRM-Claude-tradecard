@@ -30,12 +30,14 @@ from ..portfolio.allocator import PortfolioAllocator
 from .universe import CRYPTO_SLEEVE, validated_for
 
 MAX_SOURCE_AGE_H = 48.0
-PERIODS_PER_YEAR = {"kraken": 365, "qt": 252, "ib": 252}
+PERIODS_PER_YEAR = {"kraken": 365, "ib": 252}
 MIN_BARS = 60
 
 
 def _policy(venue: str, symbol: str) -> str | None:
-    return ib_refusal(symbol) if venue == "ib" else None
+    if venue == "kraken":
+        return None if "/" in symbol and not symbol.startswith("/") else f"{symbol}: Kraken carries crypto only"
+    return ib_refusal(symbol)
 
 
 def _evidence(symbol: str) -> dict[str, Any]:

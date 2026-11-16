@@ -16,7 +16,7 @@ import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
-from tests.test_session import PHRASE, _Feed, _live_settings, _plan, _Questrade, _settings
+from tests.test_session import PHRASE, _Feed, _IBLogin, _live_settings, _plan, _settings
 from trading_live_claude import cli
 from trading_live_claude.brokers.base import BrokerError, StaleQuote
 from trading_live_claude.brokers.fresh import FreshQuoteBroker
@@ -107,21 +107,24 @@ def test_a_session_with_a_key_wires_the_overlay_into_the_monitor(tmp_path: Path,
 
 # ---------------------------------------------------------------- each venue's adapter
 
-def test_questrade_needs_its_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    for kw in ({"questrade_refresh_token": "", "token_encryption_key": "x"},
-               {"questrade_refresh_token": "x", "token_encryption_key": ""}):
-        with pytest.raises(SessionError, match="QUESTRADE_REFRESH_TOKEN"):
-            venue_feed(SimpleNamespace(**kw), "questrade", money=True)
+def test_questrade_is_no_longer_a_venue() -> None:
+    with pytest.raises(SessionError, match="Unknown venue 'questrade'"):
+        venue_feed(SimpleNamespace(), "questrade", money=True)
 
 
-def test_questrade_is_built_from_its_keys(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    import trading_live_claude.brokers as brokers
-    made: list[dict[str, Any]] = []
-    fake = SimpleNamespace(from_settings=lambda **kw: made.append(kw) or "broker")
-    monkeypatch.setattr(brokers, "QuestradeBroker", fake)
-    settings = SimpleNamespace(questrade_refresh_token="r", token_encryption_key="k", state_dir=tmp_path)
-    assert venue_feed(settings, "questrade", money=True) == ("broker", None)
-    assert made[0]["refresh_token"] == "r" and made[0]["state_dir"] == tmp_path
+def test_ib_auto_is_the_regional_access_layer_and_opens_nothing_yet() -> None:
+    from trading_live_claude.brokers.ib_access import IBAccess, LazyTickle
+    access, keepalive = venue_feed(_ib_settings(ib_access={}), "ib", money=True, futures=["GC"])
+    assert isinstance(access, IBAccess) and isinstance(keepalive, LazyTickle)
+    assert access.built("socket") is None and access.built("web") is None
+    assert access.order_transport("/GC") == "web" and access.order_transport("XIC.TO") == "socket"
+
+
+def test_ib_auto_follows_the_yaml_plan_and_refuses_a_bad_one() -> None:
+    access, _ = venue_feed(_ib_settings(ib_access={"orders": {"asia_pacific": "web"}}), "ib", money=False)
+    assert access.order_transport("7203.T") == "web"  # type: ignore[attr-defined]
+    with pytest.raises(SessionError, match="read-only"):
+        venue_feed(_ib_settings(ib_access={"orders": {"europe": "connector"}}), "ib", money=False)
 
 
 def test_kraken_places_orders_only_with_money_and_keys() -> None:
@@ -166,10 +169,8 @@ def test_an_unknown_transport_is_refused() -> None:
 
 # ---------------------------------------------------------------- what must be true before money moves
 
-def test_the_right_token_and_phrase_pass(monkeypatch: pytest.MonkeyPatch) -> None:
-    feed = _Questrade()
-    check_money_ready(_live_settings(), _plan(_settings(), mode="live"), feed, live_confirmation=PHRASE)  # type: ignore[arg-type]
-    assert feed.checked == "live"
+def test_the_phrase_passes_a_live_ib_session() -> None:
+    check_money_ready(_live_settings(), _plan(_settings(), mode="live"), _IBLogin("U1"), live_confirmation=PHRASE)  # type: ignore[arg-type]
 
 
 def test_a_screened_kraken_sleeve_passes_only_when_told() -> None:
@@ -192,11 +193,11 @@ def test_ib_says_when_it_is_on_its_own_paper_account() -> None:
     assert any("IB_USE_PAPER" in x for x in lines)
 
 
-def test_the_daemon_needs_no_phrase_but_its_token_is_still_checked() -> None:
+def test_the_daemon_needs_no_phrase_but_its_login_is_still_checked() -> None:
     plan = _plan(_settings(), mode="autonomous")
-    feed = _Questrade()
-    check_money_ready(_live_settings(questrade_env_override=None), plan, feed, expected_env="practice")  # type: ignore[arg-type]
-    assert feed.checked == "practice"
+    check_money_ready(_live_settings(), plan, _IBLogin("DU1"), expected_env="practice")  # type: ignore[arg-type]
+    with pytest.raises(SessionError, match="live account"):
+        check_money_ready(_live_settings(), plan, _IBLogin("U1"), expected_env="practice")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------- a money session's object graph
@@ -562,10 +563,10 @@ def test_kraken_uses_its_sleeve_and_applies_the_overlay_when_it_can(monkeypatch:
     assert not isinstance(venue_weight_bias("kraken", _Market(), ["A"], lambda _s: None), sess.OverlaidBias)
 
 
-def test_questrade_takes_the_equity_allocator(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ib_equities_take_ibs_allocator(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[Any] = []
-    monkeypatch.setattr(sess, "allocator_weight_bias", lambda *a, **_k: seen.append(a) or "equity")
-    assert venue_weight_bias("questrade", _Market(), ["A"], None) == "equity"
+    monkeypatch.setattr(sess, "_ib_weight_bias", lambda *a, **_k: seen.append(a) or "ib")
+    assert venue_weight_bias("ib", _Market(), ["XIC.TO"], None) == "ib" and seen
 
 
 def test_ib_holds_bonds_back_until_the_overlay_says_risk_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -669,8 +670,17 @@ def test_start_session_with_no_futures_has_no_overrides_and_names_its_label(monk
     built: dict[str, Any] = {}
     monkeypatch.setattr(sess, "venue_feed", lambda *_a, **_k: ("feed", None))
     monkeypatch.setattr(sess, "build_session", lambda _s, plan, **kw: built.update(kw) or "s")
-    start_session(_settings(), venue="questrade", mode="paper", symbols="AAA", strategy="ema_crossover")
-    assert built["class_overrides"] is None and built["label"] == "questrade-paper"
+    start_session(_settings(), venue="ib", mode="paper", symbols="AAA", strategy="ema_crossover")
+    assert built["class_overrides"] is None and built["label"] == "ib-paper"
+
+
+def test_each_venue_refuses_the_other_venues_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sess, "venue_feed", lambda *_a, **_k: ("feed", None))
+    monkeypatch.setattr(sess, "build_session", lambda *_a, **_k: "s")
+    with pytest.raises(SessionError, match="Kraken"):
+        start_session(_settings(), venue="ib", mode="paper", symbols="AAPL,BTC/USD", strategy="ema_crossover")
+    with pytest.raises(SessionError, match="trade these on IB"):
+        start_session(_settings(), venue="kraken", mode="paper", symbols="BTC/USD,AAPL", strategy="ema_crossover")
 
 
 def test_the_script_arguments_all_reach_the_options() -> None:
@@ -683,7 +693,7 @@ def test_the_script_arguments_all_reach_the_options() -> None:
     assert options_from_args(args, level=True).level is True
 
 
-_LIVE = ["live", "--confirm", PHRASE, "--venue", "questrade", "--symbols", "AAA", "--strategy", "ema_crossover",
+_LIVE = ["live", "--confirm", PHRASE, "--venue", "ib", "--symbols", "AAA", "--strategy", "ema_crossover",
          "--max-positions", "3", "--profit-lock", "--max-cost-ratio", "0.01", "--sequential-sizing"]
 
 
@@ -705,7 +715,7 @@ def test_trading_live_hands_the_session_its_phrase_and_flags(tmp_path: Path, mon
 
 def test_trading_live_will_not_start_without_the_phrase_argument(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "get_settings", lambda: _settings(tmp_path))
-    assert CliRunner().invoke(cli.app, ["live", "--venue", "questrade"]).exit_code == 2
+    assert CliRunner().invoke(cli.app, ["live", "--venue", "ib"]).exit_code == 2
 
 
 def test_trading_live_takes_no_paper_only_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -714,8 +724,13 @@ def test_trading_live_takes_no_paper_only_flags(tmp_path: Path, monkeypatch: pyt
         assert CliRunner().invoke(cli.app, ["live", "--confirm", PHRASE, flag]).exit_code == 2, flag
 
 
-def _daemon(tmp: Path, monkeypatch: pytest.MonkeyPatch, *, enabled: bool = True, account: str | None = "paper") -> tuple[Any, dict[str, Any]]:
+def _daemon(tmp: Path, monkeypatch: pytest.MonkeyPatch, *, enabled: bool = True, account: str | None = "paper",
+            venue: str | None = None) -> tuple[Any, dict[str, Any]]:
     seen: dict[str, Any] = {}
+    if venue is None:
+        monkeypatch.delenv("AUTONOMOUS_VENUE_RUNTIME", raising=False)
+    else:
+        monkeypatch.setenv("AUTONOMOUS_VENUE_RUNTIME", venue)
     monkeypatch.setattr(cli, "get_settings", lambda: _settings(tmp, autonomous_enabled=enabled))
     monkeypatch.setattr(cli, "_run_session", lambda _s, **kw: seen.update(kw))
     if account is None:
@@ -754,6 +769,15 @@ def test_the_daemon_rehearses_on_paper_and_checks_the_token_otherwise(tmp_path: 
     assert res.exit_code == 0 and seen["rehearsal"] is True and seen["expected_env"] is None and seen["mode"] == "autonomous"
     res, seen = _daemon(tmp_path, monkeypatch, account="practice")
     assert res.exit_code == 0 and seen["rehearsal"] is False and seen["expected_env"] == "practice"
+
+
+def test_the_daemon_trades_one_venue_ib_unless_told(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    res, seen = _daemon(tmp_path, monkeypatch, account="paper")
+    assert res.exit_code == 0 and seen["venue"] == "ib"
+    res, seen = _daemon(tmp_path, monkeypatch, account="paper", venue="kraken")
+    assert res.exit_code == 0 and seen["venue"] == "kraken"
+    res, seen = _daemon(tmp_path, monkeypatch, account="paper", venue="questrade")
+    assert res.exit_code == 2 and not seen
 
 
 # ---------------------------------------------------------------- reading through the guards

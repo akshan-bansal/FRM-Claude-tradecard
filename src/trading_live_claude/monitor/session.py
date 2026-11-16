@@ -39,7 +39,12 @@ from ..brokers.fx import BankOfCanadaRates, CurrencyNormalizingBroker
 from ..brokers.paper import PaperBroker
 from ..data.cache import CandleCache
 from ..data.market import MarketData
-from ..desk_policy import VenuePolicyError, assert_ib_futures_only, assert_ib_no_questrade_equities
+from ..desk_policy import (
+    VenuePolicyError,
+    assert_ib_futures_only,
+    assert_kraken_crypto_only,
+    assert_no_crypto_on_ib,
+)
 from ..execution.approval import wire_card_approval
 from ..execution.approval_asgi import BookRef
 from ..execution.basket import attach_basket_gate
@@ -71,8 +76,8 @@ from .live_loop import LiveMonitor, MonitorEvent, monitor_policy
 
 log = get_logger(__name__)
 
-Venue = Literal["questrade", "kraken", "ib"]
-VENUES: tuple[Venue, ...] = ("questrade", "kraken", "ib")
+Venue = Literal["kraken", "ib"]
+VENUES: tuple[Venue, ...] = ("kraken", "ib")
 Emit = Callable[[str], object]
 
 # What may differ between a paper plan and its money counterpart, and why: the mode and the fact of real
@@ -86,12 +91,11 @@ NECESSARY_DIFFERENCES = frozenset({"mode", "money", "stream", "strict_ledger", "
 # crossing the spread is still an assumption, to be replaced by what `trading audit query fill-quality`
 # measures. Override any field with `paper_costs` in trading.yaml.
 DEFAULT_PAPER_COSTS: dict[str, dict[str, Any]] = {v: asdict(VenueCostModel.for_venue(v)) for v in VENUES}
-_BASKET_VENUES = {"questrade": "qt", "kraken": "kraken", "ib": "ib"}
-_ASSET_CLASSES = {"questrade": "equity", "kraken": "crypto", "ib": "multi"}
+_BASKET_VENUES = {"kraken": "kraken", "ib": "ib"}
+_ASSET_CLASSES = {"kraken": "crypto", "ib": "multi"}
 # The currency a venue's own equity figure is in, where it cannot be asked for the home currency.
 _NATIVE_EQUITY = {"kraken": "USD", "ib": "USD"}
 _STREAMS: dict[tuple[str, bool], str] = {
-    ("questrade", False): "qt-paper", ("questrade", True): "qt-live",
     ("kraken", False): "kraken", ("kraken", True): "kraken-live",
     ("ib", False): "ib", ("ib", True): "ib-live",
 }
@@ -316,7 +320,8 @@ def resolve_symbols(settings: Any, venue: str, symbols: str | Sequence[str] | No
     else:
         wanted = [s.strip().upper() for s in (symbols or ())]
     if not wanted and not futures:     # a futures run names its whole book
-        wanted = {"kraken": list(CRYPTO_SLEEVE), "ib": list(DEFAULT_IB_SYMBOLS)}.get(venue, settings.symbols_list)
+        # IB carries the equity book that Questrade used to, so the trading.yaml symbol list is its default.
+        wanted = list(CRYPTO_SLEEVE) if venue == "kraken" else (settings.symbols_list or list(DEFAULT_IB_SYMBOLS))
     return list(dict.fromkeys([*wanted, *book.per_symbol, *(s.upper() for s in futures)]))
 
 
@@ -401,22 +406,28 @@ def plan_session(settings: Any, *, venue: str, mode: RouterMode, symbols: Sequen
 
 # ---------------------------------------------------------------- feed and data
 
-def venue_feed(settings: Any, venue: str, *, money: bool, transport: str = "web",
+def venue_feed(settings: Any, venue: str, *, money: bool, transport: str = "auto",
                futures: Sequence[str] = ()) -> tuple[Broker, Any]:
-    """The venue's real adapter, and any keep-alive it needs. It places orders only when ``money``."""
-    if venue == "questrade":
-        from ..brokers import QuestradeBroker
-        if not settings.questrade_refresh_token or not settings.token_encryption_key:
-            raise SessionError("QUESTRADE_REFRESH_TOKEN and TOKEN_ENCRYPTION_KEY must be set in .env.")
-        return QuestradeBroker.from_settings(refresh_token=settings.questrade_refresh_token,
-                                             encryption_key=settings.token_encryption_key,
-                                             state_dir=settings.state_dir), None
+    """The venue's real adapter, and any keep-alive it needs. It places orders only when ``money``.
+
+    IB's ``auto`` is ``brokers/ib_access.py``: each region on the transports ``ib_access`` in trading.yaml
+    names. ``web``, ``socket`` and ``connector`` pin one transport for the whole book.
+    """
+    if venue not in VENUES:
+        raise SessionError(f"Unknown venue {venue!r}. One of {VENUES}.")
     if venue == "kraken":
         from ..brokers.kraken import KrakenBroker
         if money and not (settings.kraken_api_key and settings.kraken_api_secret):
             raise SessionError("A money session on Kraken needs KRAKEN_API_KEY and KRAKEN_API_SECRET in .env.")
         return KrakenBroker(api_key=settings.kraken_api_key or "", api_secret=settings.kraken_api_secret or "",
                             enable_live_orders=money), None
+    if transport == "auto":
+        from ..brokers.ib_access import IBAccessPlan, ib_access_from_settings
+        try:
+            plan = IBAccessPlan.from_mapping(settings.ib_access)
+        except ValueError as e:
+            raise SessionError(str(e)) from e
+        return ib_access_from_settings(settings, money=money, futures=futures, plan=plan)
     if transport == "web":
         from ..brokers.ib_keepalive import TickleThread
         from ..brokers.ib_web import CPGatewayAuth, IBWebBroker
@@ -461,12 +472,8 @@ def check_money_ready(settings: Any, plan: SessionPlan, feed: Broker, *, expecte
             raise SessionError("Set EXECUTION_MODE=live in .env before a live session.")
         if (live_confirmation or "").strip() != LIVE_CONFIRM_PHRASE:
             raise SessionError(f'Live mode requires the confirmation phrase exactly: "{LIVE_CONFIRM_PHRASE}"')
-    if plan.venue == "questrade":
-        # The refresh token alone decides which account is traded, so the setting is checked against it.
-        try:
-            feed.verify_environment(expected_env or settings.questrade_env)  # type: ignore[attr-defined]
-        except BrokerError as e:
-            raise SessionError(str(e)) from e
+    if expected_env:
+        check_account_environment(plan.venue, feed, expected_env)
     if plan.venue == "kraken" and not allow_screened:
         screened = [s for s in plan.symbols if s in CRYPTO_SLEEVE and CRYPTO_SLEEVE[s].tier == "screened"]
         if screened:
@@ -475,6 +482,30 @@ def check_money_ready(settings: Any, plan: SessionPlan, feed: Broker, *, expecte
                                "to trade them with real money anyway.")
     if plan.venue == "ib" and settings.ib_use_paper:
         emit("IB_USE_PAPER is on: a socket session goes to IB's own paper account.")
+
+
+def check_account_environment(venue: str, feed: Broker, expected: str) -> None:
+    """The login must be the account the run asked for. ``practice`` is IB's paper account, ``live`` real money.
+
+    IB's paper logins are the DU accounts. Kraken has no practice account: rehearse it on a simulated broker.
+    """
+    if expected not in ("practice", "live"):
+        raise SessionError(f"Account environment must be practice or live, not {expected!r}.")
+    if venue == "kraken":
+        if expected == "practice":
+            raise SessionError("Kraken has no practice account. Rehearse it with AUTONOMOUS_ACCOUNT=paper instead.")
+        return
+    try:
+        numbers = [a.number for a in feed.accounts()]
+    except BrokerError as e:
+        raise SessionError(f"Could not read the IB login's accounts: {e}") from e
+    if not numbers:
+        raise SessionError("The IB login exposes no accounts; cannot tell paper from live.")
+    paper = all(n.startswith("DU") for n in numbers)
+    if expected == "practice" and not paper:
+        raise SessionError("Asked for IB practice, but the login is a live account. Log in to paper.")
+    if expected == "live" and paper:
+        raise SessionError("Asked for IB live, but the login is IB's paper account.")
 
 
 # ---------------------------------------------------------------- intel
@@ -971,7 +1002,7 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
     if plan.paper_equity is not None:
         account = exec_broker.accounts()[0].number
     else:
-        account = account_number or (settings.questrade_account_number if plan.venue == "questrade" else "")
+        account = account_number or (settings.ib_account if plan.venue == "ib" else "")
         if not account:
             accounts = feed.accounts()
             if not accounts:
@@ -1014,7 +1045,7 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
 
 
 def start_session(settings: Any, *, venue: str, mode: RouterMode, symbols: str | Sequence[str] | None = None,
-                  strategy: str = "", strategy_map: str = "", futures: Sequence[str] = (), transport: str = "web",
+                  strategy: str = "", strategy_map: str = "", futures: Sequence[str] = (), transport: str = "auto",
                   options: SessionOptions | None = None, account_number: str | None = None,
                   live_confirmation: str | None = None, expected_env: str | None = None,
                   rehearsal: bool = False, label: str = "", emit: Emit = _quiet) -> Session:
@@ -1028,6 +1059,11 @@ def start_session(settings: Any, *, venue: str, mode: RouterMode, symbols: str |
         raise SessionError("--resume-session, --close-symbols and --trim-to-slots act on a simulated book only.")
     if venue == "ib":
         _check_ib_policy(wanted, futures, futures_only=settings.ib_futures_only)
+    elif venue == "kraken":
+        try:
+            assert_kraken_crypto_only(wanted)
+        except VenuePolicyError as e:
+            raise SessionError(str(e)) from e
     feed, keepalive = venue_feed(settings, venue, money=plan.money, transport=transport, futures=futures)
     return build_session(settings, plan, feed=feed, book=book, account_number=account_number,
                          live_confirmation=live_confirmation, expected_env=expected_env,
@@ -1038,12 +1074,14 @@ def start_session(settings: Any, *, venue: str, mode: RouterMode, symbols: str |
 
 
 def _check_ib_policy(symbols: Sequence[str], futures: Sequence[str], *, futures_only: bool = False) -> None:
-    """The desk's split (desk_policy.py): IB carries derivatives and overseas listings; North American
-    equities trade on Questrade. ``ib_futures_only`` narrows it to futures."""
+    """The desk's split (desk_policy.py): IB carries equities and derivatives, Kraken carries crypto.
+    ``ib_futures_only`` narrows an IB book to futures."""
     roots = {r.upper().lstrip("/") for r in futures}
     named = [f"/{s.lstrip('/')}" if s.lstrip("/") in roots else s for s in symbols]
     try:
-        (assert_ib_futures_only if futures_only else assert_ib_no_questrade_equities)(named)
+        assert_no_crypto_on_ib(named)
+        if futures_only:
+            assert_ib_futures_only(named)
     except VenuePolicyError as e:
         raise SessionError(str(e)) from e
 

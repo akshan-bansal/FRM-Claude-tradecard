@@ -93,9 +93,10 @@ def _plan_from(seen: dict[str, Any], mode: str = "paper") -> sess.SessionPlan:
 
 # ---------------------------------------------------------------- the commands parse and arrive
 
-def test_the_questrade_command_reaches_the_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_equity_command_reaches_the_plan_on_ib(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The desk's equity runbook, which ran on Questrade until 2026-11-16, now runs on IB unchanged."""
     p = _plan_from(_recorded(monkeypatch, QT_RUNBOOK))
-    assert (p.venue, p.mode, p.stream, p.interval_seconds, p.paper_equity) == ("questrade", "paper", "qt", 300, 100_000.0)
+    assert (p.venue, p.mode, p.stream, p.interval_seconds, p.paper_equity) == ("ib", "paper", "ib", 300, 100_000.0)
     assert len(p.symbols) == 19 and p.strategy_map["XIU.TO"] == "composite" and p.strategy == "bollinger"
     assert p.emit_on_change_only is False and p.intel_overlay is True
     assert p.profit_lock and p.profit_lock_exempt == ("ts_momentum",)
@@ -145,18 +146,19 @@ def test_only_paper_closes_its_book_on_stop() -> None:
                                   SessionOptions(trim_to_slots=True)])
 def test_the_one_shots_refuse_a_real_book(opts: SessionOptions) -> None:
     with pytest.raises(SessionError, match="simulated book"):
-        start_session(_settings(), venue="questrade", mode="live", symbols="AAA", options=opts,
+        start_session(_settings(), venue="ib", mode="live", symbols="AAA", options=opts,
                       strategy="ema_crossover")
 
 
 # ---------------------------------------------------------------- the desk's venue policy
 
-def test_ib_takes_derivatives_and_overseas_listings_but_not_north_american_equities() -> None:
-    with pytest.raises(SessionError, match="trade on Questrade"):
-        start_session(_settings(), venue="ib", mode="paper", symbols="AAPL", strategy="bollinger")
+def test_ib_takes_every_equity_listing_and_derivatives_but_not_crypto() -> None:
+    sess._check_ib_policy(["AAPL", "XIC.TO", "ABC.V"], [])           # North American equities moved to IB
     sess._check_ib_policy(["GC", "MGC"], ["GC", "MGC"])              # roots are futures by definition
     sess._check_ib_policy(["7203.T", "VOD.L", "0700.HK"], [])        # overseas listings are IB's too
-    with pytest.raises(SessionError, match="not IB"):
+    with pytest.raises(SessionError, match="Kraken"):
+        sess._check_ib_policy(["AAPL", "BTC/USD"], [])
+    with pytest.raises(SessionError, match="ib_futures_only"):
         sess._check_ib_policy(["7203.T"], [], futures_only=True)     # the knob narrows it back to futures
 
 
@@ -192,12 +194,12 @@ def test_kraken_refuses_to_guess_lot_rules(tmp_path: Path, monkeypatch: pytest.M
         build_session(settings, _kraken_plan(settings), feed=_KrakenFeed(), book=StrategyBook(default=EmaCrossover()))
 
 
-def test_a_card_session_on_questrade_gates_on_the_qt_basket(tmp_path: Path) -> None:
-    """The basket book calls Questrade ``qt``; a session passing its own name would read no basket at all."""
+def test_a_card_session_on_ib_gates_on_the_ib_basket(tmp_path: Path) -> None:
+    """A session must read the basket under the name the basket book uses, or it would read none at all."""
     settings = _settings(tmp_path)
     plan = _plan(settings, options=SessionOptions(require_card=True, card_attach=True))
     session = build_session(settings, plan, feed=_Feed(), book=StrategyBook(default=EmaCrossover()))
-    assert isinstance(session.router, ApprovalRouter) and session.router.inner.basket_gate.venue == "qt"
+    assert isinstance(session.router, ApprovalRouter) and session.router.inner.basket_gate.venue == "ib"
 
 
 def test_every_session_watches_for_a_stop_and_reads_guarded_quotes(tmp_path: Path) -> None:

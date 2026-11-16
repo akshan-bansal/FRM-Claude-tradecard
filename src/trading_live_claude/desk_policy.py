@@ -1,24 +1,19 @@
 """Desk venue policy: which instrument class trades on which broker.
 
-The desk runs three separate books, one broker each:
+The desk runs two brokers (decided 2026-11-16, when Questrade was retired):
 
-  * **Equities** on Questrade.
   * **Crypto** ("currencies") on Kraken.
-  * **Futures and commodities** on Interactive Brokers.
+  * **Everything else** on Interactive Brokers: North American equities (US, TSX, TSX-V), overseas
+    listings (LSE, ASX, Tokyo, Hong Kong), and futures, options and other derivatives.
 
-So the Interactive Brokers path carries futures, plus (since 2026-09-21) equities listed on
-exchanges Questrade can't reach — LSE, ASX, Tokyo, Hong Kong — for exchange hopping outside
-Canadian hours. North American equities (US, TSX, TSX-V) stay on Questrade and are refused here.
-FX is still not sourced from IB: a basket spanning more than one currency is refused, so the
-hopping runs as one book per currency (a GBP book for LSE, a JPY book for Tokyo + OSE futures, …)
+``brokers/ib_access.py`` picks the IB transport per region. ``ib_futures_only`` in trading.yaml can still
+narrow an IB book to futures. FX is still not sourced from IB: a basket spanning more than one currency is
+refused, so a session runs one book per currency (a GBP book for LSE, a JPY book for Tokyo + OSE futures, …)
 rather than one commingled book normalized through spot FX.
 """
 from __future__ import annotations
 
-from .venues import currency_of, venue_for
-
-# Equity venues Questrade covers. Their stocks trade there, never through IB.
-QUESTRADE_EQUITY_VENUES = frozenset({"US", "TSX", "TSXV"})
+from .venues import currency_of
 
 
 class VenuePolicyError(ValueError):
@@ -38,25 +33,27 @@ def is_equity(symbol: str) -> bool:
 
 
 def assert_ib_futures_only(symbols: list[str]) -> None:
-    """Refuse any equity handed to the IB path — equities trade on Questrade, not IB."""
+    """With ``ib_futures_only`` set, refuse any equity handed to the IB book."""
     equities = sorted(s for s in symbols if is_equity(s))
     if equities:
         raise VenuePolicyError(
-            f"Equities trade on Questrade, not IB (desk venue split): {', '.join(equities)}. "
-            f"The IB book carries futures/commodities only. Route these through the Questrade "
-            f"equity monitor instead."
+            f"ib_futures_only narrows this IB book to futures, so these equities are refused: "
+            f"{', '.join(equities)}. Run them in an IB book without ib_futures_only."
         )
 
 
-def assert_ib_no_questrade_equities(symbols: list[str]) -> None:
-    """Refuse North American equities on IB; futures and overseas-listed equities pass."""
-    domestic = sorted(s for s in symbols
-                      if is_equity(s) and venue_for(s)[0].code in QUESTRADE_EQUITY_VENUES)
-    if domestic:
-        raise VenuePolicyError(
-            f"US/TSX equities trade on Questrade, not IB (desk venue split): {', '.join(domestic)}. "
-            f"IB carries futures and overseas listings (.L, .AX, .T, .HK) only."
-        )
+def assert_no_crypto_on_ib(symbols: list[str]) -> None:
+    """Crypto trades on Kraken only; IB carries equities and derivatives."""
+    crypto = sorted(s for s in symbols if is_crypto(s))
+    if crypto:
+        raise VenuePolicyError(f"Crypto trades on Kraken, not IB (desk venue split): {', '.join(crypto)}.")
+
+
+def assert_kraken_crypto_only(symbols: list[str]) -> None:
+    """Kraken carries crypto only; equities and derivatives trade on IB."""
+    other = sorted(s for s in symbols if not is_crypto(s))
+    if other:
+        raise VenuePolicyError(f"Kraken carries crypto only; trade these on IB: {', '.join(other)}.")
 
 
 def require_explicit_book_sizing(numeraire: str, paper_equity: float | None,

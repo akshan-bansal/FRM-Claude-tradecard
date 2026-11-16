@@ -368,4 +368,5 @@ def test_every_runner_uses_its_own_stream() -> None:
     from trading_live_claude.monitor.session import _STREAMS
     assert len(set(_STREAMS.values())) == len(_STREAMS)
     assert _STREAMS[("kraken", False)] == "kraken" and _STREAMS[("ib", False)] == "ib"
-    assert 'stream="qt"' in (Path(__file__).resolve().parents[1] / "src/trading_live_claude/cli.py").read_text(encoding="utf-8")
+    # Questrade's qt streams are history now: no runner writes them, and their rows stay readable.
+    assert not any(s.startswith("qt") for s in _STREAMS.values())

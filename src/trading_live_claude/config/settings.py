@@ -170,7 +170,10 @@ class Settings(BaseSettings):
     max_round_trip_cost_ratio: float = Field(default=0.0, ge=0.0)  # 0 = off
     params: Literal["default", "wf", "calibrated"] = "default"     # where strategy parameters come from
     sizing_v2: bool = True                   # Kraken's own lot rules; refuses to start without them
-    ib_futures_only: bool = False            # True narrows IB to futures. North American equities never go there
+    ib_futures_only: bool = False            # True narrows an IB book to futures; equities are refused there
+    # Which IB transport serves each region (brokers/ib_access.py): {"data": {region: [transports]},
+    # "orders": {region: transport}, "account": transport}. Empty keeps the defaults.
+    ib_access: dict[str, Any] = Field(default_factory=dict)
     # The hooks' own settings (intel/routing.py, monitor/live_loop.py).
     persistence_min_polls: int = Field(default=5, ge=1)
     persistence_max_age_hours: float = Field(default=6.0, gt=0.0)   # an older run counts as no run, and is logged
@@ -237,6 +240,8 @@ class Settings(BaseSettings):
 
     autonomous_enabled: bool = False
     autonomous_account: AutonomousAccount = "practice"
+    # One broker per daemon (CLAUDE.md). practice = IB's paper login; Kraken has no practice account.
+    autonomous_venue: Literal["ib", "kraken"] = "ib"
     autonomous_interval_seconds: int = Field(default=1200, ge=60, le=3600)
     autonomous_strategy: str = "ema_crossover"
     autonomous_symbols: str = "AAPL,MSFT,XIC.TO,VFV.TO"
@@ -324,6 +329,7 @@ _TRADING_KNOB_FIELDS: tuple[str, ...] = (
     "params",
     "sizing_v2",
     "ib_futures_only",
+    "ib_access",
     "persistence_min_polls",
     "persistence_max_age_hours",
     "allocator_refresh_seconds",
@@ -358,6 +364,7 @@ _TRADING_KNOB_FIELDS: tuple[str, ...] = (
     "account_currency",
     "autonomous_enabled",
     "autonomous_account",
+    "autonomous_venue",
     "autonomous_interval_seconds",
     "autonomous_strategy",
     "autonomous_symbols",

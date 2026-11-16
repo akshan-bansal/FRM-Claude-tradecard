@@ -5,7 +5,8 @@ import pytest
 from trading_live_claude.desk_policy import (
     VenuePolicyError,
     assert_ib_futures_only,
-    assert_ib_no_questrade_equities,
+    assert_kraken_crypto_only,
+    assert_no_crypto_on_ib,
     assert_single_currency,
     is_crypto,
     is_equity,
@@ -20,13 +21,25 @@ def test_classification() -> None:
     assert is_equity("AAPL") and is_equity("XIC.TO") and is_equity("7203.T")
 
 
-def test_ib_refuses_equities_domestic_and_foreign() -> None:
-    with pytest.raises(VenuePolicyError, match="Questrade"):
+def test_ib_carries_every_equity_listing_and_futures() -> None:
+    assert_no_crypto_on_ib(["AAPL", "XIC.TO", "ABC.V", "7203.T", "ISF.L", "IOZ.AX", "2800.HK", "/MCL"])
+    with pytest.raises(VenuePolicyError, match="Kraken"):
+        assert_no_crypto_on_ib(["AAPL", "BTC/USD"])
+
+
+def test_kraken_carries_crypto_only() -> None:
+    assert_kraken_crypto_only(["BTC/USD", "ETH/USD"])
+    for sym in ("AAPL", "XIC.TO", "/ES"):
+        with pytest.raises(VenuePolicyError, match="trade these on IB"):
+            assert_kraken_crypto_only(["BTC/USD", sym])
+
+
+def test_ib_futures_only_still_narrows_a_book() -> None:
+    with pytest.raises(VenuePolicyError, match="ib_futures_only"):
         assert_ib_futures_only(["/CL", "AAPL"])
     with pytest.raises(VenuePolicyError, match=r"7203\.T"):
         assert_ib_futures_only(["7203.T"])
-    # A pure futures/crypto basket is allowed through.
-    assert_ib_futures_only(["/CL", "/GC"])       # a pure futures/crypto basket is allowed
+    assert_ib_futures_only(["/CL", "/GC"])
 
 
 def test_single_currency_guard_refuses_a_mixed_basket() -> None:
@@ -36,17 +49,8 @@ def test_single_currency_guard_refuses_a_mixed_basket() -> None:
     assert_single_currency(["BTC/USD", "ETH/USD"], "USD")   # USD numeraire matches, no FX needed
 
 
-def test_ib_hopping_allows_overseas_listings_only() -> None:
-    # Overseas listings and futures pass: these are what IB is for.
-    assert_ib_no_questrade_equities(["7203.T", "ISF.L", "IOZ.AX", "2800.HK", "/MCL"])
-    # US and TSX/TSX-V equities belong to Questrade.
-    for sym in ("AAPL", "XIC.TO", "ABC.V"):
-        with pytest.raises(VenuePolicyError, match="Questrade"):
-            assert_ib_no_questrade_equities(["7203.T", sym])
-
-
 def test_overseas_book_still_needs_a_single_currency() -> None:
-    # Hopping is one book per currency, so a GBP + JPY basket is still refused.
+    # One book per currency, so a GBP + JPY basket is still refused.
     with pytest.raises(VenuePolicyError, match="one book per currency"):
         assert_single_currency(["ISF.L", "7203.T"], "GBP")
     assert_single_currency(["7203.T", "8306.T"], "JPY")

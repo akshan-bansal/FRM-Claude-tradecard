@@ -33,10 +33,10 @@ def _wire(symbol: str) -> dict[str, str]:
 
 def test_listings_use_each_brokers_spelling() -> None:
     assert _wire("BTC/USD") == {"kraken": "XBTUSD"}
-    assert _wire("XIC.TO") == {"questrade": "XIC.TO", "ib": "XIC", "ib_web": "XIC"}
-    assert _wire("VOO") == {"questrade": "VOO", "ib": "VOO", "ib_web": "VOO"}
+    assert _wire("XIC.TO") == {"ib": "XIC", "ib_web": "XIC"}
+    assert _wire("VOO") == {"ib": "VOO", "ib_web": "VOO"}
     assert _wire("GC") == {"ib": "GC", "ib_web": "GC"}
-    assert _wire("VOD.L") == {"ib": "VOD", "ib_web": "VOD"}     # Questrade: North America only
+    assert _wire("VOD.L") == {"ib": "VOD", "ib_web": "VOD"}
     assert _wire("EURUSD") == {}                                # spot FX is not traded here
 
 
@@ -60,18 +60,19 @@ def test_sleeve_pairs_are_what_the_adapter_or_sleeve_says() -> None:
 
 def test_desk_route_matches_the_basket_split() -> None:
     assert desk_route("BTC/USD") == "kraken"
-    assert desk_route("VOO") == "questrade" and desk_route("XIC.TO") == "questrade"
+    assert desk_route("VOO") == "ib" and desk_route("XIC.TO") == "ib"
     assert desk_route("EURUSD") is None
-    assert desk_route("VOD.L") == "ib"                          # only IB can carry it
-    # A root the basket lets IB carry is one the atlas routes to IB, and an equity is refused there.
+    assert desk_route("VOD.L") == "ib"
+    # What the basket lets IB carry is what the atlas routes to IB, and crypto is refused there.
     assert ib_refusal("GC") is None and desk_route("GC") == "ib"
-    assert ib_refusal("VOO") is not None and desk_route("VOO") != "ib"
+    assert ib_refusal("VOO") is None and desk_route("VOO") == "ib"
+    assert ib_refusal("BTC/USD") is not None and desk_route("BTC/USD") != "ib"
 
 
 def test_resolve() -> None:
     assert resolve("BTC-USD-SPOT", "kraken").wire_form == "XBTUSD"      # type: ignore[union-attr]
-    assert resolve("BTC-USD-SPOT", "questrade") is None
-    assert resolve("NOPE-US", "questrade") is None
+    assert resolve("BTC-USD-SPOT", "ib") is None
+    assert resolve("NOPE-US", "ib") is None
 
 
 def test_validate_atlas_covers_what_the_desk_trades_on_that_broker() -> None:

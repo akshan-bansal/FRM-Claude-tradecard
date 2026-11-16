@@ -2,7 +2,7 @@
 
     python scripts/basket.py status
     python scripts/basket.py sign --venue kraken --from-seed
-    python scripts/basket.py sign --venue qt --symbols XIC.TO,VOO --analysis reports/qt_analysis.json
+    python scripts/basket.py sign --venue ib --symbols XIC.TO,VOO --analysis reports/ib_analysis.json
     python scripts/basket.py withdraw --venue ib
 
 Signing shows the basket and its fingerprint the way a card screen would, then signs with the
@@ -38,7 +38,7 @@ from trading_live_claude.execution.basket import (
 
 STATE = Path("state")
 SEED = Path("config/basket_seed.json")
-VENUES = ("kraken", "qt", "ib")
+VENUES = ("kraken", "ib")
 CARD_ID = "card-sim-001"
 KEY_PATH = STATE / "card_sim" / f"{CARD_ID}.pem"
 

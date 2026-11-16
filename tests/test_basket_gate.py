@@ -37,7 +37,7 @@ def _signed(venue: str, symbols: list[str], key=KEY, card_id: str = "card-a") ->
                    sign=key.sign)
 
 
-def _router(tmp_path: Path, venue: str = "qt") -> tuple[Router, Path]:
+def _router(tmp_path: Path, venue: str = "ib") -> tuple[Router, Path]:
     router = Router.build_default(mode="paper", broker=_StubBroker(), state_dir=tmp_path)
     path = tmp_path / "baskets.jsonl"
     router.basket_gate = BasketGate(venue, BasketBook(path, _verify))
@@ -62,23 +62,23 @@ def test_venue_with_no_basket_takes_no_entries(tmp_path: Path) -> None:
 
 def test_entry_inside_basket_passes_and_outside_is_rejected(tmp_path: Path) -> None:
     router, path = _router(tmp_path)
-    append_row(_signed("qt", ["AAPL", "msft"]), path)
+    append_row(_signed("ib", ["AAPL", "msft"]), path)
     assert _submit(router) is not None
     other = _intent()
     other.symbol = "TSLA"
     assert _submit(router, other) is None
-    assert "outside the card-signed qt basket" in (tmp_path / "rejected.jsonl").read_text(encoding="utf-8")
+    assert "outside the card-signed ib basket" in (tmp_path / "rejected.jsonl").read_text(encoding="utf-8")
 
 
 def test_a_basket_for_another_venue_does_not_admit(tmp_path: Path) -> None:
-    router, path = _router(tmp_path, venue="qt")
+    router, path = _router(tmp_path, venue="ib")
     append_row(_signed("kraken", ["AAPL"]), path)
     assert _submit(router) is None
 
 
 def test_exits_are_never_blocked(tmp_path: Path) -> None:
     router, path = _router(tmp_path)
-    append_row(_signed("qt", ["MSFT"]), path)      # AAPL is not in the basket
+    append_row(_signed("ib", ["MSFT"]), path)      # AAPL is not in the basket
     sell = _intent()
     sell.action = OrderAction.SELL
     sell.stop = 104.0                              # a valid stop for a sell
@@ -88,19 +88,19 @@ def test_exits_are_never_blocked(tmp_path: Path) -> None:
 
 def test_signature_from_an_unregistered_key_does_not_count(tmp_path: Path) -> None:
     router, path = _router(tmp_path)
-    append_row(_signed("qt", ["AAPL"], key=OTHER), path)
+    append_row(_signed("ib", ["AAPL"], key=OTHER), path)
     assert _submit(router) is None
 
 
 def test_unknown_card_id_does_not_count(tmp_path: Path) -> None:
     router, path = _router(tmp_path)
-    append_row(_signed("qt", ["AAPL"], card_id="card-z"), path)
+    append_row(_signed("ib", ["AAPL"], card_id="card-z"), path)
     assert _submit(router) is None
 
 
 def test_hand_edited_symbols_do_not_count(tmp_path: Path) -> None:
     router, path = _router(tmp_path)
-    row = _signed("qt", ["MSFT"])
+    row = _signed("ib", ["MSFT"])
     row["symbols"] = ["AAPL"]                       # display says AAPL, signature covers MSFT
     append_row(row, path)
     assert _submit(router) is None
@@ -109,16 +109,16 @@ def test_hand_edited_symbols_do_not_count(tmp_path: Path) -> None:
 
 def test_later_signed_basket_supersedes_and_an_empty_one_withdraws(tmp_path: Path) -> None:
     router, path = _router(tmp_path)
-    append_row(_signed("qt", ["AAPL"]), path)
+    append_row(_signed("ib", ["AAPL"]), path)
     assert _submit(router) is not None
-    append_row(_signed("qt", []), path)             # signed withdrawal: nothing is allowed
+    append_row(_signed("ib", []), path)             # signed withdrawal: nothing is allowed
     assert _submit(router) is None
 
 
 def test_garbage_lines_are_ignored_not_fatal(tmp_path: Path) -> None:
     router, path = _router(tmp_path)
-    path.write_text("not json\n" + json.dumps({"venue": "qt"}) + "\n", encoding="utf-8")
-    append_row(_signed("qt", ["AAPL"]), path)
+    path.write_text("not json\n" + json.dumps({"venue": "ib"}) + "\n", encoding="utf-8")
+    append_row(_signed("ib", ["AAPL"]), path)
     assert _submit(router) is not None
     assert router.basket_gate.book.rejected_rows == 2
 
@@ -127,10 +127,10 @@ def test_normalize_sorts_dedupes_and_uppercases() -> None:
     assert normalize(["msft", "AAPL", "aapl", " "]) == ("AAPL", "MSFT")
 
 
-@pytest.mark.parametrize("venue", ["QT", "qt", "Qt"])
+@pytest.mark.parametrize("venue", ["IB", "ib", "Ib"])
 def test_venue_match_is_case_insensitive(tmp_path: Path, venue: str) -> None:
     router, path = _router(tmp_path, venue=venue)
-    append_row(_signed("qt", ["AAPL"]), path)
+    append_row(_signed("ib", ["AAPL"]), path)
     assert _submit(router) is not None
 
 
@@ -142,8 +142,8 @@ def test_registry_verifier_reads_cards_paired_after_the_process_started(tmp_path
 
     db = tmp_path / "approval.db"
     router = Router.build_default(mode="paper", broker=_StubBroker(), state_dir=tmp_path)
-    attach_basket_gate(router, "qt", tmp_path, enabled=True)
-    append_row(_signed("qt", ["AAPL"], card_id="card-real"), tmp_path / "baskets.jsonl")
+    attach_basket_gate(router, "ib", tmp_path, enabled=True)
+    append_row(_signed("ib", ["AAPL"], card_id="card-real"), tmp_path / "baskets.jsonl")
     assert _submit(router) is None                              # card not paired yet
     pem = KEY.public_key().public_bytes(serialization.Encoding.PEM,
                                         serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -156,17 +156,17 @@ def test_registry_verifier_reads_cards_paired_after_the_process_started(tmp_path
 def test_attach_is_a_no_op_when_disabled(tmp_path: Path) -> None:
     from trading_live_claude.execution.basket import attach_basket_gate
     router = Router.build_default(mode="paper", broker=_StubBroker(), state_dir=tmp_path)
-    assert attach_basket_gate(router, "qt", tmp_path, enabled=False) is None
+    assert attach_basket_gate(router, "ib", tmp_path, enabled=False) is None
     assert router.basket_gate is None
 
 
 def test_a_future_matches_with_or_without_the_leading_slash(tmp_path: Path) -> None:
     router, path = _router(tmp_path)
-    append_row(_signed("qt", ["/AAPL"]), path)                  # signed with the slash
+    append_row(_signed("ib", ["/AAPL"]), path)                  # signed with the slash
     assert _submit(router) is not None                          # intent symbol is AAPL
 
 
-def test_ib_basket_accepts_futures_roots_and_refuses_equities() -> None:
+def test_ib_basket_accepts_futures_and_equities_and_refuses_crypto() -> None:
     from trading_live_claude.execution.basket import ib_refusal
-    assert ib_refusal("GC") is None and ib_refusal("/SIL") is None
-    assert "trade on Questrade" in (ib_refusal("AAPL") or "")
+    assert ib_refusal("GC") is None and ib_refusal("/SIL") is None and ib_refusal("AAPL") is None
+    assert "Kraken" in (ib_refusal("BTC/USD") or "")

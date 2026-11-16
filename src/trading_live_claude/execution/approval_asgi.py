@@ -312,7 +312,7 @@ class ConvictionMatrixBody(BaseModel):
 class BasketAsk(BaseModel):
     """A venue and the symbols a human typed for it."""
     model_config = ConfigDict(extra="forbid")
-    venue: Literal["kraken", "qt", "ib"]
+    venue: Literal["kraken", "ib"]
     symbols: list[str] = Field(min_length=1, max_length=60)
 
 
@@ -621,7 +621,7 @@ def create_app(
         bpath, ppath = _basket_files()
         book = BasketBook(bpath, registry_verifier(Path(state_dir) / "approval.db"))  # type: ignore[arg-type]
         venues = {}
-        for v in ("kraken", "qt", "ib"):
+        for v in ("kraken", "ib"):
             ap = book.approved(v)
             venues[v] = None if ap is None else {
                 "symbols": sorted(ap.symbols), "issued_at": ap.issued_at, "signed_at": ap.signed_at,

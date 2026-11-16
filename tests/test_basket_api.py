@@ -30,37 +30,43 @@ def env(tmp_path: Path):
 
 def test_analyze_needs_the_token(env) -> None:
     c, _, _ = env
-    assert c.post("/v1/basket/analyze", json={"venue": "qt", "symbols": ["XIC.TO"]}).status_code == 401
+    assert c.post("/v1/basket/analyze", json={"venue": "ib", "symbols": ["XIC.TO"]}).status_code == 401
 
 
 def test_analyze_reports_evidence_and_gaps(env) -> None:
     c, _, _ = env
-    rep = c.post("/v1/basket/analyze", headers=H, json={"venue": "qt", "symbols": ["XIC.TO", "NOPE"]}).json()
+    rep = c.post("/v1/basket/analyze", headers=H, json={"venue": "ib", "symbols": ["XIC.TO", "NOPE"]}).json()
     assert rep["scope"]["symbols"] == 2 and rep["scope"]["with_stats"] == 0
     assert all(r["stats"] is None for r in rep["rows"])
 
 
 def test_propose_is_not_an_approval_until_the_card_signs(env) -> None:
     c, key, tmp = env
-    prop = c.post("/v1/basket/propose", headers=H, json={"venue": "qt", "symbols": ["XIC.TO", "VOO"]}).json()
-    assert c.get("/v1/basket", headers=H).json()["venues"]["qt"] is None       # proposed, not approved
+    prop = c.post("/v1/basket/propose", headers=H, json={"venue": "ib", "symbols": ["XIC.TO", "VOO"]}).json()
+    assert c.get("/v1/basket", headers=H).json()["venues"]["ib"] is None       # proposed, not approved
     assert [p["id"] for p in c.get("/v1/basket", headers=H).json()["proposals"]] == [prop["id"]]
     full = pending_proposals(tmp / "basket_proposals.jsonl")[0]
     assert full["fingerprint"] == prop["fingerprint"]
     append_row(sign_proposal(full, card_id="card-t", sign=key.sign), tmp / "baskets.jsonl")
     got = c.get("/v1/basket", headers=H).json()
-    assert got["venues"]["qt"]["symbols"] == ["VOO", "XIC.TO"] and got["proposals"] == []
+    assert got["venues"]["ib"]["symbols"] == ["VOO", "XIC.TO"] and got["proposals"] == []
 
 
-def test_ib_equities_are_refused_at_propose(env) -> None:
+def test_crypto_is_refused_in_an_ib_basket_at_propose(env) -> None:
     c, _, _ = env
-    r = c.post("/v1/basket/propose", headers=H, json={"venue": "ib", "symbols": ["AAPL", "GC"]})
-    assert r.status_code == 422 and "AAPL" in r.json()["detail"]
+    r = c.post("/v1/basket/propose", headers=H, json={"venue": "ib", "symbols": ["BTC/USD", "GC"]})
+    assert r.status_code == 422 and "BTC/USD" in r.json()["detail"]
+    assert c.post("/v1/basket/propose", headers=H, json={"venue": "ib", "symbols": ["AAPL", "GC"]}).status_code == 200
+
+
+def test_the_retired_questrade_basket_is_not_a_venue(env) -> None:
+    c, _, _ = env
+    assert c.post("/v1/basket/propose", headers=H, json={"venue": "qt", "symbols": ["XIC.TO"]}).status_code == 422
 
 
 def test_stale_proposal_cannot_be_signed(env) -> None:
     c, key, tmp = env
-    c.post("/v1/basket/propose", headers=H, json={"venue": "qt", "symbols": ["XIC.TO"]})
+    c.post("/v1/basket/propose", headers=H, json={"venue": "ib", "symbols": ["XIC.TO"]})
     full = pending_proposals(tmp / "basket_proposals.jsonl")[0]
     full["issued_at"] = "2020-01-01T00:00:00+00:00"
     with pytest.raises(ValueError, match="older than 30 minutes"):
