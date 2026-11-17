@@ -248,6 +248,8 @@ class SqliteCardRegistry:
 # --------------------------------------------------------------------------- #
 
 _SIG_ALG = "ed25519"
+# How often a waiter re-reads its row for an answer another process wrote to the same file.
+WAIT_POLL_SECONDS = 0.5
 
 
 _INTENT_COLS = (
@@ -454,8 +456,19 @@ class SqliteApprovalStore:
         expires_at = datetime.fromisoformat(expires_at_iso)
         remaining = (expires_at - datetime.now(UTC)).total_seconds()
         wait_for = remaining if timeout is None else min(remaining, timeout)
-        wait_for = max(wait_for, 0.0)
-        ev.wait(timeout=wait_for)
+        deadline = time.monotonic() + max(wait_for, 0.0)
+        # The event wakes a waiter at once when this process recorded the answer. An answer written by
+        # another process sharing the file (a standalone shim, `--card-attach`) sets no event here, so
+        # the row is re-read every WAIT_POLL_SECONDS; otherwise an ACCEPT would sit unseen until expiry.
+        while (left := deadline - time.monotonic()) > 0:
+            if ev.wait(timeout=min(left, WAIT_POLL_SECONDS)):
+                break
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT verdict FROM intents WHERE intent_id = ?", (intent_id,),
+                ).fetchone()
+            if row is not None and row[0] is not None:
+                break
 
         with self._lock:
             row = self._conn.execute(

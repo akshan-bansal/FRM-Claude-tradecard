@@ -103,6 +103,8 @@ allocator_bias_cap: 3.0
 spectral_var_cap: null            # e.g. 0.005 turns the gate on
 spectral_var_level: 0.99
 spectral_var_horizon: 1
+gap_risk_level: 0.99              # size entries for this quantile of close-to-open gaps; null = off
+gap_risk_min_gaps: 250
 hedge_symbol: ""                  # UUP runs the dollar-hedge overlay
 # Set this to the money you plan to trade: rounding, the minimum ticket and fees all scale with it.
 paper_starting_equity: 100000

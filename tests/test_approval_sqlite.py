@@ -505,3 +505,28 @@ def test_a_closed_instance_does_not_leak_the_file_handle(db_path, keypair, tmp_p
     reg.close()
     db_path.unlink()                             # would raise PermissionError if still held
     assert not db_path.exists()
+
+
+def test_an_answer_written_through_another_store_on_the_same_file_is_seen_promptly(db_path, keypair):
+    # A standalone shim (`--card-attach`) records the card's answer in its own process. The waiting
+    # loop shares only the file, so no in-process event fires; it must still see the ACCEPT long
+    # before the prompt's TTL runs out.
+    import time
+
+    key, pem = keypair
+    reg = SqliteCardRegistry(db_path)
+    reg.register("c1", pem)
+    waiter = SqliteApprovalStore(reg, db_path)
+    shim = SqliteApprovalStore(SqliteCardRegistry(db_path), db_path)
+    prompt = waiter.publish(_intent(), mode="paper", broker="ib", ttl_seconds=30)
+
+    holder: dict = {}
+    t = threading.Thread(target=lambda: holder.__setitem__("v", waiter.wait(prompt.intent_id)))
+    started = time.monotonic()
+    t.start()
+    threading.Event().wait(0.1)
+    sig = key.sign(prompt.canonical.encode())
+    assert shim.respond(prompt.intent_id, decision="ACCEPT", card_id="c1", signature=sig)
+    t.join(timeout=5)
+    assert holder.get("v") == "ACCEPT"
+    assert time.monotonic() - started < 3.0

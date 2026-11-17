@@ -61,6 +61,7 @@ def wiring_rows(settings: Any) -> list[Row]:
         Row("risk", "forced_exits", str(settings.forced_exits), "off unless set"),
         Row("risk", "require_card / require_basket", f"{settings.require_card} / {settings.require_basket}", "every runner but autonomous"),
         Row("risk", "spectral_var_cap", str(settings.spectral_var_cap), "off unless set"),
+        Row("risk", "gap_risk_level", str(settings.gap_risk_level), "null turns it off"),
         Row("risk", "position_cap_mode", settings.position_cap_mode, "every runner"),
         Row("risk", "max_round_trip_cost_ratio", str(settings.max_round_trip_cost_ratio), "0 = off"),
         Row("data", "on_stale_quote", settings.on_stale_quote, "every runner: raise skips a frozen symbol"),

@@ -60,6 +60,7 @@ from ..intel.apply import OverlaidBias
 from ..intel.routing import OverlayProvider, PersistenceGate, futures_overrides
 from ..intel.vs_engine import MarketContext, VSInvestmentEngine
 from ..logging_setup import get_logger
+from ..risk.gap_risk import attach_gap_gate
 from ..risk.position_cap import position_cap_for
 from ..risk.sizing import PositionSizer
 from ..risk.sizing_policy import SizingPolicy, calendar_days
@@ -151,6 +152,7 @@ class SessionOptions:
     spectral_var_cap: float | None = None
     spectral_var_level: float | None = None
     spectral_var_horizon: int | None = None
+    gap_risk_level: float | None = None
     paper_equity: float | None = None
     audit_ledger: bool = True
     allow_screened: bool = False
@@ -228,6 +230,8 @@ class SessionPlan:
     spectral_var_cap: float | None
     spectral_var_level: float
     spectral_var_horizon: int
+    gap_risk_level: float | None
+    gap_risk_min_gaps: int
     intel_overlay: bool
     intel_refresh_seconds: float
     hedge_symbol: str
@@ -392,6 +396,8 @@ def plan_session(settings: Any, *, venue: str, mode: RouterMode, symbols: Sequen
         spectral_var_cap=pick(o.spectral_var_cap, settings.spectral_var_cap),
         spectral_var_level=float(pick(o.spectral_var_level, settings.spectral_var_level)),
         spectral_var_horizon=int(pick(o.spectral_var_horizon, settings.spectral_var_horizon)),
+        gap_risk_level=pick(o.gap_risk_level, settings.gap_risk_level),
+        gap_risk_min_gaps=int(settings.gap_risk_min_gaps),
         intel_overlay=bool(pick(o.intel_overlay, settings.intel_overlay)),
         intel_refresh_seconds=float(pick(o.intel_refresh, settings.intel_refresh_seconds)),
         hedge_symbol="UUP" if o.hedge else (settings.hedge_symbol if o.hedge is None else ""),
@@ -973,6 +979,10 @@ def build_session(settings: Any, plan: SessionPlan, *, feed: Broker, book: Strat
                                     horizon_days=plan.spectral_var_horizon)
     if spectral is not None:
         emit(f"spectral VaR gate ON: {spectral.thresholds()}")
+    gap = attach_gap_gate(router, feed, level=plan.gap_risk_level, risk_pct=settings.risk_pct_per_trade,
+                          min_gaps=plan.gap_risk_min_gaps)
+    if gap is not None:
+        emit(f"gap-risk gate ON: {gap.thresholds()}")
     router.price_currency = plan.account_currency
     sizing_policy = _sizing_policy(plan, feed, router, state_dir, session_id, rates, emit)
     monitor_ref: list[LiveMonitor] = []
@@ -1113,6 +1123,8 @@ def add_session_args(ap: argparse.ArgumentParser) -> None:
                     help="Spectral VaR gate: an ENTRY whose VaR exceeds this fraction of equity is trimmed "
                          "or rejected, e.g. 0.005 = 0.5%%. Exits are never gated.")
     ap.add_argument("--spectral-var-level", dest="spectral_var_level", type=float, default=None)
+    ap.add_argument("--gap-risk-level", dest="gap_risk_level", type=float, default=None,
+                    help="Quantile of adverse close-to-open gaps entries are sized for. Default from trading.yaml.")
     ap.add_argument("--spectral-var-horizon", dest="spectral_var_horizon", type=int, default=None,
                     help="VaR horizon in trading days.")
     ap.add_argument("--flatten-on-exit", dest="flatten_on_exit", action=bool_flag, default=None,
@@ -1149,6 +1161,7 @@ def options_from_args(args: argparse.Namespace, *, level: bool | None = None) ->
                           card_shim_host=args.card_shim_host, card_attach=args.card_attach, card_ttl=args.card_ttl,
                           require_basket=args.require_basket, spectral_var_cap=args.spectral_var_cap,
                           spectral_var_level=args.spectral_var_level, spectral_var_horizon=args.spectral_var_horizon,
+                          gap_risk_level=args.gap_risk_level,
                           paper_equity=args.paper_equity, audit_ledger=args.audit_ledger,
                           flatten_on_exit=args.flatten_on_exit, warmup_interval=args.warmup_interval,
                           warmup_minutes=args.warmup_minutes, parallel_sizing=args.parallel_sizing,

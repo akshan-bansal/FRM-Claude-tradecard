@@ -53,6 +53,30 @@ from .router import OrderIntent, Router
 
 log = get_logger(__name__)
 
+THESIS_MAX = 140   # the VS engine's limit; the card pans what does not fit
+
+
+def gap_clause(decision: object) -> str:
+    """The card's line for a gap-risk trim, or "" when the gate left the size alone.
+
+    The trimmed size is already in the signed bytes. This only says why it is smaller, as unsigned context."""
+    for trim in getattr(decision, "trims", None) or []:
+        if trim.get("cap") == "gap_risk":
+            loss = (getattr(decision, "observed", {}) or {}).get("gap_risk", {}).get("loss_fraction")
+            gap = f" for {loss:.1%} gap" if isinstance(loss, (int, float)) else ""
+            return f"gap-trim {trim['from_shares']:g}>{trim['to_shares']:g}{gap}"
+    return ""
+
+
+def with_risk_clause(clause: str, thesis: str) -> str:
+    """Put a risk clause first, so truncation to ``THESIS_MAX`` drops the narrative, never the risk.
+
+    ``~`` marks the cut, as the card's ``fit`` does: its 5x7 font is ASCII."""
+    if not clause:
+        return thesis
+    joined = f"{clause}; {thesis}" if thesis else clause
+    return joined if len(joined) <= THESIS_MAX else joined[: THESIS_MAX - 1] + "~"
+
 Verdict = Literal["ACCEPT", "DECLINE", "EXPIRED"]
 
 
@@ -630,6 +654,7 @@ class ApprovalRouter:
             except Exception as e:  # narrator failure must not break the loop
                 log.warning("approval_router.thesis_fn_failed",
                             symbol=intent.symbol, error=str(e))
+        thesis = with_risk_clause(gap_clause(decision), thesis)
         prompt = self.store.publish(
             intent,
             mode=self.inner.mode,
