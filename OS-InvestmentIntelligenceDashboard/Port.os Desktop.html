@@ -214,7 +214,7 @@ body {
 <main class="stage">
   <header class="intro">
     <h1>Port<span>.os</span></h1>
-    <p>Home screen of the GenMachine Ren 13-i4 · 8″ touchscreen, 1280 × 800 · Intel Core i3-4020Y</p>
+    <p>Home screen of the GenMachine Ren 13-i4 set up as the TradeCard desk · 8″ touchscreen, 1280 × 800 · Intel Core i3-4020Y</p>
   </header>
 
   <div class="fit" id="fit">
@@ -223,7 +223,7 @@ body {
 
         <div class="statusbar">
           <div class="brand"><span class="wordmark">Port<span>.os</span></span><span class="device-name">GenMachine Ren 13-i4</span></div>
-          <div class="alert-strip" role="status"><span class="alert-chip">Warning</span>CURR-07 · Compressor 1 at 14.2 A, near its 15 A limit</div>
+          <div class="alert-strip" role="status"><span class="alert-chip">Warning</span>HEAT · Portfolio heat 4.6%, near its 5% cap</div>
           <div class="metrics"><span>CPU <b>28%</b></span><span><b>42</b> °C</span><span>GbE</span><span class="clock" id="clock">10:24</span></div>
         </div>
 
@@ -248,14 +248,14 @@ body {
             </section>
             <section class="card selftest">
               <h2>Self-test</h2>
-              <div class="num"><span id="stPassed">6,680</span><small>passed</small></div>
+              <div class="num"><span id="stPassed">0</span><small>passed</small></div>
               <dl>
                 <dt>Failed</dt><dd>0</dd>
-                <dt>Waiting for device</dt><dd id="stDevice">300</dd>
-                <dt>Not yet run</dt><dd id="stPlanned">1,020</dd>
+                <dt>Waiting for device</dt><dd id="stDevice">280</dd>
+                <dt>Not yet run</dt><dd id="stPlanned">7,720</dd>
                 <dt>Total</dt><dd id="stTotal">8,000</dd>
               </dl>
-              <p class="when">Mock run · 17 Nov 2026</p>
+              <p class="when">Specified 24 Nov 2026 · no run yet</p>
             </section>
           </aside>
 
@@ -277,7 +277,7 @@ body {
     </div>
   </div>
 
-  <p class="note">Tap an app to see what its tests cover. Test counts come from the 17 Nov 2026 mock run, except OCR Scanner and Object Detection: reprogrammed on 24 Nov 2026 for the trading desk's visual feed, their tests are specified and not yet run. The sensor values and the compressor warning are sample data.</p>
+  <p class="note">Every app serves the TradeCard engine: the card, the shim, the Router and its gates, and the journals they write. Tap an app to see what its tests cover. The tests are specified, not yet run. The device readings and the heat warning are sample data.</p>
 </main>
 
 <script>
@@ -305,48 +305,87 @@ const GLYPH = {
   planned: '<rect x="5.5" y="5.5" width="13" height="13" rx="2" stroke-dasharray="2 3"/>',
 };
 const STATE_LABEL = { verified: 'Verified', harness: 'Awaiting device', timing: 'Device only', planned: 'Not yet run' };
+const LEGEND = {
+  verified: 'the decision logic passed every case.',
+  harness: 'the test harness passed; real accuracy needs the models on the GenMachine.',
+  timing: 'timing budgets, measured on the device.',
+  planned: 'specified for the TradeCard engine; no harness or result yet.',
+};
 
 const REALMS = [
   { n: 1, name: 'Voice & Audio', apps: ['voice'] },
   { n: 2, name: 'Vision & Perception', apps: ['ocr', 'detect', 'security'] },
-  { n: 3, name: 'Data & Sensors', apps: ['iot', 'anomaly', 'diag'] },
+  { n: 3, name: 'Data & Signals', apps: ['iot', 'anomaly', 'diag'] },
   { n: 4, name: 'Language & Logic', apps: ['chat', 'analytics', 'dashboard'] },
   { n: 5, name: 'Control & Integration', apps: ['remote', 'process', 'store'] },
 ];
 const APPS = {
-  voice: { name: 'Voice Assistant', desc: 'Wake word, speech-to-text and spoken replies',
-    tests: [['Wake word detected', 180, 'harness'], ['Near-miss rejection', 60, 'harness'], ['Command transcription', 120, 'harness'],
-            ['Intent routing', 40, 'verified'], ['Spoken replies', 80, 'harness'], ['Command latency', 20, 'timing']] },
-  ocr: { name: 'OCR Scanner', desc: 'Reads the TradeCard screen against the desk prompt',
+  // Every app serves the TradeCard engine. Cases lean toward what can move money or stop it (Realm 5, Realm 3).
+  voice: { name: 'Voice Desk', desc: 'Prompts read aloud, alerts spoken, halt by voice',
+    note: '“Hey Gen” reads a pending prompt aloud, speaks fills, halts and gate rejections, and answers read-only questions. “Halt” trips the kill switch. Voice can never approve a prompt or clear a halt.',
+    tests: [['Wake word detected', 100, 'planned'], ['Near-miss rejection', 60, 'planned'], ['Read-only questions transcribed', 100, 'planned'],
+            ['Prompt read aloud matches the card', 80, 'planned'], ['“Halt” trips the kill switch', 60, 'planned'],
+            ['Approve or clear by voice refused', 60, 'planned'], ['Command latency', 40, 'timing']] },
+  ocr: { name: 'Card Reader', desc: 'Reads the TradeCard screen against the desk prompt',
     note: 'Visual feed: the device camera on the TradeCard\'s screen. It reads the fields and the fingerprint the card shows and compares them with the pending prompt the desk panel reads from the shim. A difference holds the prompt and raises an alarm. It never approves or declines: the ACCEPT stays a signature made on the card.',
-    tests: [['Card fields by light, glare and angle', 200, 'planned'], ['Fingerprint, look-alike glyphs (0/O, 1/l, 8/B)', 100, 'planned'],
-            ['Swapped venue or resized intent flagged', 120, 'planned'], ['Unreadable frame holds, never matches', 40, 'planned'],
-            ['Read inside the prompt\'s time limit', 40, 'timing']] },
-  detect: { name: 'Object Detection', desc: 'Candle patterns and levels on chart frames',
+    tests: [['Card fields by light, glare and angle', 240, 'planned'], ['Fingerprint, look-alike glyphs (0/O, 1/l, 8/B)', 120, 'planned'],
+            ['Swapped venue or resized intent flagged', 140, 'planned'], ['Unreadable frame holds, never matches', 60, 'planned'],
+            ['Read inside the 90 s prompt window', 40, 'timing']] },
+  detect: { name: 'Chart Detection', desc: 'Candle patterns and levels on chart frames',
     note: 'Visual feed: price-chart frames captured from the desk\'s screens. Each detection is scored against the same pattern computed from the bars that drew the frame. Detections are alerts only: an order still goes through the Router and its gates.',
-    tests: [['Candle patterns × timeframe × theme × zoom', 240, 'planned'], ['Breakouts, support and resistance', 140, 'planned'],
-            ['Forming candle ignored (no lookahead)', 60, 'planned'], ['Quiet charts stay quiet', 100, 'planned'],
-            ['Alerts only, no order path', 20, 'planned'], ['Frame-to-alert latency', 40, 'timing']] },
-  security: { name: 'Security Monitor', desc: 'Restricted zones and loitering',
-    tests: [['Zone intrusion and loitering', 100, 'verified']] },
-  iot: { name: 'IoT Monitor', desc: 'Readings, validation, alert levels',
-    tests: [['Reading validation', 500, 'verified'], ['Alert levels with hysteresis', 300, 'verified']] },
-  anomaly: { name: 'Anomaly Detect', desc: 'Spikes, drift, stuck sensors, noise',
-    tests: [['Injected anomalies, within lag limits', 800, 'verified'], ['Healthy streams stay quiet', 200, 'verified']] },
-  diag: { name: 'Machine Diagnostics', desc: 'Bearing wear, overheating, cavitation',
-    tests: [['Fault diagnosis', 200, 'verified']] },
-  chat: { name: 'Local AI Chat', desc: 'Offline assistant on qwen2.5:1.5b',
-    tests: [['Answers from device facts', 500, 'harness'], ['Instruction following', 400, 'harness'], ['Safety refusals vs. over-refusal', 400, 'harness'], ['Response speed', 200, 'timing']] },
-  analytics: { name: 'Edge AI Analytics', desc: 'Shift summaries and alert triage',
-    tests: [['Shift-log summaries', 500, 'harness'], ['Alert triage', 600, 'harness'], ['Typos, 4 languages, long input', 300, 'harness']] },
-  dashboard: { name: 'Data Dashboard', desc: 'Ask for a chart in plain words',
-    tests: [['Request to chart query', 600, 'harness']] },
-  remote: { name: 'Remote Mgmt', desc: 'API, access, network, settings',
-    tests: [['API contract', 80, 'verified'], ['Access tokens and scopes', 100, 'verified'], ['Network failover', 60, 'verified'], ['Settings validation', 120, 'verified'], ['Diagnostics command filter', 140, 'verified']] },
-  process: { name: 'Process Control', desc: 'Start, pause, reset, e-stop',
-    tests: [['State machine with guard interlock', 120, 'verified']] },
-  store: { name: 'App Store', desc: 'Signed installs, updates, rollback',
-    tests: [['Install, update, rollback', 180, 'verified']] },
+    tests: [['Candle patterns × timeframe × theme × zoom', 160, 'planned'], ['Breakouts, support and resistance', 90, 'planned'],
+            ['Forming candle ignored (no lookahead)', 50, 'planned'], ['Quiet charts stay quiet', 60, 'planned'],
+            ['Alerts only, no order path', 20, 'planned'], ['Frame-to-alert latency', 20, 'timing']] },
+  security: { name: 'Desk Security', desc: 'Screen privacy and an unattended desk',
+    note: 'The camera counts faces; it does not identify anyone. A second face blanks the account figures, and an empty desk locks the panel. A pending prompt still expires unsigned on the card\'s own timer.',
+    tests: [['Second face in view blanks figures', 80, 'planned'], ['Empty desk locks the panel', 60, 'planned'],
+            ['Lock drops the panel\'s token', 40, 'planned'], ['Lock latency', 20, 'timing']] },
+  iot: { name: 'Market Feed', desc: 'Quotes, bars and FX, checked before use',
+    note: 'Validates every quote and bar before a gate reads it, and prices it in CAD at the Bank of Canada\'s daily rate. A quote frozen for 900 s skips that symbol rather than trading on it.',
+    tests: [['Quote and bar validation (crossed, zero, out of range)', 240, 'planned'], ['Frozen quote skips the symbol', 120, 'planned'],
+            ['Stale FX rate marks the quote stale', 80, 'planned'], ['CAD at the daily rate', 120, 'planned'],
+            ['Feed alert levels with hysteresis', 100, 'planned'], ['Feed-to-gate latency', 40, 'timing']] },
+  anomaly: { name: 'Market Anomaly', desc: 'Bad ticks, gaps, frozen books, regime breaks',
+    tests: [['Injected bad ticks and gaps, within lag limits', 260, 'planned'], ['Frozen and one-sided books', 120, 'planned'],
+            ['Regime breaks in the correlation spectrum', 120, 'planned'], ['Healthy markets stay quiet', 160, 'planned'],
+            ['Alerts only, no order path', 40, 'planned']] },
+  diag: { name: 'Risk Diagnostics', desc: 'Heat, VaR, drawdown and exposure',
+    note: 'Reads equity, positions and the peak from the journal under state/, never recomputes them. A drawdown past 3% trips the kill switch; a paper drawdown stops paper only.',
+    tests: [['Figures match the journal', 200, 'planned'], ['Heat against the 5% cap', 140, 'planned'], ['VaR and spectral VaR', 140, 'planned'],
+            ['Drawdown past 3% trips the halt', 120, 'planned'], ['Paper drawdown stops paper only', 100, 'planned'],
+            ['Peak never reset by an edit', 100, 'planned']] },
+  chat: { name: 'Desk Assistant', desc: 'Offline questions on qwen2.5:1.5b',
+    note: 'Answers from the journal and the ledger, and names the row it read. It describes signal state and never gives a directive. It has no tool that places, approves or clears anything.',
+    tests: [['Answers from journal facts, with the row', 220, 'planned'], ['Gate rejections explained', 120, 'planned'],
+            ['Research framing, no directives', 100, 'planned'], ['Order, approve and clear requests refused', 80, 'planned'],
+            ['Response speed', 80, 'timing']] },
+  analytics: { name: 'Thesis & Intel', desc: 'Card theses, session summaries, alert triage',
+    note: 'Composes the thesis of 140 characters or fewer that the card shows, keeping risk clauses first when it truncates. Summarises sessions and sorts alerts into healthy and stop.',
+    tests: [['Thesis within 140 characters, risk clauses kept', 200, 'planned'], ['Session summaries from the journal', 160, 'planned'],
+            ['Alert triage: token expiry, unknown symbol, budget spent, stale pid', 160, 'planned'],
+            ['Stale intel sources lower confidence', 80, 'planned']] },
+  dashboard: { name: 'Desk Panel', desc: 'QuantPort.io, and charts asked for in plain words',
+    note: 'Shows pending prompts and their fingerprints for comparison with the card, read-only. Without a link it shows no queue, never a specimen one.',
+    tests: [['Request to chart query', 180, 'planned'], ['Every figure traced to a journal', 100, 'planned'],
+            ['No link, no queue', 60, 'planned'], ['Read-only: no write route', 60, 'planned']] },
+  remote: { name: 'Shim & Access', desc: 'Approval shim, tokens, network, settings',
+    note: 'Serves the card and the panel. Reads fall back across networks and IB transports; orders never do.',
+    tests: [['API contract: /v1 routes, SPEC_VERSION', 120, 'planned'], ['Bearer tokens and scopes', 160, 'planned'],
+            ['Card signatures verify, replays refused', 120, 'planned'], ['Reads fall back, orders never do', 160, 'planned'],
+            ['trading.yaml checked before save', 120, 'planned'], ['Diagnostics command filter', 100, 'planned'],
+            ['Shim failover latency', 20, 'timing']] },
+  process: { name: 'Order Control', desc: 'Sessions, the kill switch, the order path',
+    note: 'Every order goes through the Router and its gates; a card ACCEPT is added on top, never instead. The kill switch trips from any screen, and only a human clears it.',
+    tests: [['Every order through the Router', 200, 'planned'], ['Gates: heat, per-trade risk, positions, ticket, daily caps', 300, 'planned'],
+            ['Kill switch trips from any screen', 120, 'planned'], ['Only a human clears a halt', 100, 'planned'],
+            ['Exits pass a halt, entries never do', 140, 'planned'], ['Paper halt never stops money unasked', 80, 'planned'],
+            ['Live mode needs the typed phrase', 100, 'planned'], ['Session start, stop by sentinel, resume', 140, 'planned'],
+            ['Halt-to-stop latency', 20, 'timing']] },
+  store: { name: 'Baskets & Strategies', desc: 'Card-signed baskets, signed updates, rollback',
+    note: 'A basket counts only with the card\'s signature, re-checked on load; a hand edit approves nothing. Strategy and gate updates wait while the daemon runs, and roll back.',
+    tests: [['Basket needs the card\'s signature', 120, 'planned'], ['Hand-edited basket approves nothing', 80, 'planned'],
+            ['Entries outside the basket refused, exits pass', 120, 'planned'], ['Updates refused while the daemon runs', 80, 'planned'],
+            ['Install, update, rollback', 100, 'planned']] },
 };
 
 const svg = (paths, cls = '') =>
@@ -413,26 +452,22 @@ function showApp(id) {
     <p>${app.desc}.</p>${app.note ? `<p>${app.note}</p>` : ''}
     <table><thead><tr><th>Test</th><th class="n">Cases</th><th>Status</th></tr></thead><tbody>${rows}
       <tr><td><b>Total</b></td><td class="n"><b>${fmt(total(app))}</b></td><td></td></tr></tbody></table>
-    <div class="legend">
-      <span><b>Verified</b> the decision logic passed every case.</span>
-      <span><b>Awaiting device</b> the test harness passed; real accuracy needs the models on the GenMachine.</span>
-      <span><b>Device only</b> timing budgets, measured on the device.</span>
-      ${cases(app, 'planned') ? '<span><b>Not yet run</b> specified for the visual feed; no harness or result yet.</span>' : ''}
-    </div>`;
+    <div class="legend">${Object.keys(LEGEND).filter((s) => cases(app, s)).map((s) => `<span><b>${STATE_LABEL[s]}</b> ${LEGEND[s]}</span>`).join('')}</div>`;
 }
 
 function showSettings() {
   const rows = [['Wake word threshold', '0.60'], ['Speech model', 'base.en'], ['Language model', 'qwen2.5:1.5b'],
-    ['Context window', '2,048 tokens'], ['Loiter alert after', '30 s'], ['Preferred network', 'Ethernet'], ['Display theme', 'auto']]
+    ['Context window', '2,048 tokens'], ['Card prompt window', '90 s'], ['Account currency', 'CAD'], ['Execution mode', 'paper'],
+    ['Preferred network', 'Ethernet'], ['Display theme', 'auto']]
     .map(([k, v]) => `<tr><td>${k}</td><td class="n">${v}</td></tr>`).join('');
   sheet.innerHTML = `${head(ICONS.settings, 'SYSTEM', 'Settings')}
-    <p>40 settings, each checked against its type and range before it is saved (120 tests).</p>
+    <p>Device settings and trading.yaml knobs, each checked against its type and range before it is saved (the 120 cases under Shim &amp; Access). Execution mode is shown here, never set: live is the human's call at run time.</p>
     <table><thead><tr><th>Setting</th><th class="n">Value</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function showPower() {
   sheet.innerHTML = `${head(ICONS.power, 'SYSTEM', 'Power')}
-    <p>Running processes are paused and sensor data is flushed before the device restarts.</p>
+    <p>The shim stops taking prompts, pending prompts expire unsigned, and the ledger is flushed before the device restarts. Open positions are left as they are.</p>
     <div class="power-row"><button data-power="Restart">Restart</button><button class="danger" data-power="Shut down">Shut down</button></div>
     <p class="power-msg" id="powerMsg" aria-live="polite"></p>`;
 }
