@@ -1,0 +1,45 @@
+V1  arccos angle encoding: <Z_i> after RY(arccos x_i) should equal x_i
+    max |<Z_i> - x_i| = 5.55e-16
+
+V2  the draft circuit: CZ(0,4), CZ(1,5), CZ(2,9) placed just before measurement
+    max |P(with CZ) - P(without CZ)| over 1024 outcomes = 0.00e+00
+
+V3  CX chain on the encoded product state vs a classical coin-flip model
+    max |P(qiskit) - P(10-line XOR coin model)| = 1.39e-17
+    measured <Z_j> vs the input atom x_j it is labelled as, and vs prod(x_0..x_j):
+      q0 Momentum     x_j=+0.225  <Z_j>=+0.22517  prod=+0.22517
+      q1 Volatility   x_j=+0.715  <Z_j>=+0.16099  prod=+0.16099
+      q2 Liquidity    x_j=+0.496  <Z_j>=+0.07989  prod=+0.07989
+      q3 OrderFlow    x_j=-0.495  <Z_j>=-0.03952  prod=-0.03952
+      q4 Correlation  x_j=-0.360  <Z_j>=+0.01421  prod=+0.01421
+      q5 Entropy      x_j=+0.672  <Z_j>=+0.00956  prod=+0.00956
+      q6 Rates        x_j=-0.891  <Z_j>=-0.00851  prod=-0.00851
+      q7 Credit       x_j=+0.578  <Z_j>=-0.00492  prod=-0.00492
+      q8 Macro        x_j=+0.535  <Z_j>=-0.00263  prod=-0.00263
+      q9 Execution    x_j=-0.058  <Z_j>=+0.00015  prod=+0.00015
+    all atoms = +0.5 -> <Z_9 'Execution'> = +0.00098
+
+V4  draft Hamiltonian H_f = sum h_i Z_i + sum J_ij Z_i Z_j (Z terms only)
+    t=0.5: max |P(t) - P(0)| = 1.39e-17
+    t=2.0: max |P(t) - P(0)| = 1.39e-17
+
+V5  add a transverse field Gamma * sum X_i  (transverse-field Ising)
+    max |P(t) - P(0)|                      = 3.83e-02
+    max |<Z>(coupled) - <Z>(uncoupled)|     = 0.154
+    energy <H>: before +2.651876819633, after exact evolution +2.651876819633, |drift| 8.9e-16
+
+    first-order Trotter circuit (RZ, RZZ, RX gates) vs exact evolution:
+      steps= 1  fidelity=0.725630  |energy drift|=4.20e-01
+      steps= 2  fidelity=0.927184  |energy drift|=3.40e-01
+      steps= 4  fidelity=0.981173  |energy drift|=1.98e-01
+      steps= 8  fidelity=0.995210  |energy drift|=1.06e-01
+      steps=16  fidelity=0.998792  |energy drift|=5.44e-02
+
+V5b two atoms: does coupling move an uncertain atom toward a confident neighbour?
+    J=+0.5 x1=+0.9:  x0 0.000 -> +0.2962 (no coupling: +0.0000)
+    J=+0.5 x1=-0.9:  x0 0.000 -> -0.2962 (no coupling: +0.0000)
+    J=-0.5 x1=+0.9:  x0 0.000 -> -0.2962 (no coupling: +0.0000)
+    J=-0.5 x1=-0.9:  x0 0.000 -> +0.2962 (no coupling: +0.0000)
+
+V7  latency of one 10-qubit evaluation on this machine (exact simulation, no hardware)
+    qiskit Statevector: 2.07 ms per evaluation, 16 couplings

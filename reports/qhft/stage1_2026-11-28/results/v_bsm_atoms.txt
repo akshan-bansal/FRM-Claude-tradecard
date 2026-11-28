@@ -1,0 +1,60 @@
+aligned days: 2482  2016-11-28 .. 2026-11-20
+computed 11 candidate atoms in 3.6s
+
+1. POINT-IN-TIME (recomputed with the last 300 days deleted)
+   gjr_vol         max|diff|=0.0e+00  same coverage=True
+   vol_premium     max|diff|=0.0e+00  same coverage=True
+   tail_xi         max|diff|=0.0e+00  same coverage=True
+   var99           max|diff|=0.0e+00  same coverage=True
+   jet_e3_over_e2  max|diff|=0.0e+00  same coverage=True
+   jet_curv_ratio  max|diff|=0.0e+00  same coverage=True
+   spx_vix_corr    max|diff|=0.0e+00  same coverage=True
+   absorption      max|diff|=0.0e+00  same coverage=True
+   shock_pctile    max|diff|=0.0e+00  same coverage=True
+   curve_slope     max|diff|=0.0e+00  same coverage=True
+   breach_rate     max|diff|=0.0e+00  same coverage=True
+
+first day every atom is finite: index 796 (2020-02-12)
+
+2. ALIVE (coverage after warm-up, distinct values, share of the modal value)
+   gjr_vol         coverage=1.00  distinct= 1686  modal share=0.00  p5..p95=[+0.0831, +0.351]
+   vol_premium     coverage=1.00  distinct= 1686  modal share=0.00  p5..p95=[-0.187, +0.758]
+   tail_xi         coverage=1.00  distinct=  267  modal share=0.27  p5..p95=[+0.24, +0.45]
+   var99           coverage=1.00  distinct= 1686  modal share=0.00  p5..p95=[+0.0123, +0.0579]
+   jet_e3_over_e2  coverage=1.00  distinct= 1686  modal share=0.00  p5..p95=[-3.27, +1.22]
+   jet_curv_ratio  coverage=1.00  distinct= 1686  modal share=0.00  p5..p95=[-0.519, -0.0953]
+   spx_vix_corr    coverage=1.00  distinct= 1686  modal share=0.00  p5..p95=[-0.929, -0.62]
+   absorption      coverage=1.00  distinct= 1686  modal share=0.00  p5..p95=[+0.317, +0.529]
+   shock_pctile    coverage=1.00  distinct= 1665  modal share=0.01  p5..p95=[+0.0118, +1]
+   curve_slope     coverage=1.00  distinct=  256  modal share=0.02  p5..p95=[-0.75, +1.26]
+   breach_rate     coverage=1.00  distinct=   28  modal share=0.46  p5..p95=[-0.01, +0.0376]
+
+3. REDUNDANCY (Spearman, 1686 common days). Pairs with |rho| >= 0.6:
+   gjr_vol         ~ vol_premium     -0.78
+   gjr_vol         ~ var99           +0.99   <-- redundant
+   vol_premium     ~ var99           -0.77
+   vol_premium     ~ jet_e3_over_e2  -0.71
+   tail_xi         ~ curve_slope     +0.78
+   jet_e3_over_e2  ~ jet_curv_ratio  -0.70
+   jet_curv_ratio  ~ curve_slope     +0.61
+   effective rank (participation ratio) = 4.5 of 11
+
+4. INFORMATION, Spearman IC with 95% block-bootstrap interval, 337 non-overlapping weeks
+   atom                        next-week return         next-week realised vol
+   gjr_vol         +0.137 [+0.031,+0.245]*   +0.577 [+0.452,+0.668]*
+   vol_premium     -0.076 [-0.178,+0.015]    -0.309 [-0.438,-0.165]*
+   tail_xi         -0.009 [-0.101,+0.076]    -0.193 [-0.353,-0.013]*
+   var99           +0.130 [+0.023,+0.242]*   +0.584 [+0.459,+0.675]*
+   jet_e3_over_e2  +0.072 [-0.030,+0.180]    +0.281 [+0.140,+0.404]*
+   jet_curv_ratio  -0.059 [-0.156,+0.035]    -0.029 [-0.196,+0.139] 
+   spx_vix_corr    +0.001 [-0.093,+0.090]    -0.044 [-0.228,+0.148] 
+   absorption      -0.014 [-0.104,+0.083]    -0.023 [-0.252,+0.197] 
+   shock_pctile    +0.032 [-0.091,+0.154]    +0.173 [+0.042,+0.291]*
+   curve_slope     +0.024 [-0.063,+0.106]    -0.078 [-0.246,+0.111] 
+   breach_rate     +0.053 [-0.044,+0.151]    +0.174 [-0.014,+0.358] 
+   negative control (each atom shuffled):
+   largest |IC| among shuffled atoms = 0.166
+
+5. SERIES-TRUST GATES (risk_vector) on a sample of weeks
+   85 weeks, 2 ms each
+   ratio gate passes 15%, repriced gate passes 61%, crossing flagged 0%

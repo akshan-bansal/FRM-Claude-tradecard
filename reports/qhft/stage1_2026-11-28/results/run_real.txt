@@ -1,0 +1,22 @@
+aligned days: 2482  2016-11-28 .. 2026-11-20
+computed 11 candidate atoms in 3.8s
+
+pre-registration 1cc0afbd…  weeks 337, evaluated 233 (2022-03-17 .. 2026-11-13)
+class base rates in evaluation: Calm 44%, Elevated 34%, Stress 22%
+edges per refit: min 17, max 22
+
+PRIMARY  mean weekly log loss, Q minus B (nats), 95% circular block bootstrap
+   +0.1561  [+0.0842, +0.2363]   ->  FAIL
+
+DIAGNOSTICS (do not change the verdict)
+   model   log loss   Brier  accuracy   vs B: mean [95% CI]
+   unif.     1.0986  0.6667          
+   B         0.8613  0.5150     65.7%
+   Q         1.0175  0.6201     47.6%   +0.1561 [+0.0842, +0.2363]
+   C10       0.9066  0.5461     56.2%   +0.0453 [+0.0040, +0.0886]
+   C10x      0.9761  0.5852     53.6%   +0.1148 [+0.0322, +0.2158]
+   Q0        0.9483  0.5742     52.4%   +0.0870 [+0.0345, +0.1430]
+   Q - C10x (coupling vs classical products): +0.0414 [-0.0070, +0.0852]
+   Q - Q0   (coupling on vs off):             +0.0692 [+0.0371, +0.1033]
+
+LATENCY  Q features 0.771 ms/week; 18 refits took 3.6 s (0.20 s each, eigendecomposition of 1024x1024 H)

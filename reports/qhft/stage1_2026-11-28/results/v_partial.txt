@@ -1,0 +1,14 @@
+aligned days: 2482  2016-11-28 .. 2026-11-20
+computed 11 candidate atoms in 4.1s
+
+partial Spearman IC with next-week realised vol, controlling for gjr_vol (337 weeks)
+   vol_premium     +0.283 [+0.180,+0.370]*
+   tail_xi         -0.093 [-0.199,+0.015] 
+   var99           +0.114 [-0.012,+0.252] 
+   jet_e3_over_e2  -0.054 [-0.160,+0.061] 
+   jet_curv_ratio  +0.030 [-0.076,+0.144] 
+   spx_vix_corr    +0.012 [-0.096,+0.115] 
+   absorption      -0.013 [-0.153,+0.117] 
+   shock_pctile    +0.032 [-0.072,+0.134] 
+   curve_slope     -0.029 [-0.124,+0.072] 
+   breach_rate     +0.001 [-0.108,+0.117] 

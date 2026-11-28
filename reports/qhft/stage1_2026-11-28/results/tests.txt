@@ -1,0 +1,19 @@
+.........
+T4 planted: Q-B -0.0597 [-0.0954,-0.0261] pass=True; C10x-B -0.1315 [-0.1811,-0.0808] pass=True
+.
+T5 null: Q passed 0 of 20 seeds (nominal 2.5% -> 0.5 expected)
+.aligned days: 2482  2016-11-28 .. 2026-11-20
+computed 11 candidate atoms in 4.9s
+
+./home/user/FRM-Claude-tradecard/.venv/lib/python3.13/site-packages/coverage/inorout.py:561: CoverageWarning: Module trading_live_claude was never imported. (module-not-imported); see https://coverage.readthedocs.io/en/7.14.0/messages.html#warning-module-not-imported
+  self.warn(f"Module {pkg} was never imported.", slug="module-not-imported")
+/home/user/FRM-Claude-tradecard/.venv/lib/python3.13/site-packages/coverage/control.py:958: CoverageWarning: No data was collected. (no-data-collected); see https://coverage.readthedocs.io/en/7.14.0/messages.html#warning-no-data-collected
+  self._warn("No data was collected.", slug="no-data-collected")
+
+WARNING: Failed to generate report: No data to report.
+
+/home/user/FRM-Claude-tradecard/.venv/lib/python3.13/site-packages/pytest_cov/plugin.py:366: CovReportWarning: Failed to generate report: No data to report.
+
+  warnings.warn(CovReportWarning(message), stacklevel=1)
+
+12 passed in 204.10s (0:03:24)

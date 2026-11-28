@@ -10,7 +10,7 @@ atoms forecast next week's volatility regime *worse* than a two-atom classical m
 
 Nothing here touches `src/`, the Router or any broker. It is a research record.
 
-## 1. The draft circuit (`validity/v_circuit.py`, log `logs/v_circuit.txt`)
+## 1. The draft circuit (`validity/v_circuit.py`, log `results/v_circuit.txt`)
 
 Exact Qiskit statevectors, so there is no shot noise in any comparison.
 
@@ -37,7 +37,7 @@ Data: FRED daily series aligned on 2,482 days (2016-11-28 to 2026-11-20). Atoms 
 - **Volatility:** `gjr_vol` +0.58, which is the positive control. Beyond what `gjr_vol` already says, only
   `vol_premium` (VIX against GJR) adds anything: +0.28 [+0.18, +0.37].
 
-## 3. The benchmark (`qhft/`, log `logs/run_real.txt`)
+## 3. The benchmark (`qhft/`, log `results/run_real.txt`)
 
 The rules were fixed in `qhft/PREREGISTRATION.md` before any model ran.
 
@@ -49,7 +49,7 @@ The rules were fixed in `qhft/PREREGISTRATION.md` before any model ran.
 Amendment 1 corrects the start day. The validity test T3 found three atoms computed from windows
 that reached back before the first GJR fit.
 
-- **Validity tests, all passing (`logs/tests.txt`):**
+- **Validity tests, all passing (`results/tests.txt`):**
   - T1: the simulator matches Qiskit.
   - T2: encoding is exact and energy is conserved.
   - T3: no lookahead, checked on the real data.
