@@ -2551,6 +2551,143 @@ Notes: `uv` isn't on PATH on this machine; use `.venv/Scripts/python.exe`. QT la
 16:00 ET opens nothing. ARX.TO and RIG.TO were removed for 404-on-candles; pre-flight symbol
 validation now catches that class of failure at launch.
 
+## 18. Quantum-state engine (QuantPort Q-HFT): stage 2 frozen, the data run is next  🔴 NEXT (2026-11-28)
+
+Research only. Nothing in `src/trading_live_claude/quantum/` reaches the Router, the gates or a broker.
+
+**Where it stands.**
+- **Stage 1 FAILED its pre-registered test.** A 10-qubit network over ten Bansal_Spectre (BSM_Spectral)
+  atoms lost to the 2-atom GJR + VIX baseline on next-week S&P volatility regimes: +0.156 nats per week
+  [+0.084, +0.236] over 233 weeks. Record: `reports/qhft/stage1_2026-11-28/`.
+- **Stage 2 is built, validated and FROZEN** (2026-11-28T08:49:01Z), before any stage-2 data.
+  - Hashes: prereg `755e3d6f…`, spec `974b5b54…`.
+  - `FROZEN.json` binds 14 code files.
+  - Protocol, rationale and validity evidence: `reports/qhft/stage2/` (README, PREREGISTRATION.md).
+
+**Stage 2 in one paragraph.**
+- Eight BSM underlyings, one node (qubit) each: SPX, NDX, DJIA, WTI, BTC, ETH, EURUSD, USDJPY.
+- Atoms feed each asset's local field through shared learned weights. The asset couplings `J` are learned.
+- Primary tests, at 97.5%, against the per-asset 2-atom baseline B, scored on the 7 non-SPX assets
+  (SPX's weeks were seen in stage 1):
+  - **P1** the field equations `m = tanh(h + J m)`, kept contractive;
+  - **P2** the exact 8-qubit transverse-field Ising evolution.
+- Secondary tests, at 95%:
+  - **S1** qubit complementarity at the BSM spot-vol angle;
+  - **S2** Christoffersen-Diebold direction forecasts.
+- Predicted in advance from the S&P exploratory work: S1 ≈ 0 (the constraint moved 1% of weeks),
+  and S2 fails.
+
+### 18.1 The data run (do this first)
+
+Environment:
+- The session needs FRED reachable. The personal cloud environment **"FRM-Claude market data"**
+  (fred.stlouisfed.org, api.kraken.com) was created for this. Default does not allow it.
+- Install:
+  ```bash
+  uv sync --extra dev --extra quant --extra quantum --extra shim
+  ```
+  `shim` brings FastAPI, which the test conftest's import chain needs. `ml` (sklearn) is needed only by
+  unrelated tests.
+
+Steps, in order:
+```bash
+reports/qhft/stage2/fetch_stage2.sh /tmp/fred2 | tee reports/qhft/stage2/results/fred_hashes.txt
+.venv/bin/python -m pytest -q tests/test_quantum_core.py tests/test_quantum_network.py tests/test_quantum_panel.py
+diff <(.venv/bin/python reports/qhft/stage2/power_population.py 2>&1 | grep -v network_fit_not_converged) \
+     <(grep -v network_fit_not_converged reports/qhft/stage2/results/power_population.txt)
+.venv/bin/python reports/qhft/stage2/run_stage2.py /tmp/fred2 --workers 8 | tee reports/qhft/stage2/results/run_stage2.txt
+```
+
+- `run_stage2.py` refuses if the protocol, the spec or any of the 14 bound files changed.
+- Before any verdict it checks that every atom is finite on every decision day, and that a run cut at
+  week 200 reproduces every model. If either fails it prints no verdict.
+- Runtime is about 25 minutes, most of it in the quantum arm: about 0.7 s per L-BFGS iteration at 8 assets.
+- The power script's recorded output includes timestamped `network_fit_not_converged` log lines. The diff
+  above drops them and compares every result line.
+
+Then:
+1. Commit `results/fred_hashes.txt` and `results/run_stage2.txt`. Never the CSVs: they are licensed,
+   and the repo stores no market data.
+2. Update the status block of `reports/qhft/stage2/README.md` with the verdicts, and the stage-2 bullet in `CLAUDE.md`.
+3. Report P1, P2, S1 and S2 verbatim, plus the diagnostics. A FAIL is a result; do not soften it.
+
+### 18.2 If something blocks the run
+
+- **The frozen protocol cannot change silently.** Add a dated `## Amendment N` at the END of
+  `reports/qhft/stage2/PREREGISTRATION.md`, saying what and why. Then run
+  `python reports/qhft/stage2/freeze.py --amend "why"`. Earlier text must stay byte-identical; the script checks.
+- **Amend only before verdicts are seen,** and only to make the run possible: a series moved or
+  discontinued, or a validity check failing for a data reason. Never to change a model, a constant
+  or a pass rule after looking at results. That would be a new stage, with fresh data.
+- **Risks flagged before fetching:**
+  - FRED's `SP500` and `DJIA` cover only 10 years. The common calendar starts 2016-11, so
+    evaluation is about 2022-03 to 2026-11, the same window as stage 1. Only SPX's weeks were seen.
+  - `CBBTCUSD` / `CBETHUSD`: confirm they still update. BSM_Spectral's maturation pipeline used them
+    in 2026-10.
+  - The FX H.10 series (`DEXUSEU`, `DEXJPUS`) arrive about a week late. The common calendar ends at
+    their last date.
+  - WTI's negative 2020-04-20 print is dropped by `bsm_event.load_underlying`.
+  - BTC, ETH and FX have no implied-vol index, so their `vol_premium` is a GJR-vs-GJR gap, near
+    noise. This is known and stated in the protocol.
+  - A field or quantum refit may stop at its iteration cap. The run reports how many; it does not
+    invalidate the run.
+
+### 18.3 After the verdict
+
+**If P1 and P2 both FAIL**, record it in the stage-2 README and CLAUDE.md. Then choose between:
+- (a) retire the coupled network;
+- (b) keep only what helped, judged from the diagnostics. For example, `composite - B` or
+  `uncoupled - B` may beat B where coupling does not. Any such idea is a new hypothesis that needs
+  fresh data.
+
+The same weeks cannot be reused to tune κ, Γ, t, the bounds or the readout.
+
+**If P1 or P2 PASSES:**
+- **Confirm forward before believing it.** Journal weekly forecasts with the frozen model on new weeks
+  only, in the style of `BSM_Spectral/bsm_maturation.py`: forecasts journaled before their labels
+  mature. Score them after at least 52 weeks.
+- **If the quantum arm passes and the field arm does not,** that is the only case where hardware is
+  worth a look. Start with IBM's noisy fake backends (`qiskit-ibm-runtime` + `qiskit-aer`, no account),
+  and only then real hardware.
+  - Real hardware needs an IBM Quantum API key, entered through the session's credential form,
+    never pasted in chat.
+  - Google Colab adds nothing: Runtime is reached from any client.
+- **Wiring into any strategy or order path** needs the user's express go-ahead, and still goes
+  through `Router._gate`. It would be a new strategy under the repo's strategy rules: a lookahead
+  test, registration in `STRATEGIES`, and paper first.
+
+### 18.4 Deferred, with what unblocks each
+
+- **Graph-informed couplings** (user, 2026-11-28).
+  - The idea: a prior mask or sign on `J` from symbol-symbol edges in `state/intel_graph.jsonl`.
+  - Unblocked once realtime run data has populated those edges. `GRAPH_INFLUENCE_SCOPE.md` is the design
+    that gives symbols the edges.
+  - It needs its own pre-registration and its own fresh evaluation weeks.
+- **Parts of the original brief not built** (2026-11-28 design discussion). Each needs a test-first
+  definition before any code:
+  - **Lorentz** (reference-frame / horizon transforms). A candidate invariant: the Kelly ratio μ/σ²
+    is unchanged under time rescaling.
+  - **Error correction.** Only *detection* exists: input validation, norm and energy checks,
+    finiteness and lookahead tests. A 3-qubit repetition code protects only against bit flips, and adds
+    gates that add noise on hardware. It matters only if a hardware run happens (18.3).
+  - **Elastic cloud compute.** What exists is local process-pool concurrency, equal bit for bit to
+    serial. Cloud burst capacity is not built; at 8 qubits a CPU suffices (0.2 s per refit
+    eigendecomposition).
+  - **Atom direction information.** No BSM atom forecast next-week direction on the S&P. Directional
+    atoms such as momentum or credit spreads (`BAA10Y`) were offered and not chosen. That is the
+    route if Bull/Bear readouts are wanted again.
+
+### 18.5 Notes from the 2026-11-28 session
+
+- `tests/test_daemon.py::test_start_and_stop_short_lived` fails in the cloud container *on a clean
+  checkout too* (`d.stop(timeout_seconds=5)` returns False). It predates the quantum work. Not investigated.
+- Stage-2 validity evidence is in `reports/qhft/stage2/README.md`. Briefly:
+  - **Complementarity:** the bound holds, but bites on only 1% of S&P weeks.
+  - **Field equations:** unique only under `‖J‖₂ < 1`; they track the exact evolution at weak coupling
+    and diverge at strong coupling.
+  - **Population hypothesis:** confirmed only for a real effect, and only as far as assets are
+    independent. 16 assets at ρ = 0.5 count like about 2.
+
 ## Queue — correctness bugs
 
 - ✅ **Paper broker didn't book realized P&L on a partial sell — FIXED 2026-09-24.** `_apply_fill`
