@@ -1,8 +1,14 @@
-# Quantum state network, stage 2: built and validated, not yet run on data
+# Quantum state network, stage 2: built, validated and frozen, not yet run on data
 
-**Status:** the code is in `src/trading_live_claude/quantum/`, with 49 tests. The protocol is drafted
-in `PREREGISTRATION_DRAFT.md`, and **no stage-2 data has been fetched.** The next session freezes the
-protocol, fetches the data and runs it once. Nothing here touches the Router or any broker.
+**Status:**
+- **Protocol frozen 2026-11-28T08:49:01Z**, before any stage-2 data was fetched.
+  - `PREREGISTRATION.md`: SHA-256 `755e3d6f…`.
+  - Spec `974b5b54…`.
+  - `FROZEN.json` binds 14 code files: the `quantum` package, `bsm_event.py` and the stage-2 scripts.
+- **The code** is in `src/trading_live_claude/quantum/`, with 49 tests.
+- **Not yet run:** no stage-2 data has been fetched. The next session fetches it and runs once.
+- **Changes from here** go only through an appended, dated amendment and `freeze.py --amend`.
+- Nothing here touches the Router or any broker.
 
 ## What was built, and the validity test behind each piece
 
@@ -45,10 +51,9 @@ The real machinery detects planted spillover 8/8 at 2, 4 and 8 assets, with 0/8 
 ## Next session (data)
 
 ```bash
-python reports/qhft/stage2/freeze.py                       # 1. freeze before seeing data
-reports/qhft/stage2/fetch_stage2.sh /tmp/fred2             # 2. fetch (refuses if not frozen)
-.venv/bin/python -m pytest -q tests/test_quantum_*.py      # 3. validity tests
-.venv/bin/python reports/qhft/stage2/run_stage2.py /tmp/fred2 --workers 8   # 4. the one run, ~25 min
+reports/qhft/stage2/fetch_stage2.sh /tmp/fred2             # 1. fetch (frozen already; refuses otherwise)
+.venv/bin/python -m pytest -q tests/test_quantum_*.py      # 2. validity tests
+.venv/bin/python reports/qhft/stage2/run_stage2.py /tmp/fred2 --workers 8   # 3. the one run, ~25 min, checks validity first
 ```
 
 Setup: `uv sync --extra dev --extra quant --extra quantum`. The FRED host must be reachable: this

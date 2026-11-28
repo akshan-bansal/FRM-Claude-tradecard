@@ -1,0 +1,28 @@
+{
+  "records": [
+    {
+      "kind": "freeze",
+      "utc": "2026-11-28T08:49:01Z",
+      "reason": "initial freeze, before any stage-2 data was fetched",
+      "prereg_sha256": "755e3d6f7257b73e81d8fa44caa99eb307de03db12c73f3268ddf6e20afc6ad8",
+      "prereg_bytes": 8846,
+      "spec": "974b5b5424bdca6c65c95f97cfd3f01d136c105bbd554c44292aa3b6fc49ba10",
+      "code": {
+        "src/trading_live_claude/quantum/__init__.py": "95604081ea552845d4da0aa6b6f8304f55c497182fbf05b61b383f6752f41b37",
+        "src/trading_live_claude/quantum/atoms.py": "e1ab55bfcfd00b24f75fe882b1822e4cbbebe824429cd62bfc5b4d34db041cd5",
+        "src/trading_live_claude/quantum/composite.py": "f1e52a0a4f3f12328839ab78e630f2dcee79d9b191bbca2169923f6f0c01198d",
+        "src/trading_live_claude/quantum/field.py": "808c549f63ff75d68a61f0edea6b44b6a7f02ec925db01a845dc154238d2bc11",
+        "src/trading_live_claude/quantum/fingerprint.py": "e04fe7b3e481cac1756f825d4d1f6501e5319cd7ad3a054980d3e6f01232f428",
+        "src/trading_live_claude/quantum/network.py": "3259cd831392136fd76b52d366af87adc8acb4dcb950c4ecc24b65979a0016e6",
+        "src/trading_live_claude/quantum/panel.py": "a0cbcc73be2f4240eb3006fa1cb84366977448ae702ebf35eb4eb72f9968a3e0",
+        "src/trading_live_claude/quantum/qiskit_bridge.py": "23c984dc0e87cfdb5e33d04531303a56f4ca2e8551c8cc80a4d7530a03cd558d",
+        "src/trading_live_claude/quantum/statevector.py": "032a180214fc28e6bf98dce86558c4e82e878eb4918a9dc45a5d02c3c4814739",
+        "src/trading_live_claude/quantum/uncertainty.py": "103eac924554eb46711072408f8784eed41bc3ee1b3c3ce1c0e1a51f14ec7e74",
+        "BSM_Spectral/bsm_event.py": "dd8d66ce7ccb65d7ebd122e5847bf2348f667a1e70a99145ef50fca03e8bdfc5",
+        "reports/qhft/stage2/spec.py": "a7bd8f80b95f13abd2c62f307bb1839cf6d04cd6f28bd296eacdac0cc81fd3af",
+        "reports/qhft/stage2/run_stage2.py": "ea0fc5c34ec5a55aadf1afa49e53d80e07423adc16c7d77948fcef7b9c809810",
+        "reports/qhft/stage2/fetch_stage2.sh": "be1c76f80ae4ffa5229c8600f2640b58c432d8118d051837ce9c7db87a0bdc10"
+      }
+    }
+  ]
+}

@@ -228,8 +228,11 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
   import it. Wiring it into any order path needs a pre-registered test it has passed, plus the user's go-ahead.
 - **Stage 1 failed its pre-registered test** (`reports/qhft/stage1_2026-11-28/`). A 10-qubit network over
   Bansal_Spectre (BSM_Spectral) atoms lost to the 2-atom GJR + VIX baseline.
-- **Stage 2 is built but not run** (`reports/qhft/stage2/`). Freeze `PREREGISTRATION_DRAFT.md` with `freeze.py`
-  *before* fetching data. Never tune its constants on data already seen; change it only by a dated amendment.
+- **Stage 2 is frozen but not run** (`reports/qhft/stage2/`).
+  - `PREREGISTRATION.md` was frozen 2026-11-28 before any stage-2 data. `FROZEN.json` binds it, the spec and 14 code files.
+  - `run_stage2.py` refuses if any of them changes.
+  - Change the method or the code only by appending a dated `## Amendment N` and running `freeze.py --amend "why"`.
+  - Never tune its constants on data already seen.
 - **Simulation.** The exact NumPy simulator is the reference. Qiskit is the optional `quantum` extra and only
   cross-checks it.
 - **Field equations.** Their coupling must stay contractive (`||J||_2 < 1`), or the solution is not unique.

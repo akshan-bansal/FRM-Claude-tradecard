@@ -1,4 +1,7 @@
-"""The one stage-2 run. Refuses unless the pre-registration is frozen and unchanged, and the spec matches it.
+"""The one stage-2 run. It refuses unless the pre-registration, spec and code all match the latest freeze record.
+
+Before any verdict it runs the protocol's on-data validity checks: every atom finite on every decision
+day, and a truncated run reproducing the full run. If either fails it stops, and no verdict is printed.
 
 Usage (after freeze.py and fetch_stage2.sh): ``python run_stage2.py FRED_DIR [--workers N]``
 """
@@ -6,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -18,20 +22,48 @@ from spec import KEYS, PRIMARY_LEVEL, SCORED, SECONDARY_LEVEL, SPEC  # noqa: E40
 
 from trading_live_claude.quantum.atoms import load_panel  # noqa: E402
 from trading_live_claude.quantum.fingerprint import of_model  # noqa: E402
-from trading_live_claude.quantum.panel import walk_forward, walk_forward_uncertainty  # noqa: E402
+from trading_live_claude.quantum.panel import (  # noqa: E402
+    Panel,
+    PanelResult,
+    walk_forward,
+    walk_forward_uncertainty,
+)
+
+TRUNCATE_AT = 200
 
 
-def frozen_or_exit() -> str:
-    pre, rec = HERE / "PREREGISTRATION.md", HERE / "FROZEN.sha256"
-    if not (pre.exists() and rec.exists()):
+def frozen_or_exit() -> dict[str, object]:
+    from freeze import PREREG, RECORD, code_hashes
+
+    if not (PREREG.exists() and RECORD.exists()):
         sys.exit("not frozen: run freeze.py before fetching data")
-    digest = hashlib.sha256(pre.read_bytes()).hexdigest()
-    recorded = rec.read_text().split()[0]
-    if digest != recorded:
-        sys.exit(f"PREREGISTRATION.md changed ({digest[:12]} != {recorded[:12]}); refusing to run")
-    if of_model(SPEC) not in pre.read_text():
-        sys.exit("spec.py no longer matches the frozen pre-registration")
-    return digest
+    last = json.loads(RECORD.read_text())["records"][-1]
+    problems = []
+    if hashlib.sha256(PREREG.read_bytes()).hexdigest() != last["prereg_sha256"]:
+        problems.append("PREREGISTRATION.md")
+    if of_model(SPEC) != last["spec"]:
+        problems.append("spec.py constants")
+    now = code_hashes()
+    problems += [f for f in sorted(set(now) | set(last["code"])) if now.get(f) != last["code"].get(f)]
+    if problems:
+        sys.exit("changed since the last freeze record, refusing to run: " + ", ".join(problems))
+    return last
+
+
+def validity_or_exit(panel: Panel, full: PanelResult, workers: int) -> None:
+    bad = int(np.sum(~np.isfinite(panel.X)))
+    if bad:
+        sys.exit(f"VALIDITY FAILED: {bad} missing atom values on decision days; no verdict is reported")
+    if len(panel.dates) <= TRUNCATE_AT + 1:
+        sys.exit(f"VALIDITY FAILED: {len(panel.dates)} weeks, too few to check truncation at week {TRUNCATE_AT}")
+    part = walk_forward(panel.truncate(TRUNCATE_AT), SPEC, max_workers=workers)
+    k = len(part.eval_weeks)
+    if not np.array_equal(part.eval_weeks, full.eval_weeks[:k]):
+        sys.exit("VALIDITY FAILED: truncated run evaluated different weeks; no verdict is reported")
+    worst = {m: float(np.max(np.abs(part.probs[m] - full.probs[m][:k]))) for m in SPEC.models}
+    if max(worst.values()) > 1e-9:
+        sys.exit(f"VALIDITY FAILED: lookahead, truncated run differs {worst}; no verdict is reported")
+    print(f"validity: all atoms finite; truncation at week {TRUNCATE_AT} reproduces {k} weeks for every model")
 
 
 def line(name: str, v: tuple[float, float, float, bool], level: float) -> str:
@@ -43,13 +75,15 @@ def main() -> None:
     ap.add_argument("fred_dir")
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     a = ap.parse_args()
-    digest = frozen_or_exit()
+    rec = frozen_or_exit()
     panel = load_panel(a.fred_dir, KEYS)
-    print(f"pre-registration {digest[:12]}  spec {of_model(SPEC)[:12]}  panel {panel.fingerprint()[:12]}")
+    print(f"frozen {rec['utc']}  prereg {str(rec['prereg_sha256'])[:12]}  spec {of_model(SPEC)[:12]}  "
+          f"panel {panel.fingerprint()[:12]}")
     print(f"weeks {len(panel.dates)} ({panel.dates[0]} .. {panel.dates[-1]}), assets {', '.join(panel.assets)}; "
           f"scored {', '.join(KEYS[i] for i in SCORED)}")
 
     res = walk_forward(panel, SPEC, max_workers=a.workers)
+    validity_or_exit(panel, res, a.workers)
     unc = walk_forward_uncertainty(panel, SPEC)
     print(f"evaluated {len(res.eval_weeks)} weeks; uncertainty constraint moved {unc.binding_share:.1%} of asset-weeks")
     not_conv = {k: sum(not f.converged for f in v) for k, v in res.network_fits.items()}
@@ -75,7 +109,9 @@ def main() -> None:
     off = C[~np.eye(len(SCORED), dtype=bool)]
     print(f"\nmean cross-asset correlation of loss differences (field - B): {float(off.mean()):+.2f}")
     if res.pool_weights:
-        print(f"last composite weights {dict(zip([m for m in SPEC.models if m != 'composite'], np.round(res.pool_weights[-1], 3), strict=True))}")
+        names = [m for m in SPEC.models if m != "composite"]
+        weights = {m: round(float(w), 3) for m, w in zip(names, res.pool_weights[-1], strict=True)}
+        print(f"last composite weights {weights}")
 
 
 if __name__ == "__main__":

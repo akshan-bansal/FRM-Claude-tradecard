@@ -72,7 +72,11 @@ def wf_logit(y: np.ndarray) -> np.ndarray:
     p = np.full(len(y), np.nan)
     for b in range(104, len(y), 13):
         Xt, yt = X[:b], y[:b]
-        f = lambda w: np.sum(np.logaddexp(0, Xt @ w[1:] + w[0]) - yt * (Xt @ w[1:] + w[0])) + 0.5 * w[1:] @ w[1:]
+
+        def f(w: np.ndarray, Xt: np.ndarray = Xt, yt: np.ndarray = yt) -> float:
+            z = Xt @ w[1:] + w[0]
+            return float(np.sum(np.logaddexp(0, z) - yt * z) + 0.5 * w[1:] @ w[1:])
+
         w = minimize(f, np.zeros(3)).x
         e = slice(b, min(b + 13, len(y)))
         p[e] = 1 / (1 + np.exp(-(X[e] @ w[1:] + w[0])))
@@ -89,7 +93,9 @@ print(f"    weeks violating the complementarity constraint: {np.mean(form > 1):.
 lean = np.cos(phi) * bv      # the direction the constraint pushes toward as b_v grows
 print(f"    implied lean vs realised direction: corr(cos(phi)*b_v, up) = {stats.spearmanr(lean, up[ev]).statistic:+.3f};"
       f"  actual forecast corr(b_d, up) = {stats.spearmanr(bd, up[ev]).statistic:+.3f}")
-ll = lambda p, y: -np.mean(y * np.log(p) + (1 - y) * np.log(1 - p))
+def ll(p: np.ndarray, y: np.ndarray) -> float:
+    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
 print(f"    log loss: direction {ll(pu[ev], up[ev]):.4f} vs base rate {ll(np.full(ev.sum(), up[:104].mean()), up[ev]):.4f};"
       f"  vol-up {ll(pv[ev], volup[ev]):.4f} vs base rate {ll(np.full(ev.sum(), volup[:104].mean()), volup[ev]):.4f}")
 
@@ -131,14 +137,20 @@ def bloch_mf(x: np.ndarray, Jm: np.ndarray, gamma: float, t: float, steps: int =
         return np.cross(B, s)
 
     for _ in range(steps):
-        k1 = f(s); k2 = f(s + dt / 2 * k1); k3 = f(s + dt / 2 * k2); k4 = f(s + dt * k3)
+        k1 = f(s)
+        k2 = f(s + dt / 2 * k1)
+        k3 = f(s + dt / 2 * k2)
+        k4 = f(s + dt * k3)
         s = s + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
     return s[:, 2]
 
 
 x = rng.uniform(-0.9, 0.9, n)
 for Jscale in (0.0, 0.1, 0.3, 0.6):
-    Jm = rng.normal(size=(n, n)); Jm = (Jm + Jm.T) / 2; np.fill_diagonal(Jm, 0); Jm *= Jscale / np.abs(Jm).max()
+    Jm = rng.normal(size=(n, n))
+    Jm = (Jm + Jm.T) / 2
+    np.fill_diagonal(Jm, 0)
+    Jm *= Jscale / np.abs(Jm).max()
     Jd = {(i, j): float(Jm[i, j]) for i in range(n) for j in range(i + 1, n)}
     exact = readout(Propagator.build(n, Jd, 0.4).evolve(encode(x), 1.0), [])[0]
     mf = bloch_mf(x, Jm, 0.4, 1.0)

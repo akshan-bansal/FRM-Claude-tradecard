@@ -2,11 +2,18 @@
 
 **Status: DRAFT, not frozen.**
 
-To freeze, at the start of the data session and before any stage-2 data is fetched:
-1. Review this file.
-2. Run `python freeze.py`. It checks the spec fingerprint below against `spec.py`, writes
-   `PREREGISTRATION.md` and `FROZEN.sha256`, and refuses to re-freeze.
-3. Only then run `fetch_stage2.sh`. `run_stage2.py` refuses to run on an unfrozen or altered protocol.
+To freeze, before any stage-2 data is fetched:
+1. Run `python freeze.py`. It checks the spec fingerprint below against `spec.py` and writes
+   `PREREGISTRATION.md` and `FROZEN.json`.
+   - `FROZEN.json` binds this text, the spec, and the SHA-256 of every code file the run depends on:
+     the `trading_live_claude.quantum` package, `BSM_Spectral/bsm_event.py`, `spec.py`, `run_stage2.py`
+     and `fetch_stage2.sh`.
+2. Only then run `fetch_stage2.sh`, which refuses until the freeze exists.
+3. `run_stage2.py` refuses if the text, the spec or any bound code file differs from the latest record.
+
+Amendments are append-only:
+- Add a dated `## Amendment N` section at the end of PREREGISTRATION.md, then run `freeze.py --amend "reason"`.
+- Every earlier frozen text must remain a byte-exact prefix, and the script checks that.
 
 **Spec fingerprint (`WalkForwardSpec`, `spec.py`):**
 `974b5b5424bdca6c65c95f97cfd3f01d136c105bbd554c44292aa3b6fc49ba10`
@@ -58,7 +65,7 @@ These predictions are recorded so a surprise is visible.
 - **Atoms:** the ten BSM_Spectral atoms of `trading_live_claude.quantum.atoms`, as validated in stage 1.
 - **Regime label:** next-week realised volatility, cut into per-asset terciles of the training labels at each refit: Calm, Elevated, Stress.
 - **Direction label:** `up` = next-week log return above 0.
-- **Volatility label:** `vol-up` = next-week realised vol above this week's GJR forecast.
+- **Volatility label:** `vol-up` = next-week realised vol (annualised) above this week's `gjr_vol` atom.
 - **Walk-forward:** first evaluation at week 104; refit every 13 weeks; network refits every 26 weeks, warm-started.
 - **Point-in-time:** every quantity at a refit uses earlier weeks only. This covers normalisation, class cuts, fits and composite weights.
 
@@ -74,6 +81,22 @@ These predictions are recorded so a surprise is visible.
   - `J` is learned within `|J_ij| <= 1`, which allows the strong coupling where it can differ from the field model.
   - Finite-difference L-BFGS, up to 200 iterations, about 0.7 s each.
 - **composite:** a log-linear pool of the other four, with simplex weights fitted on matured out-of-sample forecasts. It is B alone until 26 such weeks exist.
+
+## Uncertainty arms (per asset, refit every 13 weeks from week 104)
+
+- **`dir_base`:** `P(up)` = the training share of up weeks.
+- **`dir_logit` / `vol_logit`:** binary logistic regression (L2 = 1) of `up` / `vol-up` on the
+  normalised `gjr_vol` and `vol_premium`.
+- **`dir_cd`:** `P(up) = 1 - Phi(-mu / sigma)`.
+  - `mu` = the asset's mean next-week log return over its training weeks.
+  - `sigma = gjr_vol * sqrt(5/252)`.
+- **`joint_free`:** the log loss of `dir_logit` plus the log loss of `vol_logit`.
+- **`joint_complementarity`:** the same two forecasts after `constrain_marginals` with
+  `phi = arccos(rho)`, where `rho` is that week's `spot_vol_corr` atom: the 63-day trailing
+  correlation of spot returns and vol-index changes, clipped away from +/-1.
+  - Infeasible pairs `(2P(up) - 1, 2P(vol-up) - 1)` shrink radially onto the boundary.
+  - The share of asset-weeks moved is reported.
+- **`joint_cd`:** the log loss of `dir_cd` plus that of `vol_logit`. Reported as a diagnostic only.
 
 ## Primary family (two tests, Bonferroni: each at 97.5%)
 
@@ -106,10 +129,10 @@ from a circular block bootstrap over **weeks**, with all assets of a week kept t
    - a planted coupling is found, and the null shows none;
    - lookahead, serial vs concurrent, the bootstrap's coverage, and composite do-no-harm.
 2. `python power_population.py`: reproduces `results/power_population.txt`.
-3. On the fetched data, before the run, two checks:
-   - every atom is finite on every decision day;
-   - `walk_forward(panel.truncate(k))` reproduces the full run's forecasts for weeks up to `k`, with
-     `k` = week 200 and every model.
+3. On the fetched data, `run_stage2.py` itself checks two things before printing any verdict. If
+   either fails, it stops with no verdict.
+   - Every atom is finite on every decision day.
+   - `walk_forward(panel.truncate(200))` reproduces the full run's forecasts for every model, to 1e-9.
 
 ## Deferred: graph-informed couplings
 

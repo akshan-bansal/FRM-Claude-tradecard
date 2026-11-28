@@ -4,7 +4,7 @@
 # market data. Record the printed hashes in the run's results.
 set -euo pipefail
 DIR="${1:-fred}"
-[ -f "$(dirname "$0")/FROZEN.sha256" ] || { echo "freeze the pre-registration first (python freeze.py)"; exit 1; }
+[ -f "$(dirname "$0")/FROZEN.json" ] || { echo "freeze the pre-registration first (python freeze.py)"; exit 1; }
 mkdir -p "$DIR"
 for id in SP500 VIXCLS NASDAQ100 VXNCLS DJIA VXDCLS DCOILWTICO OVXCLS CBBTCUSD CBETHUSD \
           DEXUSEU DEXJPUS DGS2 DGS10; do
