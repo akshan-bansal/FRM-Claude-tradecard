@@ -1,0 +1,21 @@
+A. pass rate of the 95% week-clustered interval, 233 weeks, 300 simulations per cell
+     delta   rho     N=1     N=2     N=4     N=8    N=16   design effect at N=16
+     -0.02   0.0      9%     13%     19%     28%     53%     1.0
+     -0.02   0.5      6%      8%     10%     12%     14%     8.5
+     -0.02   0.9      8%      9%     10%     10%     10%    14.5
+     +0.00   0.0      2%      3%      2%      3%      4%     1.0
+     +0.00   0.5      2%      3%      3%      3%      4%     8.5
+     +0.00   0.9      3%      3%      3%      3%      3%    14.5
+     +0.05   0.0      0%      0%      0%      0%      0%     1.0
+     +0.05   0.5      0%      0%      0%      0%      0%     8.5
+     +0.05   0.9      0%      0%      0%      0%      0%    14.5
+
+B. walk-forward field vs uncoupled on a planted spillover panel (8 seeds per cell)
+   spillover 0.0, 2 assets: mean diff +0.0013, interval width 0.0070, pass 0/8
+   spillover 0.0, 4 assets: mean diff +0.0049, interval width 0.0130, pass 0/8
+   spillover 0.0, 8 assets: mean diff +0.0100, interval width 0.0142, pass 0/8
+   spillover 0.6, 2 assets: mean diff -0.0625, interval width 0.0576, pass 8/8
+   spillover 0.6, 4 assets: mean diff -0.0829, interval width 0.0542, pass 8/8
+2026-11-28 08:31:41 [warning  ] network_fit_not_converged      iterations=500 kind=field message='STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT'
+2026-11-28 08:32:19 [warning  ] network_fit_not_converged      iterations=500 kind=field message='STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT'
+   spillover 0.6, 8 assets: mean diff -0.0545, interval width 0.0368, pass 8/8

@@ -60,6 +60,11 @@ graph = [
     "networkx>=3.4",
     "scipy>=1.18.1",
 ]
+# Quantum-state research engine (src/trading_live_claude/quantum/). Optional: the exact NumPy simulator
+# is the reference, and Qiskit only cross-checks it and builds hardware circuits. `uv sync --extra quantum`
+quantum = [
+    "qiskit>=2.6",
+]
 # TradeCard approval shim, ASGI runtime. Install with `pip install .[shim]`
 # when running the shim as a standalone process or from paper_ib.py /
 # paper_kraken.py under --require-card. Not required for the trading

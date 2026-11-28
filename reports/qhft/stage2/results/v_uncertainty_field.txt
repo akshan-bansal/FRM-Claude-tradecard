@@ -1,0 +1,32 @@
+U1  complementarity: axes n_d = (0,0,1), n_v at angle phi in the x-z plane
+    phi= 90.0  max ellipse form 0.9999 (<=1 feasible)  min H_d+H_v 1.0040 bits >= MU bound 1.0000  holds=True
+    phi= 60.0  max ellipse form 0.9998 (<=1 feasible)  min H_d+H_v 0.7115 bits >= MU bound 0.4150  holds=True
+    phi= 41.4  max ellipse form 0.9999 (<=1 feasible)  min H_d+H_v 0.4127 bits >= MU bound 0.1926  holds=True
+    phi= 20.0  max ellipse form 0.9997 (<=1 feasible)  min H_d+H_v 0.1391 bits >= MU bound 0.0442  holds=True
+    => with no direction view (b_d = 0), vol confidence |b_v| is capped at sin(phi);
+       full vol confidence (b_v = 1) forces a direction lean b_d = cos(phi)
+
+
+U2  S&P, 337 weeks (exploratory)
+    trailing spot-vol correlation rho: median -0.80  -> phi = arccos(rho) ~ 143 deg
+    outcome correlation corr(up, vol-up) = -0.30  (leverage, same week)
+    walk-forward forecasts, 233 weeks: |b_d| p95 0.29, |b_v| p95 0.61
+    weeks violating the complementarity constraint: 1%
+    implied lean vs realised direction: corr(cos(phi)*b_v, up) = -0.013;  actual forecast corr(b_d, up) = -0.040
+    log loss: direction 0.6844 vs base rate 0.6808;  vol-up 0.6274 vs base rate 0.6705
+
+U3  Christoffersen-Diebold: P(up) = Phi(mu/sigma), mu = expanding mean weekly return
+    P(up) range over evaluation weeks: 0.505 .. 0.588
+    log loss 0.6850 vs base rate 0.6808
+
+F1  static field equations m = tanh(h + J m)
+    ||J||_2 = 0.50: 1 distinct fixed point(s) from 50 starts
+    ||J||_2 = 0.95: 1 distinct fixed point(s) from 50 starts
+    ||J||_2 = 1.50: 2 distinct fixed point(s) from 50 starts
+    ||J||_2 = 3.00: 2 distinct fixed point(s) from 50 starts
+
+F2  dynamic field equations (mean-field Bloch) vs exact evolution, 8 qubits, t = 1
+    max|J| = 0.0: max |<Z> mean-field - exact| = 2.11e-15
+    max|J| = 0.1: max |<Z> mean-field - exact| = 8.99e-04
+    max|J| = 0.3: max |<Z> mean-field - exact| = 9.65e-03
+    max|J| = 0.6: max |<Z> mean-field - exact| = 2.35e-01

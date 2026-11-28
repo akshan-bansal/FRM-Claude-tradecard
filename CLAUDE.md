@@ -222,6 +222,18 @@ Gap-closure objectives live in `NEXT_SESSION.md` section 11.
 - `scripts/risk_guard_analysis.py` is how to judge the guards. Under a week of paper data on two venues it
   recommends nothing, and neither should you.
 
+## Quantum-state research engine (`src/trading_live_claude/quantum/`)
+
+- **Research only.** Nothing in it places, sizes or gates an order, and the Router, gates and runners never
+  import it. Wiring it into any order path needs a pre-registered test it has passed, plus the user's go-ahead.
+- **Stage 1 failed its pre-registered test** (`reports/qhft/stage1_2026-11-28/`). A 10-qubit network over
+  Bansal_Spectre (BSM_Spectral) atoms lost to the 2-atom GJR + VIX baseline.
+- **Stage 2 is built but not run** (`reports/qhft/stage2/`). Freeze `PREREGISTRATION_DRAFT.md` with `freeze.py`
+  *before* fetching data. Never tune its constants on data already seen; change it only by a dated amendment.
+- **Simulation.** The exact NumPy simulator is the reference. Qiskit is the optional `quantum` extra and only
+  cross-checks it.
+- **Field equations.** Their coupling must stay contractive (`||J||_2 < 1`), or the solution is not unique.
+
 ## Skills available in this repo
 
 `.claude/skills/`:
